@@ -1,15 +1,23 @@
 import React, {useState} from 'react';
-import {Box, render, Text, useApp, useInput} from 'ink';
+import {Box, render, Text, useApp, useInput, useWindowSize} from 'ink';
 import {advanceNpcs, createGameInstance, movePlayer, shootWeapon, type GameInstance} from './game/game-instance.js';
 
-const VIEWPORT_SIZE = 17;
 const NPC_REACTION_DELAY_MS = 500;
+const STATUS_ROWS = 6;
+const FOOTER_ROWS = 2;
 
 function App() {
   const [game, setGame] = useState<GameInstance>(createGameInstance);
   const [isFiring, setIsFiring] = useState(false);
   const [isWaitingForNpcs, setIsWaitingForNpcs] = useState(false);
   const {exit} = useApp();
+  const {columns, rows} = useWindowSize();
+  const viewportSize = getViewportSize(columns, rows);
+  const transientStatus = isFiring
+    ? 'Firing mode: choose a direction.'
+    : isWaitingForNpcs
+      ? 'Defenders are reacting…'
+      : ' ';
 
   useInput((input, key) => {
     if (input === 'q') {
@@ -54,30 +62,30 @@ function App() {
 
   return (
     <Box flexDirection="column">
-      <Text bold color="cyan">DOZD // Cargo Hold</Text>
-      <Text>Position: ({game.player.position.x}, {game.player.position.y}) / 63, 63</Text>
-      <Text>Health: {game.player.health}</Text>
-      <Text>Weapon: {game.player.weapon.name} ({game.player.weapon.damage} damage)</Text>
-      <Text>Inventory: {game.player.inventory.loots.length} loot</Text>
-      <Text color="yellow">{game.lastEvent}</Text>
-      {isFiring && <Text color="red">Firing mode: choose a direction.</Text>}
-      {isWaitingForNpcs && <Text color="magenta">Defenders are reacting…</Text>}
-      <Text> </Text>
-      {makeViewport(game).map((row, index) => <Text key={index}>{row}</Text>)}
-      <Text> </Text>
-      <Text dimColor>Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
-      <Text dimColor>P = player · N = armed defender · L = loot · # = bulkhead</Text>
+      <Box flexDirection="column" height={STATUS_ROWS} width={columns}>
+        <Text bold color="cyan" wrap="truncate-end">DOZD // Cargo Hold</Text>
+        <Text wrap="truncate-end">Position: ({game.player.position.x}, {game.player.position.y}) / 63, 63 · Health: {game.player.health}</Text>
+        <Text wrap="truncate-end">Weapon: {game.player.weapon.name} ({game.player.weapon.damage} damage) · Inventory: {game.player.inventory.loots.length} loot</Text>
+        <Text color="yellow" wrap="truncate-end">{game.lastEvent}</Text>
+        <Text color={isFiring ? 'red' : 'magenta'} wrap="truncate-end">{transientStatus}</Text>
+        <Text> </Text>
+      </Box>
+      {makeViewport(game, viewportSize).map((row, index) => <Text key={index}>{row}</Text>)}
+      <Box flexDirection="column" height={FOOTER_ROWS} width={columns}>
+        <Text dimColor wrap="truncate-end">Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
+        <Text dimColor wrap="truncate-end">P = player · N = armed defender · L = loot · # = bulkhead</Text>
+      </Box>
     </Box>
   );
 }
 
-function makeViewport(game: GameInstance): string[] {
-  const halfSize = Math.floor(VIEWPORT_SIZE / 2);
-  const originX = clamp(game.player.position.x - halfSize, 0, game.cargoSpace.width - VIEWPORT_SIZE);
-  const originY = clamp(game.player.position.y - halfSize, 0, game.cargoSpace.height - VIEWPORT_SIZE);
+function makeViewport(game: GameInstance, viewportSize: number): string[] {
+  const halfSize = Math.floor(viewportSize / 2);
+  const originX = clamp(game.player.position.x - halfSize, 0, game.cargoSpace.width - viewportSize);
+  const originY = clamp(game.player.position.y - halfSize, 0, game.cargoSpace.height - viewportSize);
 
-  return Array.from({length: VIEWPORT_SIZE}, (_, row) =>
-    Array.from({length: VIEWPORT_SIZE}, (_, column) => {
+  return Array.from({length: viewportSize}, (_, row) =>
+    Array.from({length: viewportSize}, (_, column) => {
       const x = originX + column;
       const y = originY + row;
       if (game.player.position.x === x && game.player.position.y === y) return 'P';
@@ -87,6 +95,12 @@ function makeViewport(game: GameInstance): string[] {
       return '·';
     }).join(' '),
   );
+}
+
+function getViewportSize(columns: number, rows: number): number {
+  const gridRows = Math.max(1, rows - STATUS_ROWS - FOOTER_ROWS);
+  const gridColumns = Math.max(1, Math.floor((columns + 1) / 2));
+  return Math.min(64, gridRows, gridColumns);
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
