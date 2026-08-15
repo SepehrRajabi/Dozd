@@ -15,5 +15,6 @@ export interface PlacedLoot {
 export interface CargoSpace {
   width: number;
   height: number;
+  obstacles: GridPosition[];
   loots: PlacedLoot[];
 }

@@ -66,7 +66,7 @@ function App() {
       {makeViewport(game).map((row, index) => <Text key={index}>{row}</Text>)}
       <Text> </Text>
       <Text dimColor>Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
-      <Text dimColor>P = player · N = armed defender · L = loot</Text>
+      <Text dimColor>P = player · N = armed defender · L = loot · # = bulkhead</Text>
     </Box>
   );
 }
@@ -83,6 +83,7 @@ function makeViewport(game: GameInstance): string[] {
       if (game.player.position.x === x && game.player.position.y === y) return 'P';
       if (game.npcs.some((npc) => npc.isAlive && npc.position.x === x && npc.position.y === y)) return 'N';
       if (game.cargoSpace.loots.some(({position}) => position.x === x && position.y === y)) return 'L';
+      if (game.cargoSpace.obstacles.some((obstacle) => obstacle.x === x && obstacle.y === y)) return '#';
       return '·';
     }).join(' '),
   );
