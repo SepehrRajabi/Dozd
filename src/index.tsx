@@ -70,7 +70,13 @@ function App() {
         <Text color={isFiring ? 'red' : 'magenta'} wrap="truncate-end">{transientStatus}</Text>
         <Text> </Text>
       </Box>
-      {makeViewport(game, viewportSize).map((row, index) => <Text key={index}>{row}</Text>)}
+      {makeViewport(game, viewportSize).map((row, rowIndex) => (
+        <Box key={rowIndex} flexDirection="row">
+          {row.map((cell, columnIndex) => (
+            <Text key={columnIndex} color={cell.color} bold={cell.bold} dimColor={cell.dimColor}>{cell.symbol} </Text>
+          ))}
+        </Box>
+      ))}
       <Box flexDirection="column" height={FOOTER_ROWS} width={columns}>
         <Text dimColor wrap="truncate-end">Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
         <Text dimColor wrap="truncate-end">P = player · N = armed defender · L = loot · # = bulkhead</Text>
@@ -79,21 +85,28 @@ function App() {
   );
 }
 
-function makeViewport(game: GameInstance, viewportSize: number): string[] {
+interface GridCell {
+  symbol: string;
+  color?: string;
+  bold?: boolean;
+  dimColor?: boolean;
+}
+
+function makeViewport(game: GameInstance, viewportSize: number): GridCell[][] {
   const halfSize = Math.floor(viewportSize / 2);
   const originX = clamp(game.player.position.x - halfSize, 0, game.cargoSpace.width - viewportSize);
   const originY = clamp(game.player.position.y - halfSize, 0, game.cargoSpace.height - viewportSize);
 
   return Array.from({length: viewportSize}, (_, row) =>
-    Array.from({length: viewportSize}, (_, column) => {
+    Array.from({length: viewportSize}, (_, column): GridCell => {
       const x = originX + column;
       const y = originY + row;
-      if (game.player.position.x === x && game.player.position.y === y) return 'P';
-      if (game.npcs.some((npc) => npc.isAlive && npc.position.x === x && npc.position.y === y)) return 'N';
-      if (game.cargoSpace.loots.some(({position}) => position.x === x && position.y === y)) return 'L';
-      if (game.cargoSpace.obstacles.some((obstacle) => obstacle.x === x && obstacle.y === y)) return '#';
-      return '·';
-    }).join(' '),
+      if (game.player.position.x === x && game.player.position.y === y) return {symbol: 'P', color: 'cyan', bold: true};
+      if (game.npcs.some((npc) => npc.isAlive && npc.position.x === x && npc.position.y === y)) return {symbol: 'N', color: 'red', bold: true};
+      if (game.cargoSpace.loots.some(({position}) => position.x === x && position.y === y)) return {symbol: 'L', color: 'yellow', bold: true};
+      if (game.cargoSpace.obstacles.some((obstacle) => obstacle.x === x && obstacle.y === y)) return {symbol: '#', color: 'gray'};
+      return {symbol: '·', dimColor: true};
+    }),
   );
 }
 
