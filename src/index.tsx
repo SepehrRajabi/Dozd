@@ -2,7 +2,7 @@ import React, {useState} from 'react';
 import {Box, render, Text, useApp, useInput, useWindowSize} from 'ink';
 import {advanceNpcs, createGameInstance, movePlayer, shootWeapon, type GameInstance} from './game/game-instance.js';
 
-const NPC_REACTION_DELAY_MS = 500;
+const NPC_REACTION_DELAY_MS = 220;
 const STATUS_ROWS = 6;
 const FOOTER_ROWS = 2;
 
