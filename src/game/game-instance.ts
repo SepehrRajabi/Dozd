@@ -69,7 +69,7 @@ export function createGameInstance(): GameInstance {
     ],
     npcs: lootCaches.map(({loot, guardPosition}) => new Npc({
       name: `${loot.name} Keeper`,
-      health: 30,
+      health: 150,
       position: guardPosition,
       weapon: {name: 'Watchman Carbine', type: 'laser', damage: 8, weight: 4},
       guardedLootName: loot.name,

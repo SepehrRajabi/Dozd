@@ -3,7 +3,7 @@ import {Box, render, Text, useApp, useInput, useWindowSize} from 'ink';
 import {advanceNpcs, createGameInstance, movePlayer, shootWeapon, type GameInstance} from './game/game-instance.js';
 
 const NPC_REACTION_DELAY_MS = 220;
-const STATUS_ROWS = 6;
+const STATUS_ROWS = 7;
 const FOOTER_ROWS = 2;
 
 function App() {
@@ -63,9 +63,19 @@ function App() {
   return (
     <Box flexDirection="column">
       <Box flexDirection="column" height={STATUS_ROWS} width={columns}>
-        <Text bold color="cyan" wrap="truncate-end">DOZD // Cargo Hold</Text>
-        <Text wrap="truncate-end">Position: ({game.player.position.x}, {game.player.position.y}) / 63, 63 · Health: {game.player.health}</Text>
-        <Text wrap="truncate-end">Weapon: {game.player.weapon.name} ({game.player.weapon.damage} damage) · Squad: {game.teammates.filter((teammate) => teammate.isAlive).map((teammate) => teammate.name).join(', ') || 'No allies left'} · Inventory: {game.player.inventory.loots.length} loot</Text>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold color="cyan" wrap="truncate-end">DOZD // Cargo Hold</Text>
+          <Text color={isWaitingForNpcs ? 'magenta' : 'green'} wrap="truncate-end">{isWaitingForNpcs ? 'DEFENDERS REACTING' : 'READY'}</Text>
+        </Box>
+        <Box flexDirection="row">
+          <Text wrap="truncate-end">Pos: ({game.player.position.x}, {game.player.position.y})</Text>
+          <Text wrap="truncate-end"> · HP: {game.player.health}</Text>
+          <Text wrap="truncate-end"> · Weapon: {game.player.weapon.name}</Text>
+        </Box>
+        <Box flexDirection="row">
+          <Text wrap="truncate-end">Squad: {game.teammates.filter((teammate) => teammate.isAlive).map((teammate) => teammate.name).join(', ') || 'No allies left'}</Text>
+          <Text wrap="truncate-end"> · Loot: {game.player.inventory.loots.length}</Text>
+        </Box>
         <Text color="yellow" wrap="truncate-end">{game.lastEvent}</Text>
         <Text color={isFiring ? 'red' : 'magenta'} wrap="truncate-end">{transientStatus}</Text>
         <Text> </Text>
@@ -78,8 +88,8 @@ function App() {
         </Box>
       ))}
       <Box flexDirection="column" height={FOOTER_ROWS} width={columns}>
-        <Text dimColor wrap="truncate-end">Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
-        <Text dimColor wrap="truncate-end">P = player · T = teammate · N = armed defender · L = loot · # = bulkhead</Text>
+        <Text dimColor wrap="truncate-end">Move: WASD / Arrows · Fire: F + direction · Quit: Q</Text>
+        <Text dimColor wrap="truncate-end">Legend: P player · T teammate · N defender · L loot · # bulkhead</Text>
       </Box>
     </Box>
   );
