@@ -65,7 +65,7 @@ function App() {
       <Box flexDirection="column" height={STATUS_ROWS} width={columns}>
         <Text bold color="cyan" wrap="truncate-end">DOZD // Cargo Hold</Text>
         <Text wrap="truncate-end">Position: ({game.player.position.x}, {game.player.position.y}) / 63, 63 · Health: {game.player.health}</Text>
-        <Text wrap="truncate-end">Weapon: {game.player.weapon.name} ({game.player.weapon.damage} damage) · Inventory: {game.player.inventory.loots.length} loot</Text>
+        <Text wrap="truncate-end">Weapon: {game.player.weapon.name} ({game.player.weapon.damage} damage) · Squad: {game.teammates.filter((teammate) => teammate.isAlive).map((teammate) => teammate.name).join(', ') || 'No allies left'} · Inventory: {game.player.inventory.loots.length} loot</Text>
         <Text color="yellow" wrap="truncate-end">{game.lastEvent}</Text>
         <Text color={isFiring ? 'red' : 'magenta'} wrap="truncate-end">{transientStatus}</Text>
         <Text> </Text>
@@ -79,7 +79,7 @@ function App() {
       ))}
       <Box flexDirection="column" height={FOOTER_ROWS} width={columns}>
         <Text dimColor wrap="truncate-end">Move: arrow keys or WASD · Fire: F, then direction · Q = quit</Text>
-        <Text dimColor wrap="truncate-end">P = player · N = armed defender · L = loot · # = bulkhead</Text>
+        <Text dimColor wrap="truncate-end">P = player · T = teammate · N = armed defender · L = loot · # = bulkhead</Text>
       </Box>
     </Box>
   );
@@ -102,6 +102,7 @@ function makeViewport(game: GameInstance, viewportSize: number): GridCell[][] {
       const x = originX + column;
       const y = originY + row;
       if (game.player.position.x === x && game.player.position.y === y) return {symbol: 'P', color: 'cyan', bold: true};
+      if (game.teammates.some((teammate) => teammate.isAlive && teammate.position.x === x && teammate.position.y === y)) return {symbol: 'T', color: 'green', bold: true};
       if (game.npcs.some((npc) => npc.isAlive && npc.position.x === x && npc.position.y === y)) return {symbol: 'N', color: 'red', bold: true};
       if (game.cargoSpace.loots.some(({position}) => position.x === x && position.y === y)) return {symbol: 'L', color: 'yellow', bold: true};
       if (game.cargoSpace.obstacles.some((obstacle) => obstacle.x === x && obstacle.y === y)) return {symbol: '#', color: 'gray'};

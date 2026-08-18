@@ -1,9 +1,10 @@
-import {Npc, type CargoSpace, type GridPosition, type Loot, type Player, type Weapon} from '../models/index.js';
+import {Npc, Teammate, type CargoSpace, type GridPosition, type Loot, type Player, type Weapon} from '../models/index.js';
 import {findPath} from './pathfinding.js';
 
 export interface GameInstance {
   cargoSpace: CargoSpace;
   player: Player;
+  teammates: Teammate[];
   npcs: Npc[];
   lastEvent: string;
 }
@@ -12,9 +13,17 @@ const CARGO_SIZE = 64;
 const ATTACK_DISTANCE = 1;
 const GUARD_DETECTION_DISTANCE = 10;
 const PLAYER_WEAPON_RANGE = 6;
+const TEAM_FORMATION: GridPosition[] = [
+  {x: -2, y: 0},
+  {x: 2, y: 0},
+  {x: 0, y: -2},
+];
+const TEAM_MIN_DISTANCE = 2;
+const TEAM_MAX_DISTANCE = 5;
 
 export function createGameInstance(): GameInstance {
   const starterWeapon: Weapon = {name: 'Rustbite Pistol', type: 'plasma', damage: 12, weight: 2};
+  const playerPosition: GridPosition = {x: 2, y: 2};
   const lootCaches: Array<{loot: Loot; position: GridPosition; guardPosition: GridPosition}> = [
     {loot: {name: 'Neural Core', reward: 1_200}, position: {x: 0, y: 0}, guardPosition: {x: 1, y: 0}},
     {loot: {name: 'Engine Cache', reward: 800}, position: {x: 12, y: 8}, guardPosition: {x: 12, y: 9}},
@@ -50,9 +59,14 @@ export function createGameInstance(): GameInstance {
       inventory: {width: 8, height: 8, obstacles: [], loots: []},
       agility: 5,
       stamina: 10,
-      position: {x: 2, y: 2},
+      position: playerPosition,
       weapon: starterWeapon,
     },
+    teammates: [
+      new Teammate({name: 'Nova', health: 75, position: {x: playerPosition.x - 2, y: playerPosition.y}, weapon: {name: 'Aegis SMG', type: 'plasma', damage: 9, weight: 3}}),
+      new Teammate({name: 'Kite', health: 70, position: {x: playerPosition.x + 2, y: playerPosition.y}, weapon: {name: 'Flux Rifle', type: 'laser', damage: 10, weight: 5}}),
+      new Teammate({name: 'Rook', health: 80, position: {x: playerPosition.x, y: playerPosition.y - 2}, weapon: {name: 'Shard Cannon', type: 'kinetic', damage: 11, weight: 6}}),
+    ],
     npcs: lootCaches.map(({loot, guardPosition}) => new Npc({
       name: `${loot.name} Keeper`,
       health: 30,
@@ -60,7 +74,7 @@ export function createGameInstance(): GameInstance {
       weapon: {name: 'Watchman Carbine', type: 'laser', damage: 8, weight: 4},
       guardedLootName: loot.name,
     })),
-    lastEvent: `${lootCaches.length} guarded loot caches are scattered through the cargo hold.`,
+    lastEvent: `${lootCaches.length} guarded loot caches are scattered through the cargo hold. ${'Nova, Kite, and Rook are with you.'}`,
   };
 }
 
@@ -75,18 +89,22 @@ export function movePlayer(game: GameInstance, movement: GridPosition): GameInst
   if (game.cargoSpace.obstacles.some((obstacle) => samePosition(obstacle, position))) {
     return {...game, lastEvent: 'A cargo bulkhead blocks your path.'};
   }
+  const teammate = game.teammates.find((ally) => ally.isAlive && samePosition(ally.position, position));
+  if (teammate) return {...game, lastEvent: `${teammate.name} is in the way.`};
   const defender = game.npcs.find((npc) => npc.isAlive && samePosition(npc.position, position));
   if (defender) return {...game, lastEvent: `${defender.name} blocks your path.`};
 
   const capturedLoot = cargoSpace.loots.find(({position: lootPosition}) => samePosition(lootPosition, position));
+  const teammates = syncTeammates(game.teammates, position, cargoSpace);
   if (!capturedLoot) {
-    return {...game, player: {...player, position}, lastEvent: `Moved to (${position.x}, ${position.y}).`};
+    return {...game, player: {...player, position}, teammates, lastEvent: `Moved to (${position.x}, ${position.y}).`};
   }
 
   return {
     ...game,
     cargoSpace: {...cargoSpace, loots: cargoSpace.loots.filter(({loot}) => loot !== capturedLoot.loot)},
     player: {...player, position, inventory: {...player.inventory, loots: [...player.inventory.loots, capturedLoot]}},
+    teammates,
     lastEvent: `Captured ${capturedLoot.loot.name} (+${capturedLoot.loot.reward} credits).`,
   };
 }
@@ -112,6 +130,7 @@ export function advanceNpcs(game: GameInstance): GameInstance {
   if (game.player.health <= 0) return game;
   let npcs = game.npcs;
   let player = game.player;
+  let teammates = game.teammates;
   const events: string[] = [];
 
   for (const [index, npc] of npcs.entries()) {
@@ -143,7 +162,89 @@ export function advanceNpcs(game: GameInstance): GameInstance {
     }
   }
 
-  return events.length === 0 ? game : {...game, npcs, player, lastEvent: `${game.lastEvent} ${events.join(' ')}`};
+  for (const [index, teammate] of teammates.entries()) {
+    if (!teammate.isAlive || player.health <= 0) continue;
+
+    const target = npcs
+      .filter((npc) => npc.isAlive)
+      .sort((first, second) => distance(teammate.position, first.position) - distance(teammate.position, second.position))[0];
+
+    if (!target || distance(teammate.position, target.position) > 5) continue;
+
+    const damagedTarget = target.takeDamage(teammate.weapon.damage);
+    npcs = npcs.map((npc) => (npc === target ? damagedTarget : npc));
+    teammates = teammates.map((ally, allyIndex) => allyIndex === index ? teammate : ally);
+    events.push(`${teammate.name} fires on ${target.name} for ${teammate.weapon.damage} damage.`);
+  }
+
+  return events.length === 0 ? game : {...game, npcs, teammates, player, lastEvent: `${game.lastEvent} ${events.join(' ')}`};
+}
+
+function syncTeammates(teammates: Teammate[], playerPosition: GridPosition, cargoSpace: CargoSpace): Teammate[] {
+  const occupied = new Set<string>([
+    ...cargoSpace.obstacles.map(({x, y}) => `${x},${y}`),
+    ...cargoSpace.loots.map(({position}) => `${position.x},${position.y}`),
+    ...teammates.filter((teammate) => teammate.isAlive).map(({position}) => `${position.x},${position.y}`),
+  ]);
+
+  return teammates.map((teammate, index) => {
+    const currentDistance = distance(teammate.position, playerPosition);
+    const isInFormation = currentDistance >= TEAM_MIN_DISTANCE && currentDistance <= TEAM_MAX_DISTANCE;
+    if (isInFormation && !samePosition(teammate.position, playerPosition)) {
+      return teammate;
+    }
+
+    const offset = TEAM_FORMATION[index % TEAM_FORMATION.length];
+    const preferredPosition = {
+      x: clamp(playerPosition.x + offset.x, 0, cargoSpace.width - 1),
+      y: clamp(playerPosition.y + offset.y, 0, cargoSpace.height - 1),
+    };
+
+    const candidate = findOpenFormationPosition(preferredPosition, playerPosition, occupied, cargoSpace, TEAM_MIN_DISTANCE, TEAM_MAX_DISTANCE);
+    occupied.delete(`${teammate.position.x},${teammate.position.y}`);
+    occupied.add(`${candidate.x},${candidate.y}`);
+
+    return teammate.moveTo(candidate);
+  });
+}
+
+function findOpenFormationPosition(
+  preferredPosition: GridPosition,
+  playerPosition: GridPosition,
+  occupied: Set<string>,
+  cargoSpace: CargoSpace,
+  minRadius: number,
+  maxRadius: number,
+): GridPosition {
+  const searchOffsets: GridPosition[] = [
+    {x: 0, y: -1},
+    {x: 1, y: 0},
+    {x: 0, y: 1},
+    {x: -1, y: 0},
+    {x: 1, y: -1},
+    {x: -1, y: -1},
+    {x: 1, y: 1},
+    {x: -1, y: 1},
+  ];
+
+  if (!occupied.has(`${preferredPosition.x},${preferredPosition.y}`) && !samePosition(preferredPosition, playerPosition)) {
+    return preferredPosition;
+  }
+
+  for (let radius = minRadius; radius <= maxRadius; radius++) {
+    for (const offset of searchOffsets) {
+      const candidate = {
+        x: clamp(playerPosition.x + offset.x * radius, 0, cargoSpace.width - 1),
+        y: clamp(playerPosition.y + offset.y * radius, 0, cargoSpace.height - 1),
+      };
+
+      if (!occupied.has(`${candidate.x},${candidate.y}`) && !samePosition(candidate, playerPosition)) {
+        return candidate;
+      }
+    }
+  }
+
+  return preferredPosition;
 }
 
 function nearestTarget(origin: GridPosition, direction: GridPosition, npcs: Npc[]): Npc | undefined {
