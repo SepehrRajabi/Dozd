@@ -1,15 +1,26 @@
-import React, {useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {Box, render, Text, useApp, useInput, useWindowSize} from 'ink';
-import {advanceNpcs, createGameInstance, movePlayer, shootWeapon, type GameInstance} from './game/game-instance.js';
+import {advanceNpcs, createGameInstance, getShotDistance, movePlayer, shootWeapon, type GameInstance} from './game/game-instance.js';
+import type {GridPosition} from './models/index.js';
 
 const NPC_REACTION_DELAY_MS = 220;
 const STATUS_ROWS = 7;
 const FOOTER_ROWS = 2;
+const PROJECTILE_STEP_MS = 35;
+const PROJECTILE_TAIL_LENGTH = 3;
+
+interface Projectile {
+  origin: GridPosition;
+  direction: GridPosition;
+  maxDistance: number;
+  headDistance: number;
+}
 
 function App() {
   const [game, setGame] = useState<GameInstance>(createGameInstance);
   const [isFiring, setIsFiring] = useState(false);
   const [isWaitingForNpcs, setIsWaitingForNpcs] = useState(false);
+  const [projectile, setProjectile] = useState<Projectile | null>(null);
   const {exit} = useApp();
   const {columns, rows} = useWindowSize();
   const viewportSize = getViewportSize(columns, rows);
@@ -43,12 +54,35 @@ function App() {
             : undefined;
 
     if (movement) {
-      const nextGame = isFiring ? shootWeapon(game, movement) : movePlayer(game, movement);
-      setGame(nextGame);
-      setIsFiring(false);
-      scheduleNpcTurn(nextGame);
+      if (isFiring) {
+        const shotDistance = getShotDistance(game, movement);
+        const nextGame = shootWeapon(game, movement);
+        setGame(nextGame);
+        setProjectile({origin: game.player.position, direction: movement, maxDistance: Math.max(1, shotDistance), headDistance: 1});
+        setIsFiring(false);
+        scheduleNpcTurn(nextGame);
+      } else {
+        const nextGame = movePlayer(game, movement);
+        setGame(nextGame);
+        scheduleNpcTurn(nextGame);
+      }
     }
   });
+
+  useEffect(() => {
+    if (!projectile) return;
+
+    const timer = setTimeout(() => {
+      const nextHeadDistance = projectile.headDistance + 1;
+      if (nextHeadDistance - PROJECTILE_TAIL_LENGTH > projectile.maxDistance) {
+        setProjectile(null);
+      } else {
+        setProjectile({...projectile, headDistance: nextHeadDistance});
+      }
+    }, PROJECTILE_STEP_MS);
+
+    return () => clearTimeout(timer);
+  }, [projectile]);
 
   function scheduleNpcTurn(nextGame: GameInstance): void {
     if (!nextGame.npcs.some((npc) => npc.isAlive) || nextGame.player.health <= 0) return;
@@ -80,7 +114,7 @@ function App() {
         <Text color={isFiring ? 'red' : 'magenta'} wrap="truncate-end">{transientStatus}</Text>
         <Text> </Text>
       </Box>
-      {makeViewport(game, viewportSize).map((row, rowIndex) => (
+      {makeViewport(game, viewportSize, projectile).map((row, rowIndex) => (
         <Box key={rowIndex} flexDirection="row">
           {row.map((cell, columnIndex) => (
             <Text key={columnIndex} color={cell.color} bold={cell.bold} dimColor={cell.dimColor}>{cell.symbol} </Text>
@@ -102,10 +136,11 @@ interface GridCell {
   dimColor?: boolean;
 }
 
-function makeViewport(game: GameInstance, viewportSize: number): GridCell[][] {
+function makeViewport(game: GameInstance, viewportSize: number, projectile: Projectile | null): GridCell[][] {
   const halfSize = Math.floor(viewportSize / 2);
   const originX = clamp(game.player.position.x - halfSize, 0, game.cargoSpace.width - viewportSize);
   const originY = clamp(game.player.position.y - halfSize, 0, game.cargoSpace.height - viewportSize);
+  const projectileCells = projectile ? buildProjectileCells(projectile) : null;
 
   return Array.from({length: viewportSize}, (_, row) =>
     Array.from({length: viewportSize}, (_, column): GridCell => {
@@ -116,9 +151,32 @@ function makeViewport(game: GameInstance, viewportSize: number): GridCell[][] {
       if (game.npcs.some((npc) => npc.isAlive && npc.position.x === x && npc.position.y === y)) return {symbol: 'N', color: 'red', bold: true};
       if (game.cargoSpace.loots.some(({position}) => position.x === x && position.y === y)) return {symbol: 'L', color: 'yellow', bold: true};
       if (game.cargoSpace.obstacles.some((obstacle) => obstacle.x === x && obstacle.y === y)) return {symbol: '#', color: 'gray'};
+      const projectileCell = projectileCells?.get(`${x},${y}`);
+      if (projectileCell) return projectileCell;
       return {symbol: '·', dimColor: true};
     }),
   );
+}
+
+function buildProjectileCells(projectile: Projectile): Map<string, GridCell> {
+  const cells = new Map<string, GridCell>();
+  const tailStart = Math.max(1, projectile.headDistance - PROJECTILE_TAIL_LENGTH + 1);
+
+  for (let step = tailStart; step <= projectile.headDistance; step++) {
+    if (step < 1 || step > projectile.maxDistance) continue;
+    const x = projectile.origin.x + projectile.direction.x * step;
+    const y = projectile.origin.y + projectile.direction.y * step;
+    const distanceFromHead = projectile.headDistance - step;
+    cells.set(`${x},${y}`, projectileTailCell(distanceFromHead));
+  }
+
+  return cells;
+}
+
+function projectileTailCell(distanceFromHead: number): GridCell {
+  if (distanceFromHead <= 0) return {symbol: '•', color: 'white', bold: true};
+  if (distanceFromHead === 1) return {symbol: '•', color: 'yellow'};
+  return {symbol: '·', color: 'yellow', dimColor: true};
 }
 
 function getViewportSize(columns: number, rows: number): number {

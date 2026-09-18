@@ -125,6 +125,12 @@ export function shootWeapon(game: GameInstance, direction: GridPosition): GameIn
   return {...game, npcs, lastEvent: shotEvent};
 }
 
+/** Distance a shot in the given direction travels before it hits a defender or reaches max range. */
+export function getShotDistance(game: GameInstance, direction: GridPosition): number {
+  const target = nearestTarget(game.player.position, direction, game.npcs);
+  return target ? distance(game.player.position, target.position) : PLAYER_WEAPON_RANGE;
+}
+
 /** Resolves one movement-and-attack turn for every living defender. */
 export function advanceNpcs(game: GameInstance): GameInstance {
   if (game.player.health <= 0) return game;
