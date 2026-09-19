@@ -131,13 +131,25 @@ export function getShotDistance(game: GameInstance, direction: GridPosition): nu
   return target ? distance(game.player.position, target.position) : PLAYER_WEAPON_RANGE;
 }
 
+export interface ShotEvent {
+  origin: GridPosition;
+  target: GridPosition;
+  source: 'npc' | 'teammate';
+}
+
+export interface NpcTurnResult {
+  game: GameInstance;
+  shots: ShotEvent[];
+}
+
 /** Resolves one movement-and-attack turn for every living defender. */
-export function advanceNpcs(game: GameInstance): GameInstance {
-  if (game.player.health <= 0) return game;
+export function advanceNpcs(game: GameInstance): NpcTurnResult {
+  if (game.player.health <= 0) return {game, shots: []};
   let npcs = game.npcs;
   let player = game.player;
   let teammates = game.teammates;
   const events: string[] = [];
+  const shots: ShotEvent[] = [];
 
   for (const [index, npc] of npcs.entries()) {
     if (!npc.isAlive || player.health <= 0) continue;
@@ -165,6 +177,7 @@ export function advanceNpcs(game: GameInstance): GameInstance {
       player = {...player, health};
       const outcome = health === 0 ? ' You are incapacitated.' : ` (${health} health left).`;
       events.push(`${updatedNpc.name} hits you for ${updatedNpc.weapon.damage} damage${outcome}`);
+      shots.push({origin: updatedNpc.position, target: player.position, source: 'npc'});
     }
   }
 
@@ -181,9 +194,11 @@ export function advanceNpcs(game: GameInstance): GameInstance {
     npcs = npcs.map((npc) => (npc === target ? damagedTarget : npc));
     teammates = teammates.map((ally, allyIndex) => allyIndex === index ? teammate : ally);
     events.push(`${teammate.name} fires on ${target.name} for ${teammate.weapon.damage} damage.`);
+    shots.push({origin: teammate.position, target: target.position, source: 'teammate'});
   }
 
-  return events.length === 0 ? game : {...game, npcs, teammates, player, lastEvent: `${game.lastEvent} ${events.join(' ')}`};
+  const nextGame = events.length === 0 ? game : {...game, npcs, teammates, player, lastEvent: `${game.lastEvent} ${events.join(' ')}`};
+  return {game: nextGame, shots};
 }
 
 function syncTeammates(teammates: Teammate[], playerPosition: GridPosition, cargoSpace: CargoSpace): Teammate[] {
