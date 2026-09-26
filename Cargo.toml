@@ -1,0 +1,26 @@
+[package]
+name = "dozd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.19.1", features = ["serialize"] }
+bevy_replicon = "0.44"
+bevy_replicon_renet = "0.20"
+serde = { version = "1.0.229", features = ["derive"] }
+
+# Optimize dependencies in dev builds; keep our own crate fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Bevy systems routinely take many params and filtered queries.
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+# Smaller single-file binary to share (drops debug symbols).
+[profile.release]
+strip = true

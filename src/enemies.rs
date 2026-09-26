@@ -1,0 +1,492 @@
+use bevy::prelude::*;
+use bevy_replicon::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
+use crate::mission::Alarm;
+use crate::net::authority;
+use crate::player::{PirateStatus, Player};
+use crate::room::{FlowField, RoomGrid};
+use crate::{GameState, Level, Rng};
+
+/// How far a gunshot carries.
+const HEARING: f32 = 150.0;
+/// An alerted enemy wakes idle ones within this radius.
+const ALERT_SHARE: f32 = 90.0;
+const SEPARATION: f32 = 12.0;
+
+pub struct EnemiesPlugin;
+
+impl Plugin for EnemiesPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(dress_enemy).add_systems(
+            Update,
+            (
+                (think, move_enemies, enemy_deaths)
+                    .chain()
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(authority),
+                (enemy_visuals, update_health_bars),
+            ),
+        );
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EnemyKind {
+    /// Hovers at mid range, strafes, fires 3-round bursts.
+    SentryDrone,
+    /// Fast melee alien: winds up, then lunges.
+    Stalker,
+    /// Slow armoured tank that fires wide spreads.
+    Warden,
+}
+
+struct EnemyStats {
+    sprite: &'static str,
+    health: f32,
+    speed: f32,
+    hurtbox: f32,
+    /// Collision half-extent against walls.
+    half: f32,
+    sight: f32,
+    /// Fraction of incoming knockback actually applied.
+    knockback_taken: f32,
+    death_color: Color,
+}
+
+const SENTRY_DRONE: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/sentry_drone.png",
+    health: 35.0,
+    speed: 55.0,
+    hurtbox: 6.0,
+    half: 4.0,
+    sight: 120.0,
+    knockback_taken: 1.0,
+    death_color: Color::srgb(1.0, 0.35, 0.3),
+};
+
+const STALKER: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/stalker.png",
+    health: 70.0,
+    speed: 62.0,
+    hurtbox: 6.5,
+    half: 4.0,
+    sight: 100.0,
+    knockback_taken: 0.6,
+    death_color: Color::srgb(0.55, 1.0, 0.5),
+};
+
+const WARDEN: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/warden.png",
+    health: 200.0,
+    speed: 26.0,
+    hurtbox: 7.5,
+    half: 5.0,
+    sight: 130.0,
+    knockback_taken: 0.1,
+    death_color: Color::srgb(1.0, 0.7, 0.3),
+};
+
+impl EnemyKind {
+    pub fn from_char(c: char) -> Option<Self> {
+        Some(match c {
+            'd' => Self::SentryDrone,
+            's' => Self::Stalker,
+            'h' => Self::Warden,
+            _ => return None,
+        })
+    }
+
+    fn stats(self) -> &'static EnemyStats {
+        match self {
+            Self::SentryDrone => &SENTRY_DRONE,
+            Self::Stalker => &STALKER,
+            Self::Warden => &WARDEN,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AiState {
+    /// Unaware; loiters near its post.
+    Idle,
+    Hunt,
+    /// Visible wind-up before an attack, so the player can react.
+    Telegraph,
+    Lunge,
+    /// Vulnerable pause after a lunge.
+    Recover,
+}
+
+/// What clients need to draw an enemy. The host keeps it in sync with the brain.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EnemyLook {
+    pub kind: EnemyKind,
+    pub state: AiState,
+}
+
+/// Host-only AI state.
+#[derive(Component)]
+pub struct Enemy {
+    kind: EnemyKind,
+    state: AiState,
+    home: Vec2,
+    /// Counts down the current state (telegraph, lunge, recover) or burst spacing.
+    timer: f32,
+    attack_cooldown: f32,
+    burst_left: u32,
+    lunge_dir: Vec2,
+    lunge_hit: bool,
+    strafe_sign: f32,
+    wander: Option<Vec2>,
+    velocity: Vec2,
+}
+
+#[derive(Component)]
+struct HealthBar {
+    fill: bool,
+}
+
+pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool) {
+    let stats = kind.stats();
+    let state = if alerted { AiState::Hunt } else { AiState::Idle };
+    commands.spawn((
+        Level,
+        Replicated,
+        EnemyLook { kind, state },
+        Enemy {
+            kind,
+            state,
+            home: pos,
+            timer: 0.0,
+            attack_cooldown: 1.0,
+            burst_left: 0,
+            lunge_dir: Vec2::ZERO,
+            lunge_hit: false,
+            strafe_sign: if (pos.x as i32) % 2 == 0 { 1.0 } else { -1.0 },
+            wander: None,
+            velocity: Vec2::ZERO,
+        },
+        Team::Enemy,
+        Health::new(stats.health, 0.0),
+        Hurtbox(stats.hurtbox),
+        Knockback::default(),
+        Transform::from_translation(pos.extend(8.0)),
+    ));
+}
+
+fn dress_enemy(add: On<Add, EnemyLook>, mut commands: Commands, assets: Res<AssetServer>, looks: Query<&EnemyLook>) {
+    let Ok(look) = looks.get(add.entity) else { return };
+    commands
+        .entity(add.entity)
+        .insert(Sprite::from_image(assets.load(look.kind.stats().sprite)))
+        .with_children(|parent| {
+            parent.spawn((
+                Sprite::from_image(assets.load("sprites/shadow.png")),
+                Transform::from_xyz(0.0, 0.0, -0.1),
+            ));
+            parent.spawn((
+                HealthBar { fill: false },
+                Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.75), Vec2::new(14.0, 3.0)),
+                Transform::from_xyz(0.0, 11.0, 1.0),
+                Visibility::Hidden,
+            ));
+            parent.spawn((
+                HealthBar { fill: true },
+                Sprite::from_color(Color::srgb(1.0, 0.3, 0.3), Vec2::new(12.0, 1.0)),
+                Transform::from_xyz(0.0, 11.0, 1.1),
+                Visibility::Hidden,
+            ));
+        });
+}
+
+fn enemy_shot(commands: &mut Commands, pos: Vec2, angle: f32, speed: f32, damage: f32, look: ProjectileLook, color: Color) {
+    spawn_projectile(
+        commands,
+        Projectile {
+            team: Team::Enemy,
+            velocity: Vec2::from_angle(angle) * speed,
+            remaining: 260.0,
+            damage,
+            knockback: 0.0,
+            pierce: false,
+            color,
+            hits: Vec::new(),
+        },
+        look,
+        pos,
+    );
+}
+
+fn think(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    field: Res<FlowField>,
+    mut alarm: ResMut<Alarm>,
+    mut noise: ResMut<Noise>,
+    mut rng: ResMut<Rng>,
+    mut players: Query<(Entity, &Transform, &mut Health, &Player), Without<Enemy>>,
+    mut enemies: Query<(&mut Enemy, &Transform, &Health)>,
+) {
+    let dt = time.delta_secs();
+    let targets: Vec<(Entity, Vec2)> = players
+        .iter()
+        .filter(|(_, _, health, player)| !health.is_dead() && player.status == PirateStatus::Active)
+        .map(|(e, t, _, _)| (e, t.translation.truncate()))
+        .collect();
+    let heard = std::mem::take(&mut noise.0);
+
+    // Waking up: sight, gunfire, getting shot, or a station-wide lockdown.
+    let mut woken = Vec::new();
+    for (mut enemy, transform, health) in &mut enemies {
+        if enemy.state != AiState::Idle {
+            continue;
+        }
+        let pos = transform.translation.truncate();
+        let sight = enemy.kind.stats().sight;
+        let sees = targets
+            .iter()
+            .any(|(_, t)| pos.distance(*t) < sight && grid.line_of_sight(pos, *t));
+        let hears = heard.iter().any(|n| n.distance(pos) < HEARING);
+        if sees || hears || health.current < health.max || alarm.lockdown() {
+            enemy.state = AiState::Hunt;
+            woken.push(pos);
+            if sees {
+                alarm.alert();
+            }
+        }
+    }
+    if !woken.is_empty() {
+        for (mut enemy, transform, _) in &mut enemies {
+            let pos = transform.translation.truncate();
+            if enemy.state == AiState::Idle && woken.iter().any(|w| w.distance(pos) < ALERT_SHARE) {
+                enemy.state = AiState::Hunt;
+            }
+        }
+    }
+
+    for (mut enemy, transform, _) in &mut enemies {
+        let stats = enemy.kind.stats();
+        let pos = transform.translation.truncate();
+        enemy.timer -= dt;
+        enemy.attack_cooldown -= dt;
+
+        let Some(&(target_entity, target)) = targets
+            .iter()
+            .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
+        else {
+            // Nobody left to hunt.
+            enemy.velocity = Vec2::ZERO;
+            continue;
+        };
+        let to_target = target - pos;
+        let dist = to_target.length();
+        let dir = to_target.normalize_or(Vec2::X);
+        let los = grid.line_of_sight(pos, target);
+        let chase = if los { dir } else { field.step(&grid, pos).unwrap_or(Vec2::ZERO) };
+
+        match (enemy.kind, enemy.state) {
+            (_, AiState::Idle) => {
+                if enemy.timer <= 0.0 {
+                    let spot = enemy.home + Vec2::new(rng.signed(), rng.signed()) * 20.0;
+                    enemy.wander = (!grid.is_solid_at(spot)).then_some(spot);
+                    enemy.timer = 1.5 + rng.unit() * 2.0;
+                }
+                enemy.velocity = match enemy.wander {
+                    Some(spot) if spot.distance(pos) > 2.0 => (spot - pos).normalize() * stats.speed * 0.3,
+                    _ => Vec2::ZERO,
+                };
+            }
+
+            (EnemyKind::SentryDrone, AiState::Hunt) => {
+                if rng.unit() < dt * 0.5 {
+                    enemy.strafe_sign = -enemy.strafe_sign;
+                }
+                enemy.velocity = if !los || dist > 120.0 {
+                    chase * stats.speed
+                } else if dist < 60.0 {
+                    -dir * stats.speed
+                } else {
+                    let strafe = dir.perp() * enemy.strafe_sign;
+                    (strafe + dir * (dist - 90.0) / 60.0).normalize_or_zero() * stats.speed * 0.7
+                };
+
+                if enemy.burst_left > 0 && enemy.timer <= 0.0 {
+                    let angle = dir.to_angle() + rng.signed() * 0.08;
+                    let color = Color::srgb(1.0, 0.3, 0.25);
+                    enemy_shot(&mut commands, pos + dir * 6.0, angle, 150.0, 8.0, ProjectileLook::EnemyBolt, color);
+                    enemy.burst_left -= 1;
+                    enemy.timer = 0.1;
+                } else if enemy.burst_left == 0 && enemy.attack_cooldown <= 0.0 && los && dist < 150.0 {
+                    enemy.state = AiState::Telegraph;
+                    enemy.timer = 0.35;
+                }
+            }
+            (EnemyKind::SentryDrone, AiState::Telegraph) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    enemy.state = AiState::Hunt;
+                    enemy.burst_left = 3;
+                    enemy.attack_cooldown = 1.7 + rng.unit() * 0.6;
+                }
+            }
+
+            (EnemyKind::Stalker, AiState::Hunt) => {
+                enemy.velocity = chase * stats.speed;
+                if los && dist < 44.0 && enemy.attack_cooldown <= 0.0 {
+                    enemy.state = AiState::Telegraph;
+                    enemy.timer = 0.45;
+                    // Committed at wind-up start, so sidestepping dodges it.
+                    enemy.lunge_dir = dir;
+                }
+            }
+            (EnemyKind::Stalker, AiState::Telegraph) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    enemy.state = AiState::Lunge;
+                    enemy.timer = 0.22;
+                    enemy.lunge_hit = false;
+                }
+            }
+            (EnemyKind::Stalker, AiState::Lunge) => {
+                enemy.velocity = enemy.lunge_dir * 240.0;
+                if !enemy.lunge_hit && dist < 11.0 {
+                    let hit = players
+                        .get_mut(target_entity)
+                        .is_ok_and(|(_, _, mut health, _)| health.hurt(25.0));
+                    enemy.lunge_hit = hit;
+                }
+                if enemy.timer <= 0.0 {
+                    enemy.state = AiState::Recover;
+                    enemy.timer = 0.6;
+                }
+            }
+            (EnemyKind::Stalker, AiState::Recover) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    enemy.state = AiState::Hunt;
+                    enemy.attack_cooldown = 0.3;
+                }
+            }
+
+            (EnemyKind::Warden, AiState::Hunt) => {
+                enemy.velocity = if los && dist < 80.0 { Vec2::ZERO } else { chase * stats.speed };
+                if los && dist < 160.0 && enemy.attack_cooldown <= 0.0 {
+                    enemy.state = AiState::Telegraph;
+                    enemy.timer = 0.55;
+                }
+            }
+            (EnemyKind::Warden, AiState::Telegraph) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    let color = Color::srgb(1.0, 0.55, 0.2);
+                    for i in 0..5 {
+                        let angle = dir.to_angle() + (i as f32 / 4.0 - 0.5) * 0.7;
+                        enemy_shot(&mut commands, pos + dir * 8.0, angle, 115.0, 12.0, ProjectileLook::EnemyOrb, color);
+                    }
+                    enemy.state = AiState::Hunt;
+                    enemy.attack_cooldown = 2.4 + rng.unit() * 0.6;
+                }
+            }
+
+            (_, state) => {
+                // States a kind never enters (e.g. a drone lunging); recover gracefully.
+                debug_assert!(false, "{:?} has no {state:?} behaviour", enemy.kind);
+                enemy.state = AiState::Hunt;
+            }
+        }
+    }
+}
+
+fn move_enemies(
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut enemies: Query<(Entity, &Enemy, &mut EnemyLook, &mut Transform, &mut Knockback)>,
+) {
+    let dt = time.delta_secs();
+    let positions: Vec<(Entity, Vec2)> = enemies
+        .iter()
+        .map(|(e, _, _, t, _)| (e, t.translation.truncate()))
+        .collect();
+
+    for (entity, enemy, mut look, mut transform, mut knockback) in &mut enemies {
+        look.set_if_neq(EnemyLook { kind: enemy.kind, state: enemy.state });
+
+        let stats = enemy.kind.stats();
+        let pos = transform.translation.truncate();
+
+        // Keep the pack from stacking into a single sprite.
+        let push: Vec2 = positions
+            .iter()
+            .filter(|(other, _)| *other != entity)
+            .map(|(_, p)| pos - *p)
+            .filter(|d| d.length() < SEPARATION)
+            .map(|d| d.normalize_or(Vec2::X) * (SEPARATION - d.length()) * 6.0)
+            .sum();
+
+        let velocity = enemy.velocity + knockback.0 * stats.knockback_taken + push;
+        knockback.0 *= (-10.0 * dt).exp();
+        if velocity.length_squared() < 0.01 {
+            continue;
+        }
+
+        let new = grid.slide(pos, velocity * dt, Vec2::splat(stats.half));
+        transform.translation.x = new.x;
+        transform.translation.y = new.y;
+    }
+}
+
+fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut Sprite)>) {
+    let blink = (time.elapsed_secs() * 30.0).sin() > 0.0;
+    for (look, health, mut sprite) in &mut enemies {
+        sprite.color = if health.flash > 0.0 {
+            Color::srgb(1.0, 0.3, 0.3)
+        } else if look.state == AiState::Telegraph && blink {
+            Color::srgb(1.0, 0.85, 0.3)
+        } else if look.state == AiState::Recover {
+            Color::srgb(0.6, 0.6, 0.75)
+        } else {
+            Color::WHITE
+        };
+    }
+}
+
+fn update_health_bars(
+    health: Query<&Health>,
+    mut bars: Query<(&HealthBar, &ChildOf, &mut Sprite, &mut Transform, &mut Visibility)>,
+) {
+    for (bar, parent, mut sprite, mut transform, mut visibility) in &mut bars {
+        let Ok(h) = health.get(parent.parent()) else { continue };
+        let frac = (h.current / h.max).clamp(0.0, 1.0);
+        *visibility = if frac < 1.0 { Visibility::Inherited } else { Visibility::Hidden };
+        if bar.fill {
+            sprite.custom_size = Some(Vec2::new(12.0 * frac, 1.0));
+            transform.translation.x = -6.0 * (1.0 - frac);
+        }
+    }
+}
+
+fn enemy_deaths(mut commands: Commands, enemies: Query<(Entity, &Enemy, &Health, &Transform)>) {
+    for (entity, enemy, health, transform) in &enemies {
+        if health.is_dead() {
+            let color = enemy.kind.stats().death_color;
+            fx(&mut commands, FxKind::Burst, transform.translation.truncate(), 0.0, color);
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Picks a reinforcement type; heavier units become likelier as the alarm climbs.
+pub fn roll_reinforcement(rng: &mut Rng, alarm_level: f32) -> EnemyKind {
+    let r = rng.unit();
+    let warden = 0.08 * alarm_level;
+    if r < warden {
+        EnemyKind::Warden
+    } else if r < warden + 0.4 {
+        EnemyKind::Stalker
+    } else {
+        EnemyKind::SentryDrone
+    }
+}
