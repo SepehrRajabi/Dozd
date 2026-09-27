@@ -208,37 +208,43 @@ LOOT = {
 }
 
 # --------------------------------------------------------------------------
-# Player: space pirate (spacesuit, visor, red bandana, orange suit)
+# Player: pirate captain (tricorn, eye patch, cyber eye, long teal coat,
+# metal gun arm). Faces right; the game flips it to face left.
 # --------------------------------------------------------------------------
 
 PLAYER = (
     [
-        "................",
         ".....kkkkkk.....",
-        "....kRRRRRRk....",
-        "...kRRRRRRRRkR..",
-        "...kSSSSSSSSk.R.",
-        "...kSVVVVVVSk...",
-        "...kSVwVVVVSk...",
-        "...kSSSSSSSSk...",
-        "..kkOOOOOOOOkk..",
-        ".kOkOOYOOOOOkOk.",
-        ".kOkOOOOOOOOkOk.",
-        ".kgkBBBBBBBBkgk.",
-        "...kOOOkkOOOk...",
-        "...kOOk..kOOk...",
-        "...kDDk..kDDk...",
-        "...kkkk..kkkk...",
+        "....kHHwwHHk....",
+        "...kHHHwwHHHk...",
+        ".kkGGGGGGGGGGkk.",
+        "....kFFFFFFk....",
+        "....kFkFFCFk....",
+        "....kbFFFFbk....",
+        "....kbbbbbbk....",
+        "..kTTtWWWWtTTk..",
+        ".kTkTtWWWWtTkMk.",
+        ".kTkTtWGWWtTkMk.",
+        ".kfkLLLGGLLLkmk.",
+        "...kTTtkktTTk...",
+        "...kTtDkkDtTk...",
+        "....kDDkkDDk....",
+        "....kkkkkkkk....",
     ],
     {
-        "R": rgb(210, 45, 55),
-        "S": rgb(215, 220, 230),
-        "V": rgb(60, 190, 230),
-        "O": rgb(235, 120, 40),
-        "Y": rgb(255, 215, 80),
-        "B": rgb(95, 60, 35),
-        "g": rgb(120, 125, 140),
-        "D": rgb(55, 55, 70),
+        "H": rgb(50, 42, 68),
+        "G": rgb(240, 190, 70),
+        "F": rgb(232, 182, 140),
+        "C": rgb(255, 60, 70),
+        "b": rgb(125, 72, 40),
+        "T": rgb(40, 140, 140),
+        "t": rgb(25, 88, 95),
+        "W": rgb(236, 230, 214),
+        "L": rgb(95, 60, 35),
+        "M": rgb(160, 170, 185),
+        "m": rgb(105, 112, 128),
+        "f": rgb(232, 182, 140),
+        "D": rgb(58, 46, 52),
     },
 )
 
