@@ -96,6 +96,9 @@ fn guard_table(deck: u8) -> &'static [(char, u32)] {
     }
 }
 
+/// Perk pickups: restores and ammo are common, the tactical ones rarer.
+const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2)];
+
 pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
     let mut rng = Gen::new(seed, deck);
     let last = deck + 1 >= decks;
@@ -176,6 +179,19 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
         for guard in guards {
             place(&mut rng, &mut tiles, room, guard, Some(spawn));
         }
+    }
+
+    // A couple of perks per deck, never in the arrival room so they're earned.
+    let perk_count = 2 + deck.min(1) as usize;
+    for _ in 0..perk_count {
+        let room = loop {
+            let i = rng.range(0, rooms.len() - 1);
+            if i != start {
+                break rooms[i];
+            }
+        };
+        let perk = rng.pick(PERK_TABLE);
+        place(&mut rng, &mut tiles, &room, perk, None);
     }
 
     Layout { tiles, spawn }
@@ -367,6 +383,8 @@ mod tests {
                 assert_eq!(count('='), 12, "seed {seed} deck {deck}: pad");
                 assert_eq!(count('L'), if deck < 2 { 4 } else { 0 }, "seed {seed} deck {deck}: lift");
                 assert!(count('r') >= if deck == 2 { 2 } else { 0 });
+                let perks = ['1', '2', '3', '4'].into_iter().map(count).sum::<usize>();
+                assert!((1..=3).contains(&perks), "seed {seed} deck {deck}: {perks} perks");
             }
         }
     }

@@ -3,6 +3,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::net::{LocalPlayer, authority};
+use crate::perks::PerkKind;
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
@@ -18,7 +19,7 @@ impl Plugin for CombatPlugin {
             .add_systems(
                 Update,
                 (
-                    (tick_health, move_projectiles)
+                    (tick_health, move_projectiles, move_grenades)
                         .run_if(in_state(GameState::Playing))
                         .run_if(authority),
                     (fade_fx, float_popups, shake_on_local_damage),
@@ -127,6 +128,7 @@ pub enum ProjectileLook {
     RailBeam,
     EnemyBolt,
     EnemyOrb,
+    Grenade,
 }
 
 impl ProjectileLook {
@@ -138,6 +140,7 @@ impl ProjectileLook {
             Self::RailBeam => "sprites/fx/rail_purple.png",
             Self::EnemyBolt => "sprites/fx/enemy_bolt.png",
             Self::EnemyOrb => "sprites/fx/enemy_orb.png",
+            Self::Grenade => "sprites/fx/grenade.png",
         }
     }
 }
@@ -150,6 +153,35 @@ pub fn spawn_projectile(commands: &mut Commands, projectile: Projectile, look: P
         projectile,
         look,
         Transform::from_translation(pos.extend(15.0)).with_rotation(Quat::from_rotation_z(angle)),
+    ));
+}
+
+/// Host-side grenade in flight: follows an arc from `from` and explodes at `to`.
+#[derive(Component)]
+pub struct Grenade {
+    pub from: Vec2,
+    pub to: Vec2,
+    pub age: f32,
+    /// Seconds from launch to landing.
+    pub flight: f32,
+    /// Damage at the centre of the blast, halving toward the edge.
+    pub damage: f32,
+    pub radius: f32,
+    pub knockback: f32,
+    pub color: Color,
+}
+
+/// Peak height of a grenade's arc for every second of flight.
+const LOB_HEIGHT: f32 = 40.0;
+
+pub fn spawn_grenade(commands: &mut Commands, grenade: Grenade) {
+    let pos = grenade.from;
+    commands.spawn((
+        Level,
+        Replicated,
+        grenade,
+        ProjectileLook::Grenade,
+        Transform::from_translation(pos.extend(15.0)),
     ));
 }
 
@@ -176,6 +208,14 @@ pub enum FxKind {
     MuzzleFlash,
     /// Floating "+N cr" after picking up loot.
     Popup(u32),
+    /// Perk name and a burst of sparks when one is picked up.
+    Perk(PerkKind),
+    /// "+AMMO" after grabbing an ammo box.
+    Ammo,
+    /// An electric arc from `pos` to this point.
+    Zap(Vec2),
+    /// A grenade going off.
+    Explosion,
 }
 
 /// Broadcasts an effect to every machine, including this one.
@@ -246,11 +286,62 @@ fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rn
                 Transform::from_translation(fx.pos.extend(16.0)).with_rotation(Quat::from_rotation_z(fx.angle)),
             ));
         }
-        FxKind::Popup(credits) => {
+        FxKind::Zap(to) => {
+            // A jagged bolt: a few kinked segments, each a stretched 1px sprite.
+            let segments = (fx.pos.distance(to) / 7.0).ceil().max(2.0) as usize;
+            let normal = (to - fx.pos).normalize_or(Vec2::X).perp();
+            let mut points: Vec<Vec2> = (0..=segments)
+                .map(|i| fx.pos.lerp(to, i as f32 / segments as f32))
+                .collect();
+            for p in &mut points[1..segments] {
+                *p += normal * rng.signed() * 3.5;
+            }
+            for pair in points.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                commands.spawn((
+                    Level,
+                    Fade { age: 0.0, life: 0.14 },
+                    Sprite::from_color(fx.color, Vec2::new(a.distance(b) + 1.0, 1.0)),
+                    Transform::from_translation(((a + b) / 2.0).extend(17.0))
+                        .with_rotation(Quat::from_rotation_z((b - a).to_angle())),
+                ));
+            }
+            spark(&mut commands, to, 0.15);
+        }
+        FxKind::Explosion => {
+            commands.spawn((
+                Level,
+                Fade { age: 0.0, life: 0.3 },
+                Sprite {
+                    image: assets.load("sprites/fx/explosion.png"),
+                    color: fx.color,
+                    ..default()
+                },
+                Transform::from_translation(fx.pos.extend(16.5)),
+            ));
+            for _ in 0..8 {
+                let offset = Vec2::from_angle(rng.unit() * std::f32::consts::TAU) * (4.0 + rng.unit() * 18.0);
+                spark(&mut commands, fx.pos + offset, 0.2 + rng.unit() * 0.3);
+            }
+            shake.add(0.25);
+        }
+        FxKind::Popup(_) | FxKind::Perk(_) | FxKind::Ammo => {
+            let text = match fx.kind {
+                FxKind::Perk(kind) => {
+                    for i in 0..10 {
+                        let dir = Vec2::from_angle(i as f32 / 10.0 * std::f32::consts::TAU);
+                        spark(&mut commands, fx.pos + dir * (6.0 + rng.unit() * 6.0), 0.25 + rng.unit() * 0.2);
+                    }
+                    kind.name().to_string()
+                }
+                FxKind::Popup(credits) => format!("+{credits} cr"),
+                FxKind::Ammo => "+AMMO".to_string(),
+                _ => unreachable!(),
+            };
             commands.spawn((
                 Level,
                 Popup { age: 0.0 },
-                Text2d::new(format!("+{credits} cr")),
+                Text2d::new(text),
                 TextFont::from_font_size(8.0 * PIXEL_SCALE),
                 TextColor(fx.color),
                 Transform::from_translation((fx.pos + Vec2::new(0.0, 10.0)).extend(20.0))
@@ -328,6 +419,44 @@ fn move_projectiles(
         if projectile.remaining <= 0.0 {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+fn move_grenades(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut noise: ResMut<Noise>,
+    mut grenades: Query<(Entity, &mut Grenade, &mut Transform)>,
+    mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<Grenade>>,
+) {
+    for (entity, mut grenade, mut transform) in &mut grenades {
+        grenade.age += time.delta_secs();
+        let t = (grenade.age / grenade.flight).min(1.0);
+        let height = LOB_HEIGHT * grenade.flight * 4.0 * t * (1.0 - t);
+        let pos = grenade.from.lerp(grenade.to, t) + Vec2::Y * height;
+        transform.translation = pos.extend(transform.translation.z);
+        transform.rotation = Quat::from_rotation_z(grenade.age * 12.0);
+        if t < 1.0 {
+            continue;
+        }
+
+        let center = grenade.to;
+        for (team, hurtbox, target_transform, mut health, knockback) in &mut targets {
+            let offset = target_transform.translation.truncate() - center;
+            let reach = grenade.radius + hurtbox.0;
+            if *team != Team::Enemy || offset.length() > reach {
+                continue;
+            }
+            let falloff = 1.0 - 0.5 * offset.length() / reach;
+            if health.hurt(grenade.damage * falloff)
+                && let Some(mut knockback) = knockback
+            {
+                knockback.0 += offset.normalize_or(Vec2::X) * grenade.knockback * falloff;
+            }
+        }
+        noise.0.push(center);
+        fx(&mut commands, FxKind::Explosion, center, 0.0, grenade.color);
+        commands.entity(entity).despawn();
     }
 }
 

@@ -1,11 +1,13 @@
 mod combat;
 mod deckgen;
+mod drops;
 mod enemies;
 mod guns;
 mod loot;
 mod menu;
 mod mission;
 mod net;
+mod perks;
 mod player;
 mod room;
 
@@ -99,6 +101,8 @@ fn main() {
             combat::CombatPlugin,
             enemies::EnemiesPlugin,
             mission::MissionPlugin,
+            perks::PerksPlugin,
+            drops::DropsPlugin,
             menu::MenuPlugin,
         ))
         .add_systems(Startup, spawn_camera)

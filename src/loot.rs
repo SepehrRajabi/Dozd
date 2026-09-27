@@ -188,7 +188,7 @@ fn spawn_hud(mut commands: Commands) {
 
     commands.spawn((
         Hud,
-        Text::new("WASD move   SPACE dash   Mouse aim   LMB fire   R reload   1-4 / wheel switch gun   E loot"),
+        Text::new("WASD move   SPACE dash   Mouse aim   LMB fire   R reload   1-6 / wheel switch gun   E loot"),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
         Node {

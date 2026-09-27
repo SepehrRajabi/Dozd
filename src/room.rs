@@ -11,6 +11,7 @@ use crate::enemies::{EnemyKind, spawn_enemy};
 use crate::loot::{LootKind, spawn_loot};
 use crate::mission::MissionStatus;
 use crate::net::{NetMode, authority};
+use crate::perks::{PerkKind, spawn_pickup};
 use crate::player::{OFF_DECK, PirateStatus, Player, crew_spot, spawn_crew};
 use crate::{GameState, Level};
 
@@ -24,6 +25,7 @@ const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 // 'L' lift down   'u' lift shaft the crew arrived by
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden
+// perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak
 
 pub struct RoomPlugin;
 
@@ -365,6 +367,8 @@ fn populate(commands: &mut Commands, grid: &RoomGrid) {
                 spawn_loot(commands, kind, pos);
             } else if let Some(kind) = EnemyKind::from_char(ch) {
                 spawn_enemy(commands, kind, pos, false);
+            } else if let Some(kind) = PerkKind::from_char(ch) {
+                spawn_pickup(commands, kind, pos);
             }
         }
     }

@@ -3,8 +3,10 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
+use crate::drops::{EnemyDrop, spawn_drops};
 use crate::mission::Alarm;
 use crate::net::authority;
+use crate::perks::{PerkKind, Perks};
 use crate::player::{PirateStatus, Player};
 use crate::room::{FlowField, RoomGrid};
 use crate::{GameState, Level, Rng};
@@ -53,6 +55,8 @@ struct EnemyStats {
     /// Fraction of incoming knockback actually applied.
     knockback_taken: f32,
     death_color: Color,
+    /// Credits dropped on death, rolled in `lo..=hi`. Always below a Credit Chip.
+    bounty: (u32, u32),
 }
 
 const SENTRY_DRONE: EnemyStats = EnemyStats {
@@ -64,6 +68,7 @@ const SENTRY_DRONE: EnemyStats = EnemyStats {
     sight: 120.0,
     knockback_taken: 1.0,
     death_color: Color::srgb(1.0, 0.35, 0.3),
+    bounty: (15, 30),
 };
 
 const STALKER: EnemyStats = EnemyStats {
@@ -75,6 +80,7 @@ const STALKER: EnemyStats = EnemyStats {
     sight: 100.0,
     knockback_taken: 0.6,
     death_color: Color::srgb(0.55, 1.0, 0.5),
+    bounty: (25, 45),
 };
 
 const WARDEN: EnemyStats = EnemyStats {
@@ -86,6 +92,7 @@ const WARDEN: EnemyStats = EnemyStats {
     sight: 130.0,
     knockback_taken: 0.1,
     death_color: Color::srgb(1.0, 0.7, 0.3),
+    bounty: (50, 80),
 };
 
 impl EnemyKind {
@@ -124,6 +131,7 @@ pub enum AiState {
 pub struct EnemyLook {
     pub kind: EnemyKind,
     pub state: AiState,
+    pub stunned: bool,
 }
 
 /// Host-only AI state.
@@ -141,6 +149,18 @@ pub struct Enemy {
     strafe_sign: f32,
     wander: Option<Vec2>,
     velocity: Vec2,
+    /// Seconds left frozen by a shock field.
+    stun: f32,
+}
+
+impl Enemy {
+    /// Freezes the enemy for at least `secs`, cancelling whatever it was winding up.
+    pub fn stun(&mut self, secs: f32) {
+        self.stun = self.stun.max(secs);
+        self.state = AiState::Hunt;
+        self.burst_left = 0;
+        self.velocity = Vec2::ZERO;
+    }
 }
 
 #[derive(Component)]
@@ -154,7 +174,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
     commands.spawn((
         Level,
         Replicated,
-        EnemyLook { kind, state },
+        EnemyLook { kind, state, stunned: false },
         Enemy {
             kind,
             state,
@@ -167,6 +187,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             strafe_sign: if (pos.x as i32) % 2 == 0 { 1.0 } else { -1.0 },
             wander: None,
             velocity: Vec2::ZERO,
+            stun: 0.0,
         },
         Team::Enemy,
         Health::new(stats.health, 0.0),
@@ -227,14 +248,17 @@ fn think(
     mut alarm: ResMut<Alarm>,
     mut noise: ResMut<Noise>,
     mut rng: ResMut<Rng>,
-    mut players: Query<(Entity, &Transform, &mut Health, &Player), Without<Enemy>>,
+    mut players: Query<(Entity, &Transform, &mut Health, &Player, &Perks), Without<Enemy>>,
     mut enemies: Query<(&mut Enemy, &Transform, &Health)>,
 ) {
     let dt = time.delta_secs();
+    // Cloaked pirates simply don't exist as far as the AI is concerned.
     let targets: Vec<(Entity, Vec2)> = players
         .iter()
-        .filter(|(_, _, health, player)| !health.is_dead() && player.status == PirateStatus::Active)
-        .map(|(e, t, _, _)| (e, t.translation.truncate()))
+        .filter(|(_, _, health, player, perks)| {
+            !health.is_dead() && player.status == PirateStatus::Active && !perks.has(PerkKind::Cloak)
+        })
+        .map(|(e, t, ..)| (e, t.translation.truncate()))
         .collect();
     let heard = std::mem::take(&mut noise.0);
 
@@ -270,6 +294,11 @@ fn think(
     for (mut enemy, transform, _) in &mut enemies {
         let stats = enemy.kind.stats();
         let pos = transform.translation.truncate();
+        if enemy.stun > 0.0 {
+            enemy.stun = (enemy.stun - dt).max(0.0);
+            enemy.velocity = Vec2::ZERO;
+            continue;
+        }
         enemy.timer -= dt;
         enemy.attack_cooldown -= dt;
 
@@ -355,7 +384,7 @@ fn think(
                 if !enemy.lunge_hit && dist < 11.0 {
                     let hit = players
                         .get_mut(target_entity)
-                        .is_ok_and(|(_, _, mut health, _)| health.hurt(25.0));
+                        .is_ok_and(|(_, _, mut health, ..)| health.hurt(25.0));
                     enemy.lunge_hit = hit;
                 }
                 if enemy.timer <= 0.0 {
@@ -412,7 +441,11 @@ fn move_enemies(
         .collect();
 
     for (entity, enemy, mut look, mut transform, mut knockback) in &mut enemies {
-        look.set_if_neq(EnemyLook { kind: enemy.kind, state: enemy.state });
+        look.set_if_neq(EnemyLook {
+            kind: enemy.kind,
+            state: enemy.state,
+            stunned: enemy.stun > 0.0,
+        });
 
         let stats = enemy.kind.stats();
         let pos = transform.translation.truncate();
@@ -443,6 +476,9 @@ fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut 
     for (look, health, mut sprite) in &mut enemies {
         sprite.color = if health.flash > 0.0 {
             Color::srgb(1.0, 0.3, 0.3)
+        } else if look.stunned {
+            // Crackles between white and electric blue.
+            if blink { Color::srgb(0.55, 0.85, 1.0) } else { Color::srgb(0.85, 0.95, 1.0) }
         } else if look.state == AiState::Telegraph && blink {
             Color::srgb(1.0, 0.85, 0.3)
         } else if look.state == AiState::Recover {
@@ -468,11 +504,20 @@ fn update_health_bars(
     }
 }
 
-fn enemy_deaths(mut commands: Commands, enemies: Query<(Entity, &Enemy, &Health, &Transform)>) {
+fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(Entity, &Enemy, &Health, &Transform)>) {
     for (entity, enemy, health, transform) in &enemies {
         if health.is_dead() {
-            let color = enemy.kind.stats().death_color;
-            fx(&mut commands, FxKind::Burst, transform.translation.truncate(), 0.0, color);
+            let stats = enemy.kind.stats();
+            let pos = transform.translation.truncate();
+            fx(&mut commands, FxKind::Burst, pos, 0.0, stats.death_color);
+
+            let (lo, hi) = stats.bounty;
+            let credits = lo + (rng.unit() * (hi - lo) as f32).round() as u32;
+            let mut drops = vec![EnemyDrop::Credits(credits), EnemyDrop::Ammo];
+            if enemy.kind == EnemyKind::Warden {
+                drops.push(EnemyDrop::Ammo);
+            }
+            spawn_drops(&mut commands, &mut rng, pos, &drops);
             commands.entity(entity).despawn();
         }
     }

@@ -312,6 +312,32 @@ GUNS = {
         ],
         {**GUN_METAL, "A": rgb(190, 100, 255), "M": rgb(120, 220, 255)},
     ),
+    "arc_coil": (
+        [
+            "...k.k.k........",
+            "..kAkAkAkkkkk...",
+            ".kSAkAkAkSSSSkk.",
+            "kkssAsAsAsssSSwk",
+            "kSkkkkkkkkkkkkk.",
+            "kSk.kgk.........",
+            "kkk.kgk.........",
+            "....kkk.........",
+        ],
+        {**GUN_METAL, "A": rgb(255, 235, 90)},
+    ),
+    "grenade_launcher": (
+        [
+            "....kkkkk.......",
+            "...kSSSSSkkkkkkk",
+            "kkkkSAAASSSSSSSk",
+            "kssksAAAsssssssk",
+            "kSkksAAAskkkkkkk",
+            "kSk.kSSSk.......",
+            "kkk.kkgk........",
+            ".....kkk........",
+        ],
+        {**GUN_METAL, "A": rgb(150, 190, 70)},
+    ),
 }
 
 
@@ -424,6 +450,14 @@ PROJECTILES = {
     "rail_purple": bolt(16, 3, rgb(190, 100, 255)),
     "enemy_bolt": bolt(5, 3, rgb(255, 70, 60)),
     "enemy_orb": bolt(4, 4, rgb(255, 130, 40)),
+    "grenade": [
+        [(0, 0, 0, 0), OUTLINE, OUTLINE, OUTLINE, (0, 0, 0, 0)],
+        [OUTLINE, rgb(120, 150, 60), rgb(150, 190, 70), rgb(120, 150, 60), OUTLINE],
+        [OUTLINE, rgb(90, 110, 45), rgb(255, 90, 60), rgb(90, 110, 45), OUTLINE],
+        [OUTLINE, rgb(70, 85, 35), rgb(90, 110, 45), rgb(70, 85, 35), OUTLINE],
+        [(0, 0, 0, 0), OUTLINE, OUTLINE, OUTLINE, (0, 0, 0, 0)],
+    ],
+    "explosion": None,
 }
 
 # White so the game can tint them per gun.
@@ -547,6 +581,172 @@ def logo(word="DOZD", gap=2):
 # --------------------------------------------------------------------------
 # Tiles (procedural)
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Enemy drops: smaller than loot so they read as scraps.
+# --------------------------------------------------------------------------
+
+DROPS = {
+    "credits": (
+        [
+            "................",
+            "................",
+            "................",
+            "................",
+            "......kkkkk.....",
+            ".....kYYwYYk....",
+            ".....kyyyyyk....",
+            ".....kkkkkkk....",
+            ".....kYYYYYk....",
+            ".....kyyyyyk....",
+            ".....kkkkkkk....",
+            ".....kYYYYYk....",
+            ".....kyyyyyk....",
+            ".....koooook....",
+            "......kkkkk.....",
+        ],
+        {
+            "Y": rgb(255, 214, 80),
+            "y": rgb(215, 155, 40),
+            "o": rgb(150, 95, 30),
+        },
+    ),
+    "ammo": (
+        [
+            "................",
+            "................",
+            "................",
+            "................",
+            "......kk.kk.....",
+            ".....kbbkbbk....",
+            ".....kBBkBBk....",
+            "...kkkkkkkkkkk..",
+            "...kGGGGGGGGGk..",
+            "...kGwYYYYYwGk..",
+            "...kGGGGGGGGGk..",
+            "...kggggggggGk..",
+            "...kkkkkkkkkkk..",
+        ],
+        {
+            "G": rgb(110, 125, 70),
+            "g": rgb(70, 80, 45),
+            "Y": rgb(240, 200, 80),
+            "B": rgb(240, 200, 80),
+            "b": rgb(255, 235, 150),
+        },
+    ),
+}
+
+# --------------------------------------------------------------------------
+# Perks: a round badge with a symbol, coloured by perk.
+# --------------------------------------------------------------------------
+
+PERK_SYMBOLS = {
+    # Infinite ammo: a round with an infinity loop under it.
+    "overdrive": [
+        "...ww...",
+        "..wSSw..",
+        "..wSSw..",
+        "..wSSw..",
+        "........",
+        ".ww..ww.",
+        "w..ww..w",
+        ".ww..ww.",
+    ],
+    # Full restore: a medical cross.
+    "nano_patch": [
+        "..wwww..",
+        "..wSSw..",
+        "wwwSSwww",
+        "wSSSSSSw",
+        "wSSSSSSw",
+        "wwwSSwww",
+        "..wSSw..",
+        "..wwww..",
+    ],
+    # Stun: a lightning bolt.
+    "shock_field": [
+        "....www.",
+        "...wSw..",
+        "..wSw...",
+        ".wSSSSw.",
+        "...wSw..",
+        "..wSw...",
+        ".wSw....",
+        ".ww.....",
+    ],
+    # Invisibility: a closed eye.
+    "cloak": [
+        "........",
+        "........",
+        "w......w",
+        ".wSSSSw.",
+        "..wwww..",
+        ".w.w.w..",
+        "........",
+        "........",
+    ],
+}
+
+PERK_COLORS = {
+    "overdrive": (rgb(255, 150, 50), rgb(120, 55, 15)),
+    "nano_patch": (rgb(90, 235, 120), rgb(20, 90, 45)),
+    "shock_field": (rgb(90, 210, 255), rgb(20, 70, 120)),
+    "cloak": (rgb(190, 120, 255), rgb(70, 35, 120)),
+}
+
+
+def perk_badge(name):
+    rim, fill = PERK_COLORS[name]
+    px = [[(0, 0, 0, 0)] * SIZE for _ in range(SIZE)]
+    for y in range(SIZE):
+        for x in range(SIZE):
+            d = ((x - 7.5) ** 2 + (y - 7.5) ** 2) ** 0.5
+            if d <= 5.8:
+                px[y][x] = shade(fill, 12) if y < 7 else fill
+            elif d <= 6.9:
+                px[y][x] = rim
+            elif d <= 7.8:
+                px[y][x] = OUTLINE
+    sym = {"w": WHITE, "S": rim}
+    for y, row in enumerate(PERK_SYMBOLS[name]):
+        for x, ch in enumerate(row):
+            if ch in sym:
+                px[y + 4][x + 4] = sym[ch]
+    return px
+
+
+def explosion(radius=26):
+    """White blast disc (tinted in game): solid core, ragged dithered edge."""
+    size = radius * 2 + 1
+    px = [[(0, 0, 0, 0)] * size for _ in range(size)]
+    for y in range(size):
+        for x in range(size):
+            d = ((x - radius) ** 2 + (y - radius) ** 2) ** 0.5 / radius
+            n = noise(x, y, 7)
+            if d < 0.45:
+                px[y][x] = WHITE
+            elif d < 0.8 + 0.15 * n:
+                px[y][x] = (255, 255, 255, 200)
+            elif d < 1.0 and (x + y) % 2 == 0:
+                px[y][x] = (255, 255, 255, 120)
+    return px
+
+
+def shock_ring(radius=56):
+    """Dashed ring drawn around a pirate while their shock field is up."""
+    size = radius * 2 + 1
+    px = [[(0, 0, 0, 0)] * size for _ in range(size)]
+    import math
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x - radius, y - radius
+            d = (dx * dx + dy * dy) ** 0.5
+            if abs(d - (radius - 1)) < 0.8:
+                dash = int((math.atan2(dy, dx) + math.pi) / (2 * math.pi) * 36) % 2
+                px[y][x] = rgb(140, 225, 255) if dash else rgb(140, 225, 255, 90)
+    return px
 
 
 def noise(x, y, seed):
@@ -730,6 +930,7 @@ def main():
         guns[name] = px
         write_png(os.path.join(ROOT, "guns", f"{name}.png"), px)
 
+    PROJECTILES["explosion"] = explosion()
     for name, px in PROJECTILES.items():
         write_png(os.path.join(ROOT, "fx", f"{name}.png"), px)
     fx = {}
@@ -743,6 +944,19 @@ def main():
         px = from_ascii(name, rows, pal)
         enemies[name] = px
         write_png(os.path.join(ROOT, "enemies", f"{name}.png"), px)
+
+    drops = {}
+    for name, (rows, pal) in DROPS.items():
+        px = from_ascii(name, rows, pal)
+        drops[name] = px
+        write_png(os.path.join(ROOT, "drops", f"{name}.png"), px)
+
+    perks = {}
+    for name in PERK_SYMBOLS:
+        px = perk_badge(name)
+        perks[name] = px
+        write_png(os.path.join(ROOT, "perks", f"{name}.png"), px)
+    write_png(os.path.join(ROOT, "fx", "shock_ring.png"), shock_ring())
 
     title = logo()
     write_png(os.path.join(ROOT, "ui", "logo.png"), title)
@@ -758,6 +972,7 @@ def main():
     )
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
+    write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
     write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
     write_png(
         os.path.join(preview, "fx.png"),

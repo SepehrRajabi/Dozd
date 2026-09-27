@@ -11,10 +11,12 @@ use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRe
 use serde::{Deserialize, Serialize};
 
 use crate::combat::{Fx, Health, ProjectileLook};
+use crate::drops::EnemyDrop;
 use crate::enemies::EnemyLook;
 use crate::guns::Arsenal;
 use crate::loot::LootKind;
 use crate::mission::MissionStatus;
+use crate::perks::{PerkPickup, Perks};
 use crate::player::{Aim, Dash, Player, Walking};
 use crate::{GameState, Level};
 
@@ -164,6 +166,9 @@ impl Plugin for NetPlugin {
             .replicate::<Arsenal>()
             .replicate::<EnemyLook>()
             .replicate::<LootKind>()
+            .replicate::<PerkPickup>()
+            .replicate::<EnemyDrop>()
+            .replicate::<Perks>()
             .replicate::<ProjectileLook>()
             .replicate::<MissionStatus>()
             .add_client_message::<PlayerInput>(Channel::Ordered)

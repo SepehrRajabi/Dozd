@@ -11,6 +11,7 @@ use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::{Arsenal, GunKind};
 use crate::net::{HOST_ID, LocalId, LocalPlayer, PlayerInput, authority};
 use crate::mission::MissionStatus;
+use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
@@ -160,6 +161,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2, deck: 
         Dash::default(),
         Aim { dir: Vec2::X, target: pos + Vec2::X * 32.0 },
         Arsenal::new(&GunKind::ALL),
+        Perks::default(),
         Controls::default(),
         Transform::from_translation(pos.extend(10.0)),
     ));
@@ -286,7 +288,14 @@ fn gather_input(
     let axis = |neg: [KeyCode; 2], pos: [KeyCode; 2]| {
         keys.any_pressed(pos) as i8 as f32 - keys.any_pressed(neg) as i8 as f32
     };
-    const SLOTS: [KeyCode; 4] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4];
+    const SLOTS: [KeyCode; 6] = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+    ];
 
     inputs.write(PlayerInput {
         movement: Vec2::new(
@@ -406,11 +415,11 @@ fn move_players(
 fn animate_players(
     time: Res<Time>,
     local_aim: Res<LocalAim>,
-    players: Query<(&Walking, &Aim, &Health, &Dash, Has<LocalPlayer>)>,
+    players: Query<(&Walking, &Aim, &Health, &Dash, Option<&Perks>, Has<LocalPlayer>)>,
     mut sprites: Query<(&ChildOf, &mut PlayerSprite, &mut Transform, &mut Sprite)>,
 ) {
     for (parent, mut body, mut transform, mut sprite) in &mut sprites {
-        let Ok((walking, aim, health, dash, local)) = players.get(parent.parent()) else { continue };
+        let Ok((walking, aim, health, dash, perks, local)) = players.get(parent.parent()) else { continue };
         let facing = if local { local_aim.dir } else { aim.dir };
         sprite.flip_x = facing.x < 0.0;
 
@@ -424,6 +433,9 @@ fn animate_players(
             Color::srgb(0.75, 0.92, 1.0)
         } else if health.invulnerable > 0.0 && (time.elapsed_secs() * 20.0).sin() > 0.0 {
             Color::srgba(1.0, 1.0, 1.0, 0.4)
+        } else if perks.is_some_and(|p| p.has(PerkKind::Cloak)) {
+            // A faint shimmer so the crew can still find you.
+            Color::srgba(0.8, 0.65, 1.0, 0.25 + 0.08 * (time.elapsed_secs() * 4.0).sin())
         } else {
             Color::WHITE
         };
