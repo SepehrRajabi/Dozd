@@ -14,16 +14,20 @@ pub struct LootPlugin;
 
 impl Plugin for LootPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            pick_up_loot.run_if(in_state(GameState::Playing)).run_if(authority),
+        );
+    }
+}
+
+pub struct LootViewPlugin;
+
+impl Plugin for LootViewPlugin {
+    fn build(&self, app: &mut App) {
         app.add_observer(dress_loot)
             .add_systems(Startup, spawn_hud)
-            .add_systems(
-                Update,
-                (
-                    pick_up_loot.run_if(in_state(GameState::Playing)).run_if(authority),
-                    bob_loot,
-                    update_hud,
-                ),
-            );
+            .add_systems(Update, (bob_loot, update_hud));
     }
 }
 

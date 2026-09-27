@@ -31,8 +31,7 @@ pub struct RoomPlugin;
 
 impl Plugin for RoomPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_starfield)
-            .init_resource::<FlowField>()
+        app.init_resource::<FlowField>()
             .init_resource::<Heist>()
             .init_resource::<BuiltDeck>()
             .add_systems(
@@ -52,6 +51,14 @@ impl Plugin for RoomPlugin {
     }
 }
 
+pub struct RoomViewPlugin;
+
+impl Plugin for RoomViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_starfield).add_observer(draw_deck);
+    }
+}
+
 /// Host only: the heist being played and how deep the crew is. Clients read the
 /// same numbers from `MissionStatus`.
 #[derive(Resource, Default)]
@@ -59,6 +66,14 @@ pub struct Heist {
     pub seed: u32,
     pub deck: u8,
 }
+
+/// Host only: if present, the next run plays this layout instead of a random one.
+#[derive(Resource)]
+pub struct NextSeed(pub u32);
+
+/// A deck's collision grid is in place; the view draws its tiles.
+#[derive(Event)]
+struct DeckBuilt;
 
 /// The `(seed, deck)` whose tiles this machine has built.
 #[derive(Resource, Default)]
@@ -242,19 +257,24 @@ fn clear_level(mut commands: Commands, level: Query<Entity, With<Level>>, mut bu
     }
 }
 
-fn new_heist(mut heist: ResMut<Heist>) {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    *heist = Heist { seed: nanos | 1, deck: 0 };
+fn new_heist(mut heist: ResMut<Heist>, next: Option<Res<NextSeed>>) {
+    let seed = next.map_or_else(
+        || {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+                | 1
+        },
+        |next| next.0,
+    );
+    *heist = Heist { seed, deck: 0 };
 }
 
 /// Builds the current deck whenever it changes: at the start of a run and each
 /// time the lift goes down. Runs on every machine; only `(seed, deck)` is shared.
 fn sync_deck(
     mut commands: Commands,
-    assets: Res<AssetServer>,
     mode: Res<NetMode>,
     heist: Res<Heist>,
     status: Option<Single<&MissionStatus>>,
@@ -282,7 +302,7 @@ fn sync_deck(
     *field = FlowField::default();
     noise.0.clear();
 
-    let grid = build_tiles(&mut commands, &assets, deckgen::generate(target.0, target.1, DECKS));
+    let grid = build_grid(deckgen::generate(target.0, target.1, DECKS));
     if mode.is_authority() {
         populate(&mut commands, &grid);
         let mut spot = 0;
@@ -298,10 +318,11 @@ fn sync_deck(
         }
     }
     commands.insert_resource(grid);
+    commands.trigger(DeckBuilt);
 }
 
-/// Spawns the tile sprites and the collision grid for a layout.
-fn build_tiles(commands: &mut Commands, assets: &AssetServer, layout: Layout) -> RoomGrid {
+/// The collision grid for a layout.
+fn build_grid(layout: Layout) -> RoomGrid {
     let rows = layout.tiles.len();
     let cols = layout.tiles[0].len();
     let mut grid = RoomGrid {
@@ -312,6 +333,28 @@ fn build_tiles(commands: &mut Commands, assets: &AssetServer, layout: Layout) ->
     };
     grid.crew_spawn = grid.tile_center(layout.spawn.0, layout.spawn.1);
 
+    for row in 0..rows {
+        for col in 0..cols {
+            let pos = grid.tile_center(col, row);
+            match grid.tiles[row][col] {
+                'v' => grid.spawn_points.push(pos),
+                'D' => {
+                    let inside = grid
+                        .neighbors(col, row)
+                        .next()
+                        .map(|(c, r, _)| grid.tile_center(c, r));
+                    grid.spawn_points.extend(inside);
+                }
+                _ => {}
+            }
+        }
+    }
+    grid
+}
+
+/// Spawns the tile sprites for the deck just built. They carry `Level`, so the
+/// next deck's `sync_deck` clears them.
+fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>, grid: Res<RoomGrid>) {
     let floor = assets.load("sprites/tiles/floor.png");
     let grate = assets.load("sprites/tiles/grate.png");
     let wall = assets.load("sprites/tiles/wall.png");
@@ -320,11 +363,9 @@ fn build_tiles(commands: &mut Commands, assets: &AssetServer, layout: Layout) ->
     let vent = assets.load("sprites/tiles/vent.png");
     let lift = assets.load("sprites/tiles/lift.png");
 
-    for row in 0..rows {
-        for col in 0..cols {
-            let ch = grid.tiles[row][col];
-            let pos = grid.tile_center(col, row);
-            let sprite = match ch {
+    for row in 0..grid.rows() {
+        for col in 0..grid.cols() {
+            let sprite = match grid.tiles[row][col] {
                 // Solid rock with no floor next to it is just dark hull.
                 '#' if !grid.touches_floor(col, row) => Sprite::from_color(HULL, Vec2::splat(TILE)),
                 '#' => Sprite::from_image(wall.clone()),
@@ -340,22 +381,10 @@ fn build_tiles(commands: &mut Commands, assets: &AssetServer, layout: Layout) ->
                 },
                 _ => Sprite::from_image(floor.clone()),
             };
+            let pos = grid.tile_center(col, row);
             commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
-
-            match ch {
-                'v' => grid.spawn_points.push(pos),
-                'D' => {
-                    let inside = grid
-                        .neighbors(col, row)
-                        .next()
-                        .map(|(c, r, _)| grid.tile_center(c, r));
-                    grid.spawn_points.extend(inside);
-                }
-                _ => {}
-            }
         }
     }
-    grid
 }
 
 /// Places loot and guards. Host only; everyone else receives them by replication.

@@ -24,16 +24,21 @@ pub struct DropsPlugin;
 
 impl Plugin for DropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(dress_drop).add_systems(
+        app.add_systems(
             Update,
-            (
-                (scatter_drops, collect_drops)
-                    .chain()
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(authority),
-                bob_drops,
-            ),
+            (scatter_drops, collect_drops)
+                .chain()
+                .run_if(in_state(GameState::Playing))
+                .run_if(authority),
         );
+    }
+}
+
+pub struct DropsViewPlugin;
+
+impl Plugin for DropsViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(dress_drop).add_systems(Update, bob_drops);
     }
 }
 

@@ -24,19 +24,24 @@ pub struct PerksPlugin;
 
 impl Plugin for PerksPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (pick_up_perks, tick_perks, shock_enemies)
+                .chain()
+                .run_if(in_state(GameState::Playing))
+                .run_if(authority),
+        );
+    }
+}
+
+pub struct PerksViewPlugin;
+
+impl Plugin for PerksViewPlugin {
+    fn build(&self, app: &mut App) {
         app.add_observer(dress_pickup)
             .add_observer(dress_perks)
             .add_systems(Startup, spawn_perk_hud)
-            .add_systems(
-                Update,
-                (
-                    (pick_up_perks, tick_perks, shock_enemies)
-                        .chain()
-                        .run_if(in_state(GameState::Playing))
-                        .run_if(authority),
-                    (bob_pickups, shock_rings, update_perk_hud),
-                ),
-            );
+            .add_systems(Update, (bob_pickups, shock_rings, update_perk_hud));
     }
 }
 

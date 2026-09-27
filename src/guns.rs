@@ -23,18 +23,22 @@ pub struct GunsPlugin;
 
 impl Plugin for GunsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (switch_gun, reload, fire)
+                .chain()
+                .run_if(in_state(GameState::Playing))
+                .run_if(authority),
+        );
+    }
+}
+
+pub struct GunsViewPlugin;
+
+impl Plugin for GunsViewPlugin {
+    fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_crosshair, spawn_weapon_hud))
-            .add_systems(
-                Update,
-                (
-                    (switch_gun, reload, fire)
-                        .chain()
-                        .run_if(in_state(GameState::Playing))
-                        .run_if(authority),
-                    (equip_held_gun, aim_held_guns).chain(),
-                    update_weapon_hud,
-                ),
-            );
+            .add_systems(Update, ((equip_held_gun, aim_held_guns).chain(), update_weapon_hud));
     }
 }
 

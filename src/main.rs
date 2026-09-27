@@ -3,6 +3,7 @@ mod deckgen;
 mod drops;
 mod enemies;
 mod guns;
+mod headless;
 mod loot;
 mod menu;
 mod mission;
@@ -40,7 +41,18 @@ pub struct Hud;
 #[derive(Resource)]
 pub struct Rng(u32);
 
+impl Default for Rng {
+    fn default() -> Self {
+        Self(0x2545_F491)
+    }
+}
+
 impl Rng {
+    pub fn new(seed: u32) -> Self {
+        // Xorshift is stuck at zero, and nearby seeds should still diverge.
+        Self(seed.wrapping_mul(0x9E37_79B9) | 1)
+    }
+
     /// Uniform in [0, 1].
     pub fn unit(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
@@ -56,6 +68,18 @@ impl Rng {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("headless") {
+        match headless::Config::from_args(&args[1..]) {
+            Ok(config) => headless::run(config),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     let cli_mode = match NetMode::from_args() {
         Ok(mode) => mode,
         Err(message) => {
@@ -67,7 +91,6 @@ fn main() {
     let mut app = App::new();
     embed_assets(&mut app);
     app.insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.05)))
-        .insert_resource(Rng(0x2545_F491))
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -91,20 +114,7 @@ fn main() {
                     ..default()
                 }),
         )
-        .init_state::<GameState>()
-        .add_plugins((
-            net::NetPlugin,
-            room::RoomPlugin,
-            player::PlayerPlugin,
-            loot::LootPlugin,
-            guns::GunsPlugin,
-            combat::CombatPlugin,
-            enemies::EnemiesPlugin,
-            mission::MissionPlugin,
-            perks::PerksPlugin,
-            drops::DropsPlugin,
-            menu::MenuPlugin,
-        ))
+        .add_plugins((GamePlugins, ViewPlugins))
         .add_systems(Startup, spawn_camera)
         .add_systems(Update, toggle_hud.run_if(state_changed::<GameState>));
 
@@ -115,6 +125,47 @@ fn main() {
         });
     }
     app.run();
+}
+
+/// The game itself: rules, AI and networking. Needs no window, renderer, input
+/// or assets, so it also runs headless.
+pub struct GamePlugins;
+
+impl Plugin for GamePlugins {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Rng>().init_state::<GameState>().add_plugins((
+            net::NetPlugin,
+            room::RoomPlugin,
+            player::PlayerPlugin,
+            loot::LootPlugin,
+            guns::GunsPlugin,
+            combat::CombatPlugin,
+            enemies::EnemiesPlugin,
+            mission::MissionPlugin,
+            perks::PerksPlugin,
+            drops::DropsPlugin,
+        ));
+    }
+}
+
+/// Everything a player sees and touches: sprites, effects, HUD, menus, input.
+struct ViewPlugins;
+
+impl Plugin for ViewPlugins {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            room::RoomViewPlugin,
+            player::PlayerViewPlugin,
+            loot::LootViewPlugin,
+            guns::GunsViewPlugin,
+            combat::CombatViewPlugin,
+            enemies::EnemiesViewPlugin,
+            mission::MissionViewPlugin,
+            perks::PerksViewPlugin,
+            drops::DropsViewPlugin,
+            menu::MenuPlugin,
+        ));
+    }
 }
 
 fn toggle_hud(state: Res<State<GameState>>, mut hud: Query<&mut Visibility, With<Hud>>) {

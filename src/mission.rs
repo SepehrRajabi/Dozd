@@ -33,12 +33,10 @@ impl Plugin for MissionPlugin {
             .init_resource::<Extraction>()
             .init_resource::<Lift>()
             .init_resource::<Banner>()
-            .add_systems(Startup, spawn_mission_hud)
             .add_systems(
                 OnEnter(GameState::Playing),
                 (spawn_status, reset_mission).run_if(authority),
             )
-            .add_systems(OnEnter(GameState::Over), spawn_results)
             .add_systems(
                 Update,
                 (announce_alarm, run_waves, ride_lift, extraction, check_crew_wiped)
@@ -51,12 +49,23 @@ impl Plugin for MissionPlugin {
                     tick_banner.run_if(authority),
                     publish_status.run_if(authority),
                     follow_host_state.run_if(not(authority)),
-                    update_player_bars,
-                    update_alarm_text,
-                    update_banner,
-                    update_extraction_hud,
                 )
                     .chain(),
+            );
+    }
+}
+
+pub struct MissionViewPlugin;
+
+impl Plugin for MissionViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_mission_hud)
+            .add_systems(OnEnter(GameState::Over), spawn_results)
+            .add_systems(
+                Update,
+                (update_player_bars, update_alarm_text, update_banner, update_extraction_hud)
+                    .chain()
+                    .after(follow_host_state),
             );
     }
 }

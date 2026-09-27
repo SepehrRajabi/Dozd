@@ -1,5 +1,3 @@
-use std::iter;
-
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -39,24 +37,42 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LocalAim>()
-            .add_observer(dress_player)
+        app.init_resource::<CrewSize>()
             .add_observer(on_client_joined)
             .add_observer(on_client_left)
             .add_systems(PreUpdate, receive_input.after(ServerSystems::Receive).run_if(authority))
             .add_systems(
                 Update,
-                (
-                    gather_input.run_if(not(in_state(GameState::Menu))),
-                    move_players.run_if(in_state(GameState::Playing)).run_if(authority),
-                    animate_players,
-                    dash_trails,
-                    hide_other_decks,
-                    follow_camera,
-                )
-                    .chain(),
+                move_players.run_if(in_state(GameState::Playing)).run_if(authority),
             )
             .add_systems(PostUpdate, clear_input_edges.run_if(authority));
+    }
+}
+
+pub struct PlayerViewPlugin;
+
+impl Plugin for PlayerViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LocalAim>().add_observer(dress_player).add_systems(
+            Update,
+            (
+                gather_input.run_if(not(in_state(GameState::Menu))),
+                (animate_players, dash_trails, hide_other_decks, follow_camera)
+                    .chain()
+                    .after(move_players),
+            ),
+        );
+    }
+}
+
+/// How many pirates this machine plays: 1 normally, more when headless.
+/// They get `Player::owner` ids `HOST_ID`, `HOST_ID + 1`, ...
+#[derive(Resource)]
+pub struct CrewSize(pub u8);
+
+impl Default for CrewSize {
+    fn default() -> Self {
+        Self(1)
     }
 }
 
@@ -128,6 +144,22 @@ pub struct Controls {
     pub interact: bool,
 }
 
+impl Controls {
+    /// Folds in one input message. Held inputs take the latest value; presses are
+    /// kept until `clear_input_edges` so none get lost.
+    pub fn apply(&mut self, input: &PlayerInput) {
+        self.movement = input.movement.clamp_length_max(1.0);
+        self.aim = input.aim;
+        self.fire = input.fire;
+        self.fire_pressed |= input.fire_pressed;
+        self.dash |= input.dash;
+        self.reload |= input.reload;
+        self.slot = input.slot.or(self.slot);
+        self.cycle = (self.cycle + input.cycle).clamp(-1, 1);
+        self.interact |= input.interact;
+    }
+}
+
 /// This machine's aim, used for the crosshair and the local pirate's gun so they
 /// respond instantly instead of waiting for the host.
 #[derive(Resource)]
@@ -189,9 +221,11 @@ pub fn spawn_crew(
     mut commands: Commands,
     grid: Res<RoomGrid>,
     heist: Res<Heist>,
+    crew: Res<CrewSize>,
     clients: Query<&NetworkId, With<AuthorizedClient>>,
 ) {
-    let owners = iter::once(HOST_ID).chain(clients.iter().map(NetworkId::get));
+    let local = (0..crew.0 as u64).map(|i| HOST_ID + i);
+    let owners = local.chain(clients.iter().map(NetworkId::get));
     for (slot, owner) in owners.enumerate() {
         let pos = crew_spot(grid.crew_spawn, slot);
         spawn_player(&mut commands, owner, slot as u8, pos, heist.deck);
@@ -339,16 +373,9 @@ fn receive_input(
         if message.restart && *state.get() == GameState::Over {
             next_state.set(GameState::Playing);
         }
-        let Some((_, mut controls)) = players.iter_mut().find(|(p, _)| p.owner == owner) else { continue };
-        controls.movement = message.movement.clamp_length_max(1.0);
-        controls.aim = message.aim;
-        controls.fire = message.fire;
-        controls.fire_pressed |= message.fire_pressed;
-        controls.dash |= message.dash;
-        controls.reload |= message.reload;
-        controls.slot = message.slot.or(controls.slot);
-        controls.cycle = (controls.cycle + message.cycle).clamp(-1, 1);
-        controls.interact |= message.interact;
+        if let Some((_, mut controls)) = players.iter_mut().find(|(p, _)| p.owner == owner) {
+            controls.apply(message);
+        }
     }
 }
 
@@ -499,7 +526,8 @@ fn hide_other_decks(status: Option<Single<&MissionStatus>>, mut players: Query<(
 fn follow_camera(
     time: Res<Time>,
     mut shake: ResMut<Shake>,
-    mut rng: ResMut<Rng>,
+    // Its own stream, so looks never change how the game plays out.
+    mut rng: Local<Rng>,
     players: Query<(&Transform, &Player, &Health, Has<LocalPlayer>), Without<Camera2d>>,
     mut camera: Single<&mut Transform, With<Camera2d>>,
     mut smoothed: Local<Option<Vec2>>,

@@ -11,20 +11,26 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Shake>()
-            .init_resource::<Noise>()
-            .add_observer(spawn_fx)
-            .add_observer(dress_projectile)
-            .add_systems(OnEnter(GameState::Playing), reset_combat)
+        app.init_resource::<Noise>()
+            .add_systems(OnEnter(GameState::Playing), reset_noise)
             .add_systems(
                 Update,
-                (
-                    (tick_health, move_projectiles, move_grenades)
-                        .run_if(in_state(GameState::Playing))
-                        .run_if(authority),
-                    (fade_fx, float_popups, shake_on_local_damage),
-                ),
+                (tick_health, move_projectiles, move_grenades)
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(authority),
             );
+    }
+}
+
+pub struct CombatViewPlugin;
+
+impl Plugin for CombatViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Shake>()
+            .add_observer(spawn_fx)
+            .add_observer(dress_projectile)
+            .add_systems(OnEnter(GameState::Playing), reset_shake)
+            .add_systems(Update, (fade_fx, float_popups, shake_on_local_damage));
     }
 }
 
@@ -251,7 +257,7 @@ impl Shake {
 #[derive(Resource, Default)]
 pub struct Noise(pub Vec<Vec2>);
 
-fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rng: ResMut<Rng>, mut shake: ResMut<Shake>) {
+fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rng: Local<Rng>, mut shake: ResMut<Shake>) {
     let spark = |commands: &mut Commands, pos: Vec2, life: f32| {
         commands.spawn((
             Level,
@@ -351,9 +357,12 @@ fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rn
     }
 }
 
-fn reset_combat(mut shake: ResMut<Shake>, mut noise: ResMut<Noise>) {
-    shake.0 = 0.0;
+fn reset_noise(mut noise: ResMut<Noise>) {
     noise.0.clear();
+}
+
+fn reset_shake(mut shake: ResMut<Shake>) {
+    shake.0 = 0.0;
 }
 
 fn tick_health(time: Res<Time>, mut health: Query<&mut Health>) {

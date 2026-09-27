@@ -21,16 +21,22 @@ pub struct EnemiesPlugin;
 
 impl Plugin for EnemiesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(dress_enemy).add_systems(
+        app.add_systems(
             Update,
-            (
-                (think, move_enemies, enemy_deaths)
-                    .chain()
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(authority),
-                (enemy_visuals, update_health_bars),
-            ),
+            (think, move_enemies, enemy_deaths)
+                .chain()
+                .run_if(in_state(GameState::Playing))
+                .run_if(authority),
         );
+    }
+}
+
+pub struct EnemiesViewPlugin;
+
+impl Plugin for EnemiesViewPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(dress_enemy)
+            .add_systems(Update, (enemy_visuals, update_health_bars));
     }
 }
 
