@@ -643,6 +643,29 @@ def vent_tile():
     return px
 
 
+def lift_tile():
+    """Cargo lift platform, laid 2x2: ride it down to the next deck."""
+    px = blank(rgb(44, 50, 66))
+    for y in range(SIZE):
+        for x in range(SIZE):
+            px[y][x] = shade(px[y][x], (noise(x, y, 11) - 0.5) * 6)
+    for i in range(SIZE):
+        px[0][i] = px[i][0] = rgb(18, 20, 28)
+        px[SIZE - 1][i] = px[i][SIZE - 1] = rgb(18, 20, 28)
+        px[1][i] = px[i][1] = rgb(96, 106, 130)
+    # Lights along the rim.
+    for i in (4, 11):
+        px[1][i] = px[i][1] = rgb(80, 230, 255)
+    # Two down-pointing chevrons.
+    for top, color in ((4, rgb(80, 230, 255)), (8, rgb(40, 140, 170))):
+        for k in range(4):
+            for x in (4 + k, 11 - k):
+                px[top + k][x] = color
+                if top + k + 1 < SIZE - 1:
+                    px[top + k + 1][x] = shade(color, -60)
+    return px
+
+
 def shadow():
     px = blank((0, 0, 0, 0))
     cx, cy, rx, ry = 7.5, 13.5, 6.0, 2.0
@@ -694,6 +717,7 @@ def main():
         "hazard": hazard_tile(),
         "door": door_tile(),
         "vent": vent_tile(),
+        "lift": lift_tile(),
     }
     for name, px in tiles.items():
         write_png(os.path.join(ROOT, "tiles", f"{name}.png"), px)

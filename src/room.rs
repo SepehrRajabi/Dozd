@@ -1,39 +1,29 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::time::SystemTime;
 
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
 
-use crate::combat::Health;
+use crate::combat::{Health, Noise};
+use crate::deckgen::{self, Layout};
 use crate::enemies::{EnemyKind, spawn_enemy};
 use crate::loot::{LootKind, spawn_loot};
-use crate::net::authority;
-use crate::player::{Player, spawn_crew};
+use crate::mission::MissionStatus;
+use crate::net::{NetMode, authority};
+use crate::player::{OFF_DECK, PirateStatus, Player, crew_spot, spawn_crew};
 use crate::{GameState, Level};
 
 pub const TILE: f32 = 16.0;
+/// Decks per heist; the last one holds the vault.
+pub const DECKS: u8 = 3;
+const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 
-// '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (extraction pad)   'v' vent
-// 'P' player spawn   loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
+// Layouts come from `deckgen`. Legend:
+// '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
+// 'L' lift down   'u' lift shaft the crew arrived by
+// loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden
-const CARGO_BAY: &[&str] = &[
-    "##########################",
-    "#,,v,,,#..........#,,,v,,#",
-    "#,.c..,#.....r....#,..x.,#",
-    "#,....,#....h.....#,.d..,#",
-    "#,,..,,##..#..#..##,,..,,#",
-    "#........................#",
-    "#..##..............##.p.s#",
-    "#..##.....,,,,,,...##....#",
-    "#.P.......,,,,,,.........D",
-    "#..##.....,,,,,,...##....#",
-    "#..##..............##....#",
-    "#........................#",
-    "#,,..,,##..#..#..##,,..,,#",
-    "#,....,#..........#======#",
-    "#,.w.s,#...i....c.#==..==#",
-    "#,,,,,,#.d...v....#======#",
-    "##########################",
-];
 
 pub struct RoomPlugin;
 
@@ -41,18 +31,36 @@ impl Plugin for RoomPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_starfield)
             .init_resource::<FlowField>()
+            .init_resource::<Heist>()
+            .init_resource::<BuiltDeck>()
             .add_systems(
                 OnEnter(GameState::Playing),
-                (clear_level, spawn_room, (populate_room, spawn_crew).run_if(authority)).chain(),
+                (clear_level, new_heist.run_if(authority), sync_deck, spawn_crew.run_if(authority)).chain(),
             )
             .add_systems(
                 Update,
-                update_flow_field
-                    .run_if(in_state(GameState::Playing))
-                    .run_if(authority),
+                (
+                    sync_deck.run_if(not(in_state(GameState::Menu))),
+                    update_flow_field
+                        .run_if(in_state(GameState::Playing))
+                        .run_if(authority),
+                )
+                    .chain(),
             );
     }
 }
+
+/// Host only: the heist being played and how deep the crew is. Clients read the
+/// same numbers from `MissionStatus`.
+#[derive(Resource, Default)]
+pub struct Heist {
+    pub seed: u32,
+    pub deck: u8,
+}
+
+/// The `(seed, deck)` whose tiles this machine has built.
+#[derive(Resource, Default)]
+struct BuiltDeck(Option<(u32, u8)>);
 
 #[derive(Resource)]
 pub struct RoomGrid {
@@ -74,6 +82,13 @@ impl RoomGrid {
         self.tiles.len()
     }
 
+    /// Whether any of the eight surrounding tiles is walkable.
+    fn touches_floor(&self, col: usize, row: usize) -> bool {
+        (row.saturating_sub(1)..=(row + 1).min(self.rows() - 1)).any(|r| {
+            (col.saturating_sub(1)..=(col + 1).min(self.cols() - 1)).any(|c| self.is_open(c, r))
+        })
+    }
+
     pub fn tile_center(&self, col: usize, row: usize) -> Vec2 {
         self.origin + Vec2::new(col as f32 * TILE, -(row as f32) * TILE)
     }
@@ -88,7 +103,7 @@ impl RoomGrid {
     }
 
     fn is_open(&self, col: usize, row: usize) -> bool {
-        !matches!(self.tiles[row][col], '#' | 'D')
+        deckgen::is_open(self.tiles[row][col])
     }
 
     pub fn tile_at(&self, p: Vec2) -> Option<char> {
@@ -218,29 +233,82 @@ fn update_flow_field(
     field.targets = targets;
 }
 
-fn clear_level(mut commands: Commands, level: Query<Entity, With<Level>>, mut field: ResMut<FlowField>) {
-    *field = FlowField::default();
+fn clear_level(mut commands: Commands, level: Query<Entity, With<Level>>, mut built: ResMut<BuiltDeck>) {
+    built.0 = None;
     for entity in &level {
         commands.entity(entity).despawn();
     }
 }
 
-/// Builds the tiles and collision grid. Runs on every machine: the layout is
-/// fixed, so it never needs to cross the network.
-fn spawn_room(mut commands: Commands, assets: Res<AssetServer>) {
-    let rows = CARGO_BAY.len();
-    let cols = CARGO_BAY[0].len();
-    assert!(CARGO_BAY.iter().all(|r| r.len() == cols), "ragged room layout");
+fn new_heist(mut heist: ResMut<Heist>) {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    *heist = Heist { seed: nanos | 1, deck: 0 };
+}
 
+/// Builds the current deck whenever it changes: at the start of a run and each
+/// time the lift goes down. Runs on every machine; only `(seed, deck)` is shared.
+fn sync_deck(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mode: Res<NetMode>,
+    heist: Res<Heist>,
+    status: Option<Single<&MissionStatus>>,
+    mut built: ResMut<BuiltDeck>,
+    mut field: ResMut<FlowField>,
+    mut noise: ResMut<Noise>,
+    stale: Query<Entity, (With<Level>, Without<Player>, Without<Remote>)>,
+    mut crew: Query<(&Player, &Health, &mut Transform)>,
+) {
+    let target = if mode.is_authority() {
+        (heist.seed, heist.deck)
+    } else {
+        let Some(status) = status else { return };
+        (status.seed, status.deck)
+    };
+    if built.0 == Some(target) {
+        return;
+    }
+    built.0 = Some(target);
+
+    // The old deck's tiles, guards, loot and effects.
+    for entity in &stale {
+        commands.entity(entity).despawn();
+    }
+    *field = FlowField::default();
+    noise.0.clear();
+
+    let grid = build_tiles(&mut commands, &assets, deckgen::generate(target.0, target.1, DECKS));
+    if mode.is_authority() {
+        populate(&mut commands, &grid);
+        let mut spot = 0;
+        for (player, health, mut transform) in &mut crew {
+            let pos = if player.deck == target.1 && player.status == PirateStatus::Active && !health.is_dead() {
+                spot += 1;
+                crew_spot(grid.crew_spawn, spot - 1)
+            } else {
+                // Left on an upper deck: out of reach of this deck's bullets.
+                OFF_DECK
+            };
+            transform.translation = pos.extend(transform.translation.z);
+        }
+    }
+    commands.insert_resource(grid);
+}
+
+/// Spawns the tile sprites and the collision grid for a layout.
+fn build_tiles(commands: &mut Commands, assets: &AssetServer, layout: Layout) -> RoomGrid {
+    let rows = layout.tiles.len();
+    let cols = layout.tiles[0].len();
     let mut grid = RoomGrid {
-        tiles: CARGO_BAY.iter().map(|r| r.chars().collect()).collect(),
-        origin: Vec2::new(
-            -(cols as f32 - 1.0) * TILE / 2.0,
-            (rows as f32 - 1.0) * TILE / 2.0,
-        ),
+        tiles: layout.tiles,
+        origin: Vec2::new(-(cols as f32 - 1.0) * TILE / 2.0, (rows as f32 - 1.0) * TILE / 2.0),
         spawn_points: Vec::new(),
         crew_spawn: Vec2::ZERO,
     };
+    grid.crew_spawn = grid.tile_center(layout.spawn.0, layout.spawn.1);
 
     let floor = assets.load("sprites/tiles/floor.png");
     let grate = assets.load("sprites/tiles/grate.png");
@@ -248,27 +316,31 @@ fn spawn_room(mut commands: Commands, assets: Res<AssetServer>) {
     let hazard = assets.load("sprites/tiles/hazard.png");
     let door = assets.load("sprites/tiles/door.png");
     let vent = assets.load("sprites/tiles/vent.png");
+    let lift = assets.load("sprites/tiles/lift.png");
 
     for row in 0..rows {
         for col in 0..cols {
             let ch = grid.tiles[row][col];
             let pos = grid.tile_center(col, row);
-            let image = match ch {
-                '#' => wall.clone(),
-                'D' => door.clone(),
-                ',' => grate.clone(),
-                '=' => hazard.clone(),
-                'v' => vent.clone(),
-                _ => floor.clone(),
+            let sprite = match ch {
+                // Solid rock with no floor next to it is just dark hull.
+                '#' if !grid.touches_floor(col, row) => Sprite::from_color(HULL, Vec2::splat(TILE)),
+                '#' => Sprite::from_image(wall.clone()),
+                'D' => Sprite::from_image(door.clone()),
+                ',' => Sprite::from_image(grate.clone()),
+                '=' => Sprite::from_image(hazard.clone()),
+                'v' => Sprite::from_image(vent.clone()),
+                'L' => Sprite::from_image(lift.clone()),
+                'u' => Sprite {
+                    image: lift.clone(),
+                    color: Color::srgb(0.45, 0.45, 0.5),
+                    ..default()
+                },
+                _ => Sprite::from_image(floor.clone()),
             };
-            commands.spawn((
-                Level,
-                Sprite::from_image(image),
-                Transform::from_translation(pos.extend(0.0)),
-            ));
+            commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
 
             match ch {
-                'P' => grid.crew_spawn = pos,
                 'v' => grid.spawn_points.push(pos),
                 'D' => {
                     let inside = grid
@@ -281,19 +353,18 @@ fn spawn_room(mut commands: Commands, assets: Res<AssetServer>) {
             }
         }
     }
-
-    commands.insert_resource(grid);
+    grid
 }
 
 /// Places loot and guards. Host only; everyone else receives them by replication.
-fn populate_room(mut commands: Commands, grid: Res<RoomGrid>) {
+fn populate(commands: &mut Commands, grid: &RoomGrid) {
     for (row, line) in grid.tiles.iter().enumerate() {
         for (col, &ch) in line.iter().enumerate() {
             let pos = grid.tile_center(col, row);
             if let Some(kind) = LootKind::from_char(ch) {
-                spawn_loot(&mut commands, kind, pos);
+                spawn_loot(commands, kind, pos);
             } else if let Some(kind) = EnemyKind::from_char(ch) {
-                spawn_enemy(&mut commands, kind, pos, false);
+                spawn_enemy(commands, kind, pos, false);
             }
         }
     }

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::{Arsenal, GunKind};
 use crate::net::{HOST_ID, LocalId, LocalPlayer, PlayerInput, authority};
-use crate::room::RoomGrid;
+use crate::mission::MissionStatus;
+use crate::room::{Heist, RoomGrid, TILE};
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
 const SPEED: f32 = 75.0;
@@ -24,6 +25,8 @@ const TRAIL_INTERVAL: f32 = 0.025;
 const HITBOX_HALF: Vec2 = Vec2::new(5.0, 3.0);
 /// The hitbox sits at the pirate's feet, not the sprite centre.
 const FEET_OFFSET: Vec2 = Vec2::new(0.0, -5.0);
+/// Where pirates who aren't on the current deck are parked, far off the map.
+pub const OFF_DECK: Vec2 = Vec2::new(-100_000.0, 0.0);
 const SLOT_COLORS: [Color; 4] = [
     Color::srgb(1.0, 0.6, 0.25),
     Color::srgb(0.4, 0.85, 1.0),
@@ -47,6 +50,7 @@ impl Plugin for PlayerPlugin {
                     move_players.run_if(in_state(GameState::Playing)).run_if(authority),
                     animate_players,
                     dash_trails,
+                    hide_other_decks,
                     follow_camera,
                 )
                     .chain(),
@@ -73,6 +77,8 @@ pub struct Player {
     pub credits: u32,
     pub items: u32,
     pub status: PirateStatus,
+    /// Deck this pirate is on (0 = top). The crew only moves down together.
+    pub deck: u8,
 }
 
 #[derive(Component)]
@@ -135,7 +141,7 @@ impl Default for LocalAim {
     }
 }
 
-fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2) {
+fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2, deck: u8) {
     commands.spawn((
         Level,
         Replicated,
@@ -145,6 +151,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2) {
             credits: 0,
             items: 0,
             status: PirateStatus::Active,
+            deck,
         },
         Team::Player,
         Health::new(MAX_HEALTH, 0.5).with_shield(MAX_SHIELD),
@@ -158,18 +165,34 @@ fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2) {
     ));
 }
 
-/// Spread the crew along the spawn corridor: 0, +1, -1, +2, -2 tiles...
-fn crew_spot(spawn: Vec2, slot: u8) -> Vec2 {
-    let step = (slot as f32 / 2.0).ceil() * 16.0;
-    let sign = if slot % 2 == 1 { 1.0 } else { -1.0 };
-    spawn + Vec2::new(0.0, step * sign)
+/// Packs the crew around the arrival tile: first the 2x2 lift, then around it.
+pub fn crew_spot(spawn: Vec2, index: usize) -> Vec2 {
+    const SPOTS: [(f32, f32); 9] = [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, -1.0),
+        (1.0, -1.0),
+        (-1.0, 0.0),
+        (-1.0, -1.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (0.5, -2.0),
+    ];
+    let (x, y) = SPOTS[index % SPOTS.len()];
+    spawn + Vec2::new(x, y) * TILE
 }
 
 /// Spawns the host's pirate and one for every connected client at the start of a run.
-pub fn spawn_crew(mut commands: Commands, grid: Res<RoomGrid>, clients: Query<&NetworkId, With<AuthorizedClient>>) {
+pub fn spawn_crew(
+    mut commands: Commands,
+    grid: Res<RoomGrid>,
+    heist: Res<Heist>,
+    clients: Query<&NetworkId, With<AuthorizedClient>>,
+) {
     let owners = iter::once(HOST_ID).chain(clients.iter().map(NetworkId::get));
     for (slot, owner) in owners.enumerate() {
-        spawn_player(&mut commands, owner, slot as u8, crew_spot(grid.crew_spawn, slot as u8));
+        let pos = crew_spot(grid.crew_spawn, slot);
+        spawn_player(&mut commands, owner, slot as u8, pos, heist.deck);
     }
 }
 
@@ -179,6 +202,7 @@ fn on_client_joined(
     ids: Query<&NetworkId>,
     players: Query<&Player>,
     grid: Option<Res<RoomGrid>>,
+    heist: Res<Heist>,
     state: Res<State<GameState>>,
 ) {
     let (Ok(id), Some(grid)) = (ids.get(add.entity), grid) else { return };
@@ -186,7 +210,7 @@ fn on_client_joined(
     // Mid-results joiners get a pirate when the next run starts.
     if *state.get() == GameState::Playing {
         let slot = players.iter().map(|p| p.slot + 1).max().unwrap_or(0);
-        spawn_player(&mut commands, id.get(), slot, crew_spot(grid.crew_spawn, slot));
+        spawn_player(&mut commands, id.get(), slot, crew_spot(grid.crew_spawn, slot as usize), heist.deck);
     }
 }
 
@@ -446,19 +470,45 @@ fn dash_trails(
     }
 }
 
+/// Pirates left on another deck aren't drawn.
+fn hide_other_decks(status: Option<Single<&MissionStatus>>, mut players: Query<(&Player, &mut Visibility)>) {
+    let Some(status) = status else { return };
+    for (player, mut visibility) in &mut players {
+        visibility.set_if_neq(if player.deck == status.deck {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+/// Follows this machine's pirate, or, once they're left behind, whoever is still
+/// in the heist.
 fn follow_camera(
     time: Res<Time>,
     mut shake: ResMut<Shake>,
     mut rng: ResMut<Rng>,
-    player: Option<Single<&Transform, (With<LocalPlayer>, Without<Camera2d>)>>,
+    players: Query<(&Transform, &Player, &Health, Has<LocalPlayer>), Without<Camera2d>>,
     mut camera: Single<&mut Transform, With<Camera2d>>,
     mut smoothed: Local<Option<Vec2>>,
 ) {
-    let Some(player) = player else { return };
+    let local = players.iter().find(|(_, _, _, local)| *local);
+    let in_heist = |p: &Player| p.status != PirateStatus::LeftBehind;
+    let followed = match local {
+        Some(local) if in_heist(local.1) => Some(local),
+        _ => players
+            .iter()
+            .find(|(_, p, h, _)| p.status == PirateStatus::Active && !h.is_dead())
+            .or(local),
+    };
+    let Some((player, ..)) = followed else { return };
     // Follow a smoothed point and add shake on top, so shake never accumulates.
     let target = player.translation.truncate();
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
-    let follow = smoothed.map_or(target, |s| s.lerp(target, t));
+    // Big jumps (riding the lift, switching who we watch) cut instead of panning.
+    let follow = smoothed
+        .filter(|s| s.distance(target) < 200.0)
+        .map_or(target, |s| s.lerp(target, t));
     *smoothed = Some(follow);
 
     let jolt = Vec2::new(rng.signed(), rng.signed()) * shake.0 * shake.0 * 5.0;

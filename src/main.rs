@@ -1,4 +1,5 @@
 mod combat;
+mod deckgen;
 mod enemies;
 mod guns;
 mod loot;

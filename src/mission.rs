@@ -6,8 +6,8 @@ use crate::combat::{FxKind, Health, fx};
 use crate::enemies::{EnemyLook, roll_reinforcement, spawn_enemy};
 use crate::loot::LootKind;
 use crate::net::{LocalPlayer, NetMode, authority};
-use crate::player::{DASH_COOLDOWN, Dash, PirateStatus, Player};
-use crate::room::RoomGrid;
+use crate::player::{Controls, DASH_COOLDOWN, Dash, PirateStatus, Player};
+use crate::room::{DECKS, Heist, RoomGrid};
 use crate::{GameState, Hud, Rng};
 
 pub const MAX_ALARM: f32 = 5.0;
@@ -17,6 +17,10 @@ const REINFORCEMENTS: bool = false;
 const ALARM_CREEP: f32 = 0.015;
 /// Seconds of holding the pad needed to extract.
 const EXTRACT_TIME: f32 = 15.0;
+/// Seconds aboard before the lift goes down.
+const LIFT_TIME: f32 = 6.0;
+/// Alarm levels shed on reaching a new deck: its security hasn't caught up yet.
+const DECK_ALARM_RELIEF: f32 = 1.0;
 const MAX_ALIVE: usize = 14;
 /// Reinforcements won't pop out of a spawn point closer than this to any pirate.
 const SPAWN_CLEARANCE: f32 = 70.0;
@@ -27,6 +31,7 @@ impl Plugin for MissionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Alarm>()
             .init_resource::<Extraction>()
+            .init_resource::<Lift>()
             .init_resource::<Banner>()
             .add_systems(Startup, spawn_mission_hud)
             .add_systems(
@@ -36,7 +41,7 @@ impl Plugin for MissionPlugin {
             .add_systems(OnEnter(GameState::Over), spawn_results)
             .add_systems(
                 Update,
-                (announce_alarm, run_waves, extraction, check_crew_wiped)
+                (announce_alarm, run_waves, ride_lift, extraction, check_crew_wiped)
                     .run_if(in_state(GameState::Playing))
                     .run_if(authority),
             )
@@ -94,6 +99,14 @@ impl Alarm {
         (18.0 - 2.5 * self.level).max(5.0)
     }
 
+    /// Arriving on a fresh deck: the alarm carries over, minus a little relief.
+    fn new_deck(&mut self) {
+        self.level = (self.level - DECK_ALARM_RELIEF).max(0.0);
+        self.announced = self.level.floor() as u32;
+        self.wave_timer = 8.0;
+        self.surge = 0;
+    }
+
     fn wave_size(&self, crew: usize) -> usize {
         let base = 1.0 + (self.level * 0.8).floor();
         // Each extra pirate adds half a wave: a crew is stronger, but not twice as safe.
@@ -106,6 +119,12 @@ struct Extraction {
     progress: f32,
     started: bool,
     on_pad: bool,
+}
+
+#[derive(Resource, Default)]
+struct Lift {
+    progress: f32,
+    aboard: bool,
 }
 
 #[derive(Resource, Default)]
@@ -127,10 +146,15 @@ impl Banner {
 #[derive(Component, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MissionStatus {
     phase: GameState,
+    /// Which heist layout, so clients build the same decks.
+    pub seed: u32,
+    pub deck: u8,
     alarm: f32,
     next_wave: f32,
     extraction: f32,
     on_pad: bool,
+    lift: f32,
+    on_lift: bool,
     banner: String,
     banner_color: Color,
     banner_alpha: f32,
@@ -169,10 +193,14 @@ fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>
         Replicated,
         MissionStatus {
             phase: GameState::Playing,
+            seed: 0,
+            deck: 0,
             alarm: 0.0,
             next_wave: 0.0,
             extraction: 0.0,
             on_pad: false,
+            lift: 0.0,
+            on_lift: false,
             banner: String::new(),
             banner_color: Color::WHITE,
             banner_alpha: 0.0,
@@ -180,12 +208,19 @@ fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>
     ));
 }
 
-fn reset_mission(mut alarm: ResMut<Alarm>, mut extraction: ResMut<Extraction>, mut banner: ResMut<Banner>, mode: Res<NetMode>) {
+fn reset_mission(
+    mut alarm: ResMut<Alarm>,
+    mut extraction: ResMut<Extraction>,
+    mut lift: ResMut<Lift>,
+    mut banner: ResMut<Banner>,
+    mode: Res<NetMode>,
+) {
     *alarm = Alarm::default();
     *extraction = Extraction::default();
+    *lift = Lift::default();
     let text = match *mode {
-        NetMode::Solo => "Grab what you can, then hold the hazard pad (south-east) to extract",
-        _ => "Only pirates standing on the pad when extraction completes get out",
+        NetMode::Solo => "Hold a hazard pad to extract, or ride the lift down to richer decks",
+        _ => "Only pirates aboard when a lift or pad completes go with it",
     };
     banner.show(text, Color::srgb(0.85, 0.9, 1.0), 6.0);
 }
@@ -197,18 +232,24 @@ fn tick_banner(time: Res<Time>, mut banner: ResMut<Banner>) {
 /// Copies host-only mission state into the replicated status, only when it changes.
 fn publish_status(
     state: Res<State<GameState>>,
+    heist: Res<Heist>,
     alarm: Res<Alarm>,
     extraction: Res<Extraction>,
+    lift: Res<Lift>,
     banner: Res<Banner>,
     mut status: Single<&mut MissionStatus>,
 ) {
     status.set_if_neq(MissionStatus {
         phase: *state.get(),
+        seed: heist.seed,
+        deck: heist.deck,
         alarm: alarm.level,
         // Whole seconds are all the HUD shows; avoids replicating every frame.
         next_wave: alarm.wave_timer.max(0.0).ceil(),
         extraction: (extraction.progress * 10.0).round() / 10.0,
         on_pad: extraction.on_pad,
+        lift: (lift.progress * 10.0).round() / 10.0,
+        on_lift: lift.aboard,
         banner: banner.text.clone(),
         banner_color: banner.color,
         banner_alpha: (banner.timer.min(1.0) * 20.0).round() / 20.0,
@@ -295,9 +336,67 @@ fn run_waves(
     }
 }
 
-fn on_pad(grid: &RoomGrid, transform: &Transform) -> bool {
+fn standing_on(grid: &RoomGrid, transform: &Transform, tile: char) -> bool {
     let feet = transform.translation.truncate() + Vec2::new(0.0, -4.0);
-    grid.tile_at(feet) == Some('=')
+    grid.tile_at(feet) == Some(tile)
+}
+
+fn on_pad(grid: &RoomGrid, transform: &Transform) -> bool {
+    standing_on(grid, transform, '=')
+}
+
+/// The lift fills while any living pirate is aboard. When it goes, the pirates
+/// aboard ride down to the next deck; everyone else is left behind.
+fn ride_lift(
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut heist: ResMut<Heist>,
+    mut alarm: ResMut<Alarm>,
+    mut lift: ResMut<Lift>,
+    mut extraction: ResMut<Extraction>,
+    mut banner: ResMut<Banner>,
+    mut players: Query<(&mut Player, &Health, &Transform, &mut Controls)>,
+) {
+    let active = |p: &Player, h: &Health| p.status == PirateStatus::Active && !h.is_dead();
+    let was_aboard = lift.aboard;
+    lift.aboard = players
+        .iter()
+        .any(|(p, h, t, _)| active(p, h) && standing_on(&grid, t, 'L'));
+    if lift.aboard && !was_aboard && lift.progress == 0.0 {
+        banner.show("LIFT ARMED  -  anyone not aboard stays on this deck", Color::srgb(0.5, 0.9, 1.0), 3.0);
+    }
+
+    let dt = time.delta_secs();
+    lift.progress = if lift.aboard {
+        lift.progress + dt
+    } else {
+        (lift.progress - 0.5 * dt).max(0.0)
+    };
+    if lift.progress < LIFT_TIME {
+        return;
+    }
+
+    heist.deck += 1;
+    for (mut player, health, transform, mut controls) in &mut players {
+        if !active(&player, health) {
+            continue;
+        }
+        if standing_on(&grid, transform, 'L') {
+            player.deck = heist.deck;
+        } else {
+            player.status = PirateStatus::LeftBehind;
+            *controls = Controls::default();
+        }
+    }
+    *lift = Lift::default();
+    *extraction = Extraction::default();
+    alarm.new_deck();
+    let text = if heist.deck + 1 == DECKS {
+        format!("DECK {DECKS}/{DECKS}  -  THE VAULT. Nothing deeper: grab it and find a pad")
+    } else {
+        format!("DECK {}/{DECKS}  -  richer loot, tougher guards", heist.deck + 1)
+    };
+    banner.show(text, Color::srgb(0.5, 0.9, 1.0), 4.0);
 }
 
 /// Extraction fills while any living pirate holds the pad. When it completes,
@@ -517,22 +616,36 @@ fn update_player_bars(
     };
 }
 
-fn update_alarm_text(status: Option<Single<&MissionStatus>>, text: Single<(&mut Text, &mut TextColor), With<AlarmText>>) {
+fn update_alarm_text(
+    status: Option<Single<&MissionStatus>>,
+    local: Option<Single<&Player, With<LocalPlayer>>>,
+    text: Single<(&mut Text, &mut TextColor), With<AlarmText>>,
+) {
     let Some(status) = status else { return };
     let (mut text, mut color) = text.into_inner();
-    if status.alarm <= 0.0 {
-        text.0 = "UNDETECTED".into();
-        color.0 = Color::srgba(0.7, 0.9, 1.0, 0.7);
-        return;
-    }
-    let filled = (status.alarm.floor() as usize).min(MAX_ALARM as usize);
-    let meter: String = (0..MAX_ALARM as usize).map(|i| if i < filled { '#' } else { '-' }).collect();
-    text.0 = if REINFORCEMENTS {
-        format!("ALARM [{meter}]   next wave {:.0}s", status.next_wave)
+    let deck = format!("DECK {}/{DECKS}", status.deck + 1);
+    let left_behind = local.is_some_and(|p| p.status == PirateStatus::LeftBehind);
+    let (content, tint) = if left_behind && status.phase == GameState::Playing {
+        (
+            format!("LEFT BEHIND  -  watching the crew on deck {}", status.deck + 1),
+            Color::srgb(1.0, 0.7, 0.3),
+        )
+    } else if status.alarm <= 0.0 {
+        (format!("{deck}    UNDETECTED"), Color::srgba(0.7, 0.9, 1.0, 0.7))
     } else {
-        format!("ALARM [{meter}]   reinforcements off")
+        let filled = (status.alarm.floor() as usize).min(MAX_ALARM as usize);
+        let meter: String = (0..MAX_ALARM as usize).map(|i| if i < filled { '#' } else { '-' }).collect();
+        let waves = if REINFORCEMENTS {
+            format!("next wave {:.0}s", status.next_wave)
+        } else {
+            "reinforcements off".into()
+        };
+        (format!("{deck}    ALARM [{meter}]   {waves}"), alarm_color(status.alarm))
     };
-    color.0 = alarm_color(status.alarm);
+    if text.0 != content {
+        text.0 = content;
+    }
+    color.0 = tint;
 }
 
 fn update_banner(status: Option<Single<&MissionStatus>>, text: Single<(&mut Text, &mut TextColor), With<BannerText>>) {
@@ -551,14 +664,33 @@ fn update_extraction_hud(
     mut text: Single<&mut Text, With<ExtractionText>>,
 ) {
     let Some(status) = status else { return };
-    panel.display = if status.extraction > 0.0 { Display::Flex } else { Display::None };
-    let frac = (status.extraction / EXTRACT_TIME).clamp(0.0, 1.0);
-    fill.width = Val::Percent(frac * 100.0);
-    text.0 = if status.on_pad {
-        format!("EXTRACTING  {:.0}%  -  be on the pad when it hits 100", frac * 100.0)
+    // Extraction matters more, so it wins if both are running.
+    let content = if status.extraction > 0.0 {
+        let frac = (status.extraction / EXTRACT_TIME).clamp(0.0, 1.0);
+        let pct = frac * 100.0;
+        Some((frac, if status.on_pad {
+            format!("EXTRACTING  {pct:.0}%  -  be on the pad when it hits 100")
+        } else {
+            format!("EXTRACTION PAUSED  {pct:.0}%  -  get back on the pad")
+        }))
+    } else if status.lift > 0.0 {
+        let frac = (status.lift / LIFT_TIME).clamp(0.0, 1.0);
+        let pct = frac * 100.0;
+        let next = status.deck + 2;
+        Some((frac, if status.on_lift {
+            format!("LIFT TO DECK {next}  {pct:.0}%  -  anyone not aboard stays behind")
+        } else {
+            format!("LIFT PAUSED  {pct:.0}%  -  get back aboard")
+        }))
     } else {
-        format!("EXTRACTION PAUSED  {:.0}%  -  get back on the pad", frac * 100.0)
+        None
     };
+    panel.display = if content.is_some() { Display::Flex } else { Display::None };
+    let Some((frac, content)) = content else { return };
+    fill.width = Val::Percent(frac * 100.0);
+    if text.0 != content {
+        text.0 = content;
+    }
 }
 
 fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health), With<LocalPlayer>>>) {
@@ -566,12 +698,12 @@ fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health
         Some((p, _)) if p.status == PirateStatus::Extracted => (
             "EXTRACTED",
             Color::srgb(0.45, 1.0, 0.55),
-            format!("You made it out with {} items worth {} cr", p.items, p.credits),
+            format!("You got out from deck {} with {} items worth {} cr", p.deck + 1, p.items, p.credits),
         ),
         Some((p, _)) if p.status == PirateStatus::LeftBehind => (
             "LEFT BEHIND",
             Color::srgb(1.0, 0.7, 0.3),
-            format!("The crew extracted without you. {} cr stays in the station", p.credits),
+            format!("The crew left without you. {} cr stays on deck {}", p.credits, p.deck + 1),
         ),
         Some((p, _)) => (
             "LOST IN THE STATION",
