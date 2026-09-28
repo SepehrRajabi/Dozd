@@ -249,6 +249,69 @@ PLAYER = (
 )
 
 
+# The Engineer: the same pirate in a hi-vis coat and a blue bandana.
+ENGINEER_PALETTE = {
+    **PLAYER[1],
+    "G": rgb(80, 160, 255),
+    "T": rgb(220, 130, 45),
+    "t": rgb(150, 82, 30),
+}
+
+# The Bulwark: steel plating and a cyan bandana.
+BULWARK_PALETTE = {
+    **PLAYER[1],
+    "G": rgb(90, 210, 255),
+    "T": rgb(100, 115, 145),
+    "t": rgb(62, 72, 98),
+}
+
+# The Hacker: a dark coat and a green bandana.
+HACKER_PALETTE = {
+    **PLAYER[1],
+    "G": rgb(90, 240, 110),
+    "T": rgb(78, 56, 105),
+    "t": rgb(48, 34, 68),
+}
+
+# The Engineer's sentry: a tripod base, and a gun head that turns to aim.
+SENTRY_METAL = {
+    "O": rgb(220, 130, 45),
+    "o": rgb(150, 82, 30),
+    "Y": rgb(255, 220, 90),
+    "M": rgb(150, 155, 172),
+    "m": rgb(88, 92, 110),
+    "S": rgb(175, 182, 200),
+}
+
+SENTRY = [
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    ".....kkkkkk.....",
+    "....kOOOOOOk....",
+    "....kOYooYOk....",
+    "....kkkkkkkk....",
+    ".....kMmmMk.....",
+    "....kMkmmkMk....",
+    "...kMk.kk.kMk...",
+    "..kMk..kk..kMk..",
+    "..kk...kk...kk..",
+    "................",
+]
+
+SENTRY_GUN = [
+    "............",
+    ".kkkkkk.....",
+    "kOOOOOOkkkkk",
+    "kooYoooSSSSk",
+    "kkkkkkkkkkkk",
+    "............",
+]
+
+
 # --------------------------------------------------------------------------
 # Guns: 16x8, barrel pointing right, grip toward the left-centre.
 # --------------------------------------------------------------------------
@@ -909,6 +972,16 @@ def main():
 
     player = from_ascii("player", *PLAYER)
     write_png(os.path.join(ROOT, "player.png"), player)
+    engineer = from_ascii("player_engineer", PLAYER[0], ENGINEER_PALETTE)
+    write_png(os.path.join(ROOT, "player_engineer.png"), engineer)
+    bulwark = from_ascii("player_bulwark", PLAYER[0], BULWARK_PALETTE)
+    write_png(os.path.join(ROOT, "player_bulwark.png"), bulwark)
+    hacker = from_ascii("player_hacker", PLAYER[0], HACKER_PALETTE)
+    write_png(os.path.join(ROOT, "player_hacker.png"), hacker)
+    sentry = from_ascii("sentry", SENTRY, SENTRY_METAL)
+    write_png(os.path.join(ROOT, "sentry.png"), sentry)
+    sentry_gun = from_ascii("sentry_gun", SENTRY_GUN, SENTRY_METAL, width=12, height=6)
+    write_png(os.path.join(ROOT, "sentry_gun.png"), sentry_gun)
 
     tiles = {
         "floor": floor_tile(),
@@ -968,7 +1041,7 @@ def main():
     write_png(os.path.join(preview, "loot.png"), contact_sheet(list(loot.values())))
     write_png(
         os.path.join(preview, "player_tiles.png"),
-        contact_sheet([player] + list(tiles.values())),
+        contact_sheet([player, engineer, bulwark, hacker, sentry] + list(tiles.values())),
     )
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))

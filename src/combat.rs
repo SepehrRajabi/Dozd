@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::{RIOT_THICKNESS, RiotShield};
 use crate::net::{LocalPlayer, authority};
 use crate::perks::PerkKind;
 use crate::room::RoomGrid;
@@ -384,9 +385,18 @@ fn move_projectiles(
     mut projectiles: Query<(Entity, &mut Projectile, &mut Transform)>,
     targets: Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
     mut victims: Query<(&mut Health, Option<&mut Knockback>)>,
+    riot_shields: Query<(&RiotShield, &Transform), Without<Projectile>>,
 ) {
     // Sub-step so fast shots can't tunnel through walls or targets in one frame.
     const MAX_STEP: f32 = 4.0;
+    let shields: Vec<_> = riot_shields.iter().map(|(s, t)| s.outline(t.translation.truncate())).collect();
+    let blocked = |pos: Vec2| {
+        shields.iter().flat_map(|outline| outline.windows(2)).any(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let t = ((pos - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+            pos.distance(a + (b - a) * t) <= RIOT_THICKNESS
+        })
+    };
 
     'projectiles: for (entity, mut projectile, mut transform) in &mut projectiles {
         let travel = projectile.velocity * time.delta_secs();
@@ -395,7 +405,8 @@ fn move_projectiles(
             transform.translation += (travel / steps).extend(0.0);
             let pos = transform.translation.truncate();
 
-            if grid.is_solid_at(pos) {
+            // A Bulwark's riot shield stops everything, whoever fired it.
+            if grid.is_solid_at(pos) || blocked(pos) {
                 fx(&mut commands, FxKind::Spark, pos, 0.0, projectile.color);
                 commands.entity(entity).despawn();
                 continue 'projectiles;

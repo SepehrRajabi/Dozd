@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::Sentry;
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::drops::{EnemyDrop, spawn_drops};
 use crate::mission::Alarm;
@@ -138,6 +139,8 @@ pub struct EnemyLook {
     pub kind: EnemyKind,
     pub state: AiState,
     pub stunned: bool,
+    /// Fighting for the crew.
+    pub hacked: bool,
 }
 
 /// Host-only AI state.
@@ -157,6 +160,8 @@ pub struct Enemy {
     velocity: Vec2,
     /// Seconds left frozen by a shock field.
     stun: f32,
+    /// Seconds left fighting for the crew after a Hacker turned it.
+    hacked: f32,
 }
 
 impl Enemy {
@@ -166,6 +171,18 @@ impl Enemy {
         self.state = AiState::Hunt;
         self.burst_left = 0;
         self.velocity = Vec2::ZERO;
+    }
+
+    pub fn is_hacked(&self) -> bool {
+        self.hacked > 0.0
+    }
+
+    /// Turns the enemy against its own side for `secs`.
+    pub fn hack(&mut self, secs: f32) {
+        self.hacked = secs;
+        self.state = AiState::Hunt;
+        self.burst_left = 0;
+        self.attack_cooldown = self.attack_cooldown.min(0.5);
     }
 }
 
@@ -180,7 +197,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
     commands.spawn((
         Level,
         Replicated,
-        EnemyLook { kind, state, stunned: false },
+        EnemyLook { kind, state, stunned: false, hacked: false },
         Enemy {
             kind,
             state,
@@ -194,6 +211,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             wander: None,
             velocity: Vec2::ZERO,
             stun: 0.0,
+            hacked: 0.0,
         },
         Team::Enemy,
         Health::new(stats.health, 0.0),
@@ -228,11 +246,21 @@ fn dress_enemy(add: On<Add, EnemyLook>, mut commands: Commands, assets: Res<Asse
         });
 }
 
-fn enemy_shot(commands: &mut Commands, pos: Vec2, angle: f32, speed: f32, damage: f32, look: ProjectileLook, color: Color) {
+#[allow(clippy::too_many_arguments)]
+fn enemy_shot(
+    commands: &mut Commands,
+    team: Team,
+    pos: Vec2,
+    angle: f32,
+    speed: f32,
+    damage: f32,
+    look: ProjectileLook,
+    color: Color,
+) {
     spawn_projectile(
         commands,
         Projectile {
-            team: Team::Enemy,
+            team,
             velocity: Vec2::from_angle(angle) * speed,
             remaining: 260.0,
             damage,
@@ -254,29 +282,54 @@ fn think(
     mut alarm: ResMut<Alarm>,
     mut noise: ResMut<Noise>,
     mut rng: ResMut<Rng>,
-    mut players: Query<(Entity, &Transform, &mut Health, &Player, &Perks), Without<Enemy>>,
-    mut enemies: Query<(&mut Enemy, &Transform, &Health)>,
+    mut victims: Query<
+        (Entity, &Transform, &mut Health, Option<&Player>, Option<&Perks>),
+        (Without<Enemy>, Or<(With<Player>, With<Sentry>)>),
+    >,
+    mut enemies: Query<(Entity, &mut Enemy, &Transform, &mut Health, &mut Team)>,
 ) {
     let dt = time.delta_secs();
-    // Cloaked pirates simply don't exist as far as the AI is concerned.
-    let targets: Vec<(Entity, Vec2)> = players
+    // Hacks wear off, and a turned enemy's shots and wounds follow its side.
+    for (_, mut enemy, _, _, mut team) in &mut enemies {
+        if enemy.hacked > 0.0 {
+            enemy.hacked = (enemy.hacked - dt).max(0.0);
+        }
+        let side = if enemy.hacked > 0.0 { Team::Player } else { Team::Enemy };
+        if *team != side {
+            *team = side;
+        }
+    }
+
+    // The crew: pirates, their sentries and hacked enemies. Cloaked pirates
+    // simply don't exist as far as the AI is concerned.
+    let mut crew: Vec<(Entity, Vec2)> = victims
         .iter()
         .filter(|(_, _, health, player, perks)| {
-            !health.is_dead() && player.status == PirateStatus::Active && !perks.has(PerkKind::Cloak)
+            !health.is_dead()
+                && player.is_none_or(|p| p.status == PirateStatus::Active)
+                && perks.is_none_or(|p| !p.has(PerkKind::Cloak))
         })
         .map(|(e, t, ..)| (e, t.translation.truncate()))
         .collect();
+    // Whoever a hacked enemy goes after: the station's own.
+    let mut station = Vec::new();
+    for (entity, enemy, transform, health, _) in &enemies {
+        if !health.is_dead() {
+            let side = if enemy.hacked > 0.0 { &mut crew } else { &mut station };
+            side.push((entity, transform.translation.truncate()));
+        }
+    }
     let heard = std::mem::take(&mut noise.0);
 
     // Waking up: sight, gunfire, getting shot, or a station-wide lockdown.
     let mut woken = Vec::new();
-    for (mut enemy, transform, health) in &mut enemies {
+    for (_, mut enemy, transform, health, _) in &mut enemies {
         if enemy.state != AiState::Idle {
             continue;
         }
         let pos = transform.translation.truncate();
         let sight = enemy.kind.stats().sight;
-        let sees = targets
+        let sees = crew
             .iter()
             .any(|(_, t)| pos.distance(*t) < sight && grid.line_of_sight(pos, *t));
         let hears = heard.iter().any(|n| n.distance(pos) < HEARING);
@@ -289,7 +342,7 @@ fn think(
         }
     }
     if !woken.is_empty() {
-        for (mut enemy, transform, _) in &mut enemies {
+        for (_, mut enemy, transform, ..) in &mut enemies {
             let pos = transform.translation.truncate();
             if enemy.state == AiState::Idle && woken.iter().any(|w| w.distance(pos) < ALERT_SHARE) {
                 enemy.state = AiState::Hunt;
@@ -297,7 +350,9 @@ fn think(
         }
     }
 
-    for (mut enemy, transform, _) in &mut enemies {
+    // Lunges landing on other enemies, applied once the loop lets go of them.
+    let mut bites = Vec::new();
+    for (entity, mut enemy, transform, _, team) in &mut enemies {
         let stats = enemy.kind.stats();
         let pos = transform.translation.truncate();
         if enemy.stun > 0.0 {
@@ -308,14 +363,28 @@ fn think(
         enemy.timer -= dt;
         enemy.attack_cooldown -= dt;
 
-        let Some(&(target_entity, target)) = targets
-            .iter()
-            .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
-        else {
-            // Nobody left to hunt.
-            enemy.velocity = Vec2::ZERO;
+        let hacked = enemy.hacked > 0.0;
+        let foes = if hacked { &station } else { &crew };
+        let nearest = |list: &[(Entity, Vec2)]| {
+            list.iter()
+                .filter(|(e, _)| *e != entity)
+                .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
+                .copied()
+        };
+        let Some((target_entity, target)) = nearest(foes) else {
+            enemy.velocity = match nearest(&crew) {
+                // A hacked enemy with nothing to fight tags along with the crew.
+                Some((_, leader)) if hacked && leader.distance(pos) > 40.0 => {
+                    let dir = (leader - pos).normalize_or_zero();
+                    let chase = if grid.line_of_sight(pos, leader) { dir } else { field.step(&grid, pos).unwrap_or(Vec2::ZERO) };
+                    chase * stats.speed
+                }
+                // Nobody left to hunt.
+                _ => Vec2::ZERO,
+            };
             continue;
         };
+        let side = *team;
         let to_target = target - pos;
         let dist = to_target.length();
         let dir = to_target.normalize_or(Vec2::X);
@@ -351,7 +420,7 @@ fn think(
                 if enemy.burst_left > 0 && enemy.timer <= 0.0 {
                     let angle = dir.to_angle() + rng.signed() * 0.08;
                     let color = Color::srgb(1.0, 0.3, 0.25);
-                    enemy_shot(&mut commands, pos + dir * 6.0, angle, 150.0, 8.0, ProjectileLook::EnemyBolt, color);
+                    enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 150.0, 8.0, ProjectileLook::EnemyBolt, color);
                     enemy.burst_left -= 1;
                     enemy.timer = 0.1;
                 } else if enemy.burst_left == 0 && enemy.attack_cooldown <= 0.0 && los && dist < 150.0 {
@@ -388,10 +457,13 @@ fn think(
             (EnemyKind::Stalker, AiState::Lunge) => {
                 enemy.velocity = enemy.lunge_dir * 240.0;
                 if !enemy.lunge_hit && dist < 11.0 {
-                    let hit = players
-                        .get_mut(target_entity)
-                        .is_ok_and(|(_, _, mut health, ..)| health.hurt(25.0));
-                    enemy.lunge_hit = hit;
+                    enemy.lunge_hit = match victims.get_mut(target_entity) {
+                        Ok((_, _, mut health, ..)) => health.hurt(25.0),
+                        Err(_) => {
+                            bites.push(target_entity);
+                            true
+                        }
+                    };
                 }
                 if enemy.timer <= 0.0 {
                     enemy.state = AiState::Recover;
@@ -419,7 +491,7 @@ fn think(
                     let color = Color::srgb(1.0, 0.55, 0.2);
                     for i in 0..5 {
                         let angle = dir.to_angle() + (i as f32 / 4.0 - 0.5) * 0.7;
-                        enemy_shot(&mut commands, pos + dir * 8.0, angle, 115.0, 12.0, ProjectileLook::EnemyOrb, color);
+                        enemy_shot(&mut commands, side, pos + dir * 8.0, angle, 115.0, 12.0, ProjectileLook::EnemyOrb, color);
                     }
                     enemy.state = AiState::Hunt;
                     enemy.attack_cooldown = 2.4 + rng.unit() * 0.6;
@@ -431,6 +503,12 @@ fn think(
                 debug_assert!(false, "{:?} has no {state:?} behaviour", enemy.kind);
                 enemy.state = AiState::Hunt;
             }
+        }
+    }
+
+    for victim in bites {
+        if let Ok((.., mut health, _)) = enemies.get_mut(victim) {
+            health.hurt(25.0);
         }
     }
 }
@@ -451,6 +529,7 @@ fn move_enemies(
             kind: enemy.kind,
             state: enemy.state,
             stunned: enemy.stun > 0.0,
+            hacked: enemy.hacked > 0.0,
         });
 
         let stats = enemy.kind.stats();
@@ -482,6 +561,9 @@ fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut 
     for (look, health, mut sprite) in &mut enemies {
         sprite.color = if health.flash > 0.0 {
             Color::srgb(1.0, 0.3, 0.3)
+        } else if look.hacked {
+            // Glitches between the crew's green and its own colours.
+            if blink { Color::srgb(0.45, 1.0, 0.55) } else { Color::srgb(0.75, 1.0, 0.8) }
         } else if look.stunned {
             // Crackles between white and electric blue.
             if blink { Color::srgb(0.55, 0.85, 1.0) } else { Color::srgb(0.85, 0.95, 1.0) }

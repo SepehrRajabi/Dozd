@@ -10,6 +10,7 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
+use crate::class::{Ability, Loadout, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
 use crate::drops::EnemyDrop;
 use crate::enemies::EnemyLook;
@@ -144,8 +145,14 @@ pub struct PlayerInput {
     pub slot: Option<u8>,
     pub cycle: i8,
     pub interact: bool,
+    /// Use the class ability (the Engineer's sentry).
+    pub ability: bool,
     pub restart: bool,
 }
+
+/// A joiner's class and guns, sent to the host as soon as they connect.
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct ChooseLoadout(pub Loadout);
 
 pub struct NetPlugin;
 
@@ -171,7 +178,11 @@ impl Plugin for NetPlugin {
             .replicate::<Perks>()
             .replicate::<ProjectileLook>()
             .replicate::<MissionStatus>()
+            .replicate::<Ability>()
+            .replicate::<Sentry>()
+            .replicate::<RiotShield>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
+            .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)
             .add_observer(start_session)
             .add_observer(end_session)

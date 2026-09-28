@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::{RIOT_COLOR, RiotShield};
 use crate::combat::{
     FxKind, Grenade, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_grenade,
     spawn_projectile,
@@ -67,7 +68,9 @@ enum FireMode {
 
 pub struct GunStats {
     pub name: &'static str,
-    sprite: &'static str,
+    /// What it's good for, in a few words, for the loadout screen.
+    pub role: &'static str,
+    pub sprite: &'static str,
     mode: FireMode,
     look: ProjectileLook,
     color: Color,
@@ -91,6 +94,7 @@ pub struct GunStats {
 
 const BLASTER_PISTOL: GunStats = GunStats {
     name: "Blaster Pistol",
+    role: "never runs dry",
     mode: FireMode::Shots,
     sprite: "sprites/guns/blaster_pistol.png",
     look: ProjectileLook::CyanBolt,
@@ -111,6 +115,7 @@ const BLASTER_PISTOL: GunStats = GunStats {
 
 const SCATTER_CANNON: GunStats = GunStats {
     name: "Scatter Cannon",
+    role: "close-range spread",
     mode: FireMode::Shots,
     sprite: "sprites/guns/scatter_cannon.png",
     look: ProjectileLook::OrangePellet,
@@ -131,6 +136,7 @@ const SCATTER_CANNON: GunStats = GunStats {
 
 const PULSE_RIFLE: GunStats = GunStats {
     name: "Pulse Rifle",
+    role: "automatic, mid range",
     mode: FireMode::Shots,
     sprite: "sprites/guns/pulse_rifle.png",
     look: ProjectileLook::GreenBolt,
@@ -151,6 +157,7 @@ const PULSE_RIFLE: GunStats = GunStats {
 
 const RAIL_LANCE: GunStats = GunStats {
     name: "Rail Lance",
+    role: "pierces, long range",
     mode: FireMode::Shots,
     sprite: "sprites/guns/rail_lance.png",
     look: ProjectileLook::RailBeam,
@@ -171,6 +178,7 @@ const RAIL_LANCE: GunStats = GunStats {
 
 const ARC_COIL: GunStats = GunStats {
     name: "Arc Coil",
+    role: "chains to 4 nearby",
     mode: FireMode::Arc { targets: 4 },
     sprite: "sprites/guns/arc_coil.png",
     look: ProjectileLook::CyanBolt,
@@ -191,6 +199,7 @@ const ARC_COIL: GunStats = GunStats {
 
 const GRENADE_LAUNCHER: GunStats = GunStats {
     name: "Grenade Launcher",
+    role: "3-grenade burst",
     mode: FireMode::Lob {
         burst: 3,
         gap: 0.14,
@@ -423,14 +432,17 @@ fn fire(
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
     mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks)>,
-    mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback), (With<Enemy>, Without<Player>)>,
+    mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
+    riot_shields: Query<&RiotShield>,
 ) {
     let dt = time.delta_secs();
     for (player, health, controls, transform, aim, mut arsenal, mut perks) in &mut players {
         if arsenal.cooldown > 0.0 {
             arsenal.cooldown = (arsenal.cooldown - dt).max(0.0);
         }
-        if !can_act(player, health) {
+        // A Bulwark needs both hands for the riot shield.
+        let shielding = riot_shields.iter().any(|s| s.owner == player.owner);
+        if !can_act(player, health) || shielding {
             arsenal.burst_left = 0;
             continue;
         }
@@ -496,28 +508,28 @@ fn fire(
             FireMode::Arc { targets } => {
                 let mut in_reach: Vec<(f32, Entity)> = enemies
                     .iter()
-                    .filter(|(_, t, h, hurtbox, _)| {
+                    .filter(|(_, t, h, hurtbox, _, team)| {
                         let pos = t.translation.truncate();
-                        !h.is_dead() && pos.distance(origin) <= stats.range + hurtbox.0 && grid.line_of_sight(origin, pos)
+                        **team == Team::Enemy && !h.is_dead() && pos.distance(origin) <= stats.range + hurtbox.0 && grid.line_of_sight(origin, pos)
                     })
                     .map(|(e, t, ..)| (t.translation.truncate().distance(origin), e))
                     .collect();
                 if in_reach.is_empty() {
-                    // Nothing to jump to: a harmless crackle that costs nothing.
+                    // Nothing to jump to: the charge crackles out into the air,
+                    // costing a round like any other shot.
                     let end = muzzle + Vec2::from_angle(aim_angle + rng.signed() * 0.4) * stats.range * 0.3;
                     fx(&mut commands, FxKind::Zap(end), muzzle, 0.0, stats.color.with_alpha(0.5));
-                    arsenal.cooldown = 0.25;
-                    continue;
-                }
-                in_reach.sort_by(|a, b| a.0.total_cmp(&b.0));
-                in_reach.truncate(targets);
-                let share = stats.damage / in_reach.len() as f32;
-                for &(_, target) in &in_reach {
-                    let Ok((_, t, mut h, _, mut knockback)) = enemies.get_mut(target) else { continue };
-                    let pos = t.translation.truncate();
-                    if h.hurt(share) {
-                        knockback.0 += (pos - origin).normalize_or_zero() * stats.knockback;
-                        fx(&mut commands, FxKind::Zap(pos), muzzle, 0.0, stats.color);
+                } else {
+                    in_reach.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    in_reach.truncate(targets);
+                    let share = stats.damage / in_reach.len() as f32;
+                    for &(_, target) in &in_reach {
+                        let Ok((_, t, mut h, _, mut knockback, _)) = enemies.get_mut(target) else { continue };
+                        let pos = t.translation.truncate();
+                        if h.hurt(share) {
+                            knockback.0 += (pos - origin).normalize_or_zero() * stats.knockback;
+                            fx(&mut commands, FxKind::Zap(pos), muzzle, 0.0, stats.color);
+                        }
                     }
                 }
             }
@@ -597,14 +609,15 @@ fn aim_held_guns(
     time: Res<Time>,
     assets: Res<AssetServer>,
     local_aim: Res<LocalAim>,
-    players: Query<(&Aim, &Arsenal, Option<&Perks>, Has<LocalPlayer>)>,
+    players: Query<(&Player, &Aim, &Arsenal, Option<&Perks>, Has<LocalPlayer>)>,
+    riot_shields: Query<&RiotShield>,
     mut held: Query<(&ChildOf, &mut HeldGun, &mut Sprite, &mut Transform)>,
     mut crosshair: Single<&mut Transform, (With<Crosshair>, Without<HeldGun>)>,
 ) {
     crosshair.translation = local_aim.target.extend(50.0);
 
     for (parent, mut gun, mut sprite, mut transform) in &mut held {
-        let Ok((aim, arsenal, perks, local)) = players.get(parent.parent()) else { continue };
+        let Ok((player, aim, arsenal, perks, local)) = players.get(parent.parent()) else { continue };
         let current = arsenal.gun();
         if gun.kind != Some(current.kind) {
             gun.kind = Some(current.kind);
@@ -616,7 +629,14 @@ fn aim_held_guns(
         }
         gun.last_shots = arsenal.shots;
         let cloaked = perks.is_some_and(|p| p.has(PerkKind::Cloak));
-        sprite.color = Color::WHITE.with_alpha(if cloaked { 0.3 } else { 1.0 });
+        // Put away while both hands hold a riot shield.
+        let shielding = riot_shields.iter().any(|s| s.owner == player.owner);
+        let alpha = match (shielding, cloaked) {
+            (true, _) => 0.0,
+            (false, true) => 0.3,
+            (false, false) => 1.0,
+        };
+        sprite.color = Color::WHITE.with_alpha(alpha);
         gun.kick = (gun.kick - gun.kick * 18.0 * time.delta_secs()).max(0.0);
 
         let dir = if local { local_aim.dir } else { aim.dir };
@@ -680,13 +700,15 @@ fn spawn_weapon_hud(mut commands: Commands) {
 
 fn update_weapon_hud(
     assets: Res<AssetServer>,
-    arsenal: Option<Single<(&Arsenal, &Perks), With<LocalPlayer>>>,
+    arsenal: Option<Single<(&Player, &Arsenal, &Perks), With<LocalPlayer>>>,
+    riot_shields: Query<&RiotShield>,
     mut icon: Single<&mut ImageNode, With<WeaponIcon>>,
     mut name: Single<(&mut Text, &mut TextColor), (With<WeaponName>, Without<AmmoText>)>,
     mut ammo: Single<(&mut Text, &mut TextColor), With<AmmoText>>,
 ) {
     let Some(arsenal) = arsenal else { return };
-    let (arsenal, perks) = *arsenal;
+    let (player, arsenal, perks) = *arsenal;
+    let shielding = riot_shields.iter().any(|s| s.owner == player.owner);
     let gun = arsenal.gun();
     let stats = gun.kind.stats();
 
@@ -701,6 +723,10 @@ fn update_weapon_hud(
 
     let (ammo_text, ammo_color) = &mut *ammo;
     match arsenal.reloading {
+        _ if shielding => {
+            ammo_text.0 = "SHIELD UP".into();
+            ammo_color.0 = RIOT_COLOR;
+        }
         _ if perks.has(PerkKind::Overdrive) => {
             ammo_text.0 = "INFINITE".into();
             ammo_color.0 = PerkKind::Overdrive.color();

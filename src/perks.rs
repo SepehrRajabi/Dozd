@@ -80,7 +80,7 @@ impl PerkKind {
     }
 
     /// What sort of perk it is, shown next to the name.
-    fn category(self) -> &'static str {
+    pub fn category(self) -> &'static str {
         match self {
             Self::Overdrive => "WEAPON",
             Self::NanoPatch => "REPAIR",
@@ -89,7 +89,7 @@ impl PerkKind {
         }
     }
 
-    fn effect(self) -> &'static str {
+    pub fn effect(self) -> &'static str {
         match self {
             Self::Overdrive => "infinite ammo",
             Self::NanoPatch => "hull, shield & dash restored",
@@ -98,8 +98,18 @@ impl PerkKind {
         }
     }
 
+    /// The full story, for the perks guide in the menu.
+    pub fn details(self) -> &'static str {
+        match self {
+            Self::Overdrive => "Refills every magazine, then your guns fire without using ammo or reloading.",
+            Self::NanoPatch => "Repairs your hull and shield to full and readies your dash.",
+            Self::ShockField => "Guards that come close are stunned and lose whatever attack they were winding up.",
+            Self::Cloak => "Guards can't see you, so you can slip past or line up a shot. Firing breaks it.",
+        }
+    }
+
     /// Seconds the perk lasts; `None` for instant ones.
-    fn duration(self) -> Option<f32> {
+    pub fn duration(self) -> Option<f32> {
         match self {
             Self::Overdrive => Some(10.0),
             Self::NanoPatch => None,
@@ -117,7 +127,7 @@ impl PerkKind {
         }
     }
 
-    fn sprite(self) -> &'static str {
+    pub fn sprite(self) -> &'static str {
         match self {
             Self::Overdrive => "sprites/perks/overdrive.png",
             Self::NanoPatch => "sprites/perks/nano_patch.png",
@@ -295,7 +305,7 @@ fn shock_enemies(
     }
     for (mut enemy, transform) in &mut enemies {
         let pos = transform.translation.truncate();
-        if fields.iter().any(|f| f.distance(pos) <= SHOCK_RADIUS) {
+        if !enemy.is_hacked() && fields.iter().any(|f| f.distance(pos) <= SHOCK_RADIUS) {
             enemy.stun(SHOCK_STUN);
         }
     }

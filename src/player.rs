@@ -5,9 +5,10 @@ use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
+use crate::class::{Ability, LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
-use crate::guns::{Arsenal, GunKind};
-use crate::net::{HOST_ID, LocalId, LocalPlayer, PlayerInput, authority};
+use crate::guns::Arsenal;
+use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, PlayerInput, authority};
 use crate::mission::MissionStatus;
 use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
@@ -40,7 +41,11 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<CrewSize>()
             .add_observer(on_client_joined)
             .add_observer(on_client_left)
-            .add_systems(PreUpdate, receive_input.after(ServerSystems::Receive).run_if(authority))
+            .add_systems(
+                PreUpdate,
+                (receive_loadouts, receive_input).after(ServerSystems::Receive).run_if(authority),
+            )
+            .add_systems(OnEnter(ClientState::Connected), send_loadout)
             .add_systems(
                 Update,
                 move_players.run_if(in_state(GameState::Playing)).run_if(authority),
@@ -88,6 +93,7 @@ pub enum PirateStatus {
 pub struct Player {
     /// `LocalId` of the machine controlling this pirate.
     pub owner: u64,
+    pub class: PirateClass,
     /// Join order, used for the name tag and spawn spot.
     pub slot: u8,
     /// This pirate's own haul.
@@ -142,6 +148,7 @@ pub struct Controls {
     pub slot: Option<u8>,
     pub cycle: i8,
     pub interact: bool,
+    pub ability: bool,
 }
 
 impl Controls {
@@ -157,6 +164,7 @@ impl Controls {
         self.slot = input.slot.or(self.slot);
         self.cycle = (self.cycle + input.cycle).clamp(-1, 1);
         self.interact |= input.interact;
+        self.ability |= input.ability;
     }
 }
 
@@ -174,12 +182,13 @@ impl Default for LocalAim {
     }
 }
 
-fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2, deck: u8) {
+fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8, pos: Vec2, deck: u8) {
     commands.spawn((
         Level,
         Replicated,
         Player {
             owner,
+            class: loadout.class,
             slot,
             credits: 0,
             items: 0,
@@ -192,7 +201,8 @@ fn spawn_player(commands: &mut Commands, owner: u64, slot: u8, pos: Vec2, deck: 
         Walking::default(),
         Dash::default(),
         Aim { dir: Vec2::X, target: pos + Vec2::X * 32.0 },
-        Arsenal::new(&GunKind::ALL),
+        Arsenal::new(&loadout.guns),
+        Ability::default(),
         Perks::default(),
         Controls::default(),
         Transform::from_translation(pos.extend(10.0)),
@@ -222,31 +232,79 @@ pub fn spawn_crew(
     grid: Res<RoomGrid>,
     heist: Res<Heist>,
     crew: Res<CrewSize>,
+    local: Res<LocalLoadout>,
+    loadouts: Res<Loadouts>,
     clients: Query<&NetworkId, With<AuthorizedClient>>,
 ) {
-    let local = (0..crew.0 as u64).map(|i| HOST_ID + i);
-    let owners = local.chain(clients.iter().map(NetworkId::get));
-    for (slot, owner) in owners.enumerate() {
+    let local_owners = (0..crew.0 as u64).map(|i| HOST_ID + i);
+    // A client whose loadout hasn't arrived yet joins as soon as it does.
+    let client_owners = clients.iter().map(NetworkId::get).filter(|id| loadouts.0.contains_key(id));
+    for (slot, owner) in local_owners.chain(client_owners).enumerate() {
         let pos = crew_spot(grid.crew_spawn, slot);
-        spawn_player(&mut commands, owner, slot as u8, pos, heist.deck);
+        spawn_player(&mut commands, owner, loadouts.get(owner, &local), slot as u8, pos, heist.deck);
     }
+}
+
+/// Gives a client who joined mid-run a pirate, once they're authorized and their
+/// loadout has arrived (whichever comes last). Mid-results joiners get one when
+/// the next run starts.
+fn spawn_joiner(
+    commands: &mut Commands,
+    owner: u64,
+    loadout: &Loadout,
+    players: &Query<&Player>,
+    grid: Option<&RoomGrid>,
+    heist: &Heist,
+    state: &State<GameState>,
+) {
+    let Some(grid) = grid else { return };
+    if *state.get() != GameState::Playing || players.iter().any(|p| p.owner == owner) {
+        return;
+    }
+    let slot = players.iter().map(|p| p.slot + 1).max().unwrap_or(0);
+    spawn_player(commands, owner, loadout, slot, crew_spot(grid.crew_spawn, slot as usize), heist.deck);
 }
 
 fn on_client_joined(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
     ids: Query<&NetworkId>,
+    loadouts: Res<Loadouts>,
     players: Query<&Player>,
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
     state: Res<State<GameState>>,
 ) {
-    let (Ok(id), Some(grid)) = (ids.get(add.entity), grid) else { return };
+    let Ok(id) = ids.get(add.entity) else { return };
     info!("client {} joined", id.get());
-    // Mid-results joiners get a pirate when the next run starts.
-    if *state.get() == GameState::Playing {
-        let slot = players.iter().map(|p| p.slot + 1).max().unwrap_or(0);
-        spawn_player(&mut commands, id.get(), slot, crew_spot(grid.crew_spawn, slot as usize), heist.deck);
+    if let Some(loadout) = loadouts.0.get(&id.get()) {
+        spawn_joiner(&mut commands, id.get(), loadout, &players, grid.as_deref(), &heist, &state);
+    }
+}
+
+/// Tells the host which class and guns this machine's pirate brings.
+fn send_loadout(local: Res<LocalLoadout>, mut messages: MessageWriter<ChooseLoadout>) {
+    messages.write(ChooseLoadout(local.0.clone()));
+}
+
+fn receive_loadouts(
+    mut commands: Commands,
+    mut messages: MessageReader<FromClient<ChooseLoadout>>,
+    clients: Query<(&NetworkId, Has<AuthorizedClient>)>,
+    mut loadouts: ResMut<Loadouts>,
+    players: Query<&Player>,
+    grid: Option<Res<RoomGrid>>,
+    heist: Res<Heist>,
+    state: Res<State<GameState>>,
+) {
+    for FromClient { client_id, message } in messages.read() {
+        let Some((id, authorized)) = client_id.entity().and_then(|e| clients.get(e).ok()) else { continue };
+        let loadout = message.0.clone().sanitized();
+        if authorized {
+            spawn_joiner(&mut commands, id.get(), &loadout, &players, grid.as_deref(), &heist, &state);
+        }
+        // Chosen once in the menu; later messages don't swap guns mid-run.
+        loadouts.0.entry(id.get()).or_insert(loadout);
     }
 }
 
@@ -254,10 +312,12 @@ fn on_client_left(
     remove: On<Remove, ConnectedClient>,
     mut commands: Commands,
     ids: Query<&NetworkId>,
+    mut loadouts: ResMut<Loadouts>,
     players: Query<(Entity, &Player)>,
 ) {
     let Ok(id) = ids.get(remove.entity) else { return };
     info!("client {} left", id.get());
+    loadouts.0.remove(&id.get());
     for (entity, player) in &players {
         if player.owner == id.get() {
             commands.entity(entity).despawn();
@@ -280,7 +340,7 @@ fn dress_player(
             Sprite::from_image(assets.load("sprites/shadow.png")),
             Transform::from_xyz(0.0, 0.0, -0.1),
         ));
-        parent.spawn((PlayerSprite { walk_time: 0.0 }, Sprite::from_image(assets.load("sprites/player.png"))));
+        parent.spawn((PlayerSprite { walk_time: 0.0 }, Sprite::from_image(assets.load(player.class.sprite()))));
     });
 
     if player.owner == local.0 {
@@ -322,14 +382,7 @@ fn gather_input(
     let axis = |neg: [KeyCode; 2], pos: [KeyCode; 2]| {
         keys.any_pressed(pos) as i8 as f32 - keys.any_pressed(neg) as i8 as f32
     };
-    const SLOTS: [KeyCode; 6] = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-    ];
+    const SLOTS: [KeyCode; 4] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4];
 
     inputs.write(PlayerInput {
         movement: Vec2::new(
@@ -351,6 +404,7 @@ fn gather_input(
             0
         },
         interact: keys.just_pressed(KeyCode::KeyE),
+        ability: keys.just_pressed(KeyCode::KeyQ),
         restart: keys.just_pressed(KeyCode::Enter),
     });
 }
@@ -387,10 +441,11 @@ fn clear_input_edges(mut controls: Query<&mut Controls>) {
         c.slot = None;
         c.cycle = 0;
         c.interact = false;
+        c.ability = false;
     }
 }
 
-fn move_players(
+pub fn move_players(
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut players: Query<(&Player, &Controls, &mut Transform, &mut Walking, &mut Dash, &mut Health, &mut Aim)>,
@@ -482,9 +537,9 @@ fn dash_trails(
     time: Res<Time>,
     assets: Res<AssetServer>,
     local_aim: Res<LocalAim>,
-    mut players: Query<(&Transform, &Dash, &Aim, &mut DashTrail, Has<LocalPlayer>)>,
+    mut players: Query<(&Player, &Transform, &Dash, &Aim, &mut DashTrail, Has<LocalPlayer>)>,
 ) {
-    for (transform, dash, aim, mut trail, local) in &mut players {
+    for (player, transform, dash, aim, mut trail, local) in &mut players {
         if dash.active <= 0.0 {
             trail.timer = 0.0;
             continue;
@@ -499,7 +554,7 @@ fn dash_trails(
             Level,
             Fade { age: 0.0, life: 0.2 },
             Sprite {
-                image: assets.load("sprites/player.png"),
+                image: assets.load(player.class.sprite()),
                 color: Color::srgb(0.5, 0.85, 1.0),
                 flip_x: facing.x < 0.0,
                 ..default()

@@ -5,8 +5,11 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
+use crate::class::{LocalLoadout, Loadout, PirateClass};
+use crate::guns::GunKind;
 use crate::net::{DEFAULT_PORT, EndSession, NetMode, Notice, Connection, StartSession, local_ip, parse_port, resolve};
 use crate::loot::LootKind;
+use crate::perks::PerkKind;
 use crate::player::Player;
 use crate::{GameState, Hud};
 
@@ -25,7 +28,9 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_sub_state::<MenuScreen>()
+        // Last launch's pick, ready before the first screen is drawn.
+        app.insert_resource(LocalLoadout(Loadout::load().unwrap_or_default()))
+            .add_sub_state::<MenuScreen>()
             .init_resource::<MenuMemory>()
             .init_resource::<LeavePrompt>()
             .add_observer(run_menu_command)
@@ -35,6 +40,8 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(MenuScreen::Main), main_screen)
             .add_systems(OnEnter(MenuScreen::Host), host_screen)
             .add_systems(OnEnter(MenuScreen::Join), join_screen)
+            .add_systems(OnEnter(MenuScreen::Loadout), loadout_screen)
+            .add_systems(OnEnter(MenuScreen::Perks), perks_screen)
             .add_systems(
                 Update,
                 (
@@ -46,6 +53,9 @@ impl Plugin for MenuPlugin {
                     update_status,
                     animate_backdrop,
                     back_on_escape,
+                    (choice_actions, style_choices, update_slot_count).chain(),
+                    dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
+                    hide_backdrop.run_if(state_changed::<MenuScreen>),
                 )
                     .run_if(in_state(GameState::Menu)),
             )
@@ -63,6 +73,8 @@ enum MenuScreen {
     Main,
     Host,
     Join,
+    Loadout,
+    Perks,
 }
 
 #[derive(Component, Event, Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,6 +82,8 @@ enum MenuCommand {
     Solo,
     OpenHost,
     OpenJoin,
+    OpenLoadout,
+    OpenPerks,
     Quit,
     StartHost,
     Connect,
@@ -121,6 +135,27 @@ struct Backdrop {
     phase: f32,
     /// Loot circles the pirate; everything else just bobs.
     orbit: Option<(Vec2, f32)>,
+}
+
+/// A pickable card on the loadout screen; styled by `style_choices`, not `button_styles`.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    Class(PirateClass),
+    Gun(GunKind),
+}
+
+/// Shows which slot a gun card's gun sits in.
+#[derive(Component)]
+struct SlotBadge(GunKind);
+
+#[derive(Component)]
+struct SlotCount;
+
+/// The backdrop pirate and the gun in their hands, dressed as the chosen loadout.
+#[derive(Component)]
+enum BackdropPirate {
+    Body,
+    Gun,
 }
 
 #[derive(Component)]
@@ -254,12 +289,15 @@ fn status_line() -> impl Bundle {
     )
 }
 
-fn main_screen(mut commands: Commands, assets: Res<AssetServer>) {
+fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<LocalLoadout>) {
     let root = screen_root(&mut commands, &assets, MenuScreen::Main);
+    let loadout_label = format!("LOADOUT: {}", loadout.0.class.name());
     commands.entity(root).with_children(|parent| {
         parent.spawn(button("SOLO RAID", MenuCommand::Solo));
         parent.spawn(button("HOST A CREW", MenuCommand::OpenHost));
         parent.spawn(button("JOIN A CREW", MenuCommand::OpenJoin));
+        parent.spawn(button(&loadout_label, MenuCommand::OpenLoadout));
+        parent.spawn(button("PERKS", MenuCommand::OpenPerks));
         parent.spawn(button("QUIT", MenuCommand::Quit));
         parent.spawn(status_line());
     });
@@ -309,12 +347,205 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
     });
 }
 
+fn loadout_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    let card = |width: f32, height: f32, direction: FlexDirection| Node {
+        width: Val::Px(width),
+        height: Val::Px(height),
+        flex_direction: direction,
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        column_gap: Val::Px(12.0),
+        row_gap: Val::Px(2.0),
+        border: UiRect::all(Val::Px(2.0)),
+        ..default()
+    };
+    let row = |gap: f32| Node {
+        column_gap: Val::Px(gap),
+        row_gap: Val::Px(gap),
+        flex_wrap: FlexWrap::Wrap,
+        justify_content: JustifyContent::Center,
+        max_width: Val::Px(880.0),
+        ..default()
+    };
+
+    commands
+        .spawn((
+            DespawnOnExit(MenuScreen::Loadout),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::top(Val::Px(40.0)),
+                row_gap: Val::Px(14.0),
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn(label("LOADOUT", 28.0, GOLD));
+            parent.spawn(label("Pick your pirate", 15.0, DIM));
+            parent.spawn(row(16.0)).with_children(|classes| {
+                for class in PirateClass::ALL {
+                    classes
+                        .spawn((
+                            Button,
+                            Choice::Class(class),
+                            card(200.0, 130.0, FlexDirection::Column),
+                            BackgroundColor(BUTTON),
+                            BorderColor::all(GOLD_FAINT),
+                        ))
+                        .with_children(|card| {
+                            card.spawn((
+                                ImageNode::new(assets.load(class.sprite())),
+                                Node {
+                                    width: Val::Px(64.0),
+                                    height: Val::Px(64.0),
+                                    ..default()
+                                },
+                            ));
+                            card.spawn(label(class.name(), 20.0, class.color()));
+                            card.spawn(label(class.perk(), 14.0, TEXT));
+                        });
+                }
+            });
+
+            parent.spawn((SlotCount, label("", 15.0, DIM)));
+            parent.spawn(row(10.0)).with_children(|guns| {
+                for gun in GunKind::ALL {
+                    let stats = gun.stats();
+                    guns.spawn((
+                        Button,
+                        Choice::Gun(gun),
+                        card(280.0, 60.0, FlexDirection::Row),
+                        BackgroundColor(BUTTON),
+                        BorderColor::all(GOLD_FAINT),
+                    ))
+                    .with_children(|card| {
+                        card.spawn((
+                            ImageNode::new(assets.load(stats.sprite)),
+                            Node {
+                                width: Val::Px(64.0),
+                                height: Val::Px(32.0),
+                                ..default()
+                            },
+                        ));
+                        card.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            width: Val::Px(165.0),
+                            ..default()
+                        })
+                        .with_children(|info| {
+                            info.spawn(label(stats.name, 16.0, TEXT));
+                            info.spawn(label(stats.role, 12.0, DIM));
+                        });
+                        card.spawn((
+                            SlotBadge(gun),
+                            label("", 20.0, GOLD),
+                            Node {
+                                width: Val::Px(14.0),
+                                ..default()
+                            },
+                        ));
+                    });
+                }
+            });
+
+            parent.spawn(button("DONE", MenuCommand::Back));
+            parent.spawn(status_line());
+        });
+}
+
+fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    commands
+        .spawn((
+            DespawnOnExit(MenuScreen::Perks),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::top(Val::Px(40.0)),
+                row_gap: Val::Px(14.0),
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn(label("PERKS", 28.0, GOLD));
+            parent.spawn(label(
+                "Found lying around each deck. Walk over one to use it.",
+                15.0,
+                DIM,
+            ));
+            parent
+                .spawn(Node {
+                    column_gap: Val::Px(16.0),
+                    row_gap: Val::Px(16.0),
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::Center,
+                    max_width: Val::Px(900.0),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for perk in PerkKind::ALL {
+                        let duration = perk.duration().map_or("INSTANT".into(), |secs| format!("{secs:.0}s"));
+                        grid.spawn((
+                            Node {
+                                width: Val::Px(420.0),
+                                height: Val::Px(128.0),
+                                align_items: AlignItems::Center,
+                                column_gap: Val::Px(16.0),
+                                padding: UiRect::all(Val::Px(14.0)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON),
+                            BorderColor::all(perk.color().with_alpha(0.5)),
+                        ))
+                        .with_children(|card| {
+                            card.spawn((
+                                ImageNode::new(assets.load(perk.sprite())),
+                                Node {
+                                    width: Val::Px(64.0),
+                                    height: Val::Px(64.0),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                            ));
+                            card.spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(5.0),
+                                flex_grow: 1.0,
+                                ..default()
+                            })
+                            .with_children(|info| {
+                                info.spawn(Node {
+                                    column_gap: Val::Px(10.0),
+                                    align_items: AlignItems::Baseline,
+                                    ..default()
+                                })
+                                .with_children(|title| {
+                                    title.spawn(label(perk.name(), 20.0, perk.color()));
+                                    title.spawn(label(perk.category(), 12.0, DIM));
+                                    title.spawn(label(duration, 14.0, TEXT));
+                                });
+                                info.spawn(label(perk.details(), 14.0, TEXT));
+                            });
+                        });
+                    }
+                });
+            parent.spawn(button("BACK", MenuCommand::Back));
+        });
+}
+
 // ---------------------------------------------------------------------------
 // Interaction
 // ---------------------------------------------------------------------------
 
 fn button_styles(
-    mut buttons: Query<(&Interaction, &mut BackgroundColor, &mut BorderColor), (Changed<Interaction>, With<Button>)>,
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (Changed<Interaction>, With<Button>, Without<Choice>),
+    >,
 ) {
     for (interaction, mut background, mut border) in &mut buttons {
         let (bg, edge) = match interaction {
@@ -358,6 +589,11 @@ fn run_menu_command(
             notice.0 = None;
             screen.set(MenuScreen::Join);
         }
+        MenuCommand::OpenLoadout => {
+            notice.0 = None;
+            screen.set(MenuScreen::Loadout);
+        }
+        MenuCommand::OpenPerks => screen.set(MenuScreen::Perks),
         MenuCommand::Quit => {
             exit.write(AppExit::Success);
         }
@@ -385,6 +621,75 @@ fn run_menu_command(
                 screen.set(MenuScreen::Main);
             }
         }
+    }
+}
+
+fn choice_actions(
+    choices: Query<(&Interaction, &Choice), Changed<Interaction>>,
+    mut loadout: ResMut<LocalLoadout>,
+    mut notice: ResMut<Notice>,
+) {
+    for (interaction, choice) in &choices {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let loadout = &mut loadout.0;
+        notice.0 = match *choice {
+            Choice::Class(class) => {
+                loadout.set_class(class);
+                None
+            }
+            Choice::Gun(gun) if loadout.guns == [gun] => Some("Take at least one gun".into()),
+            Choice::Gun(gun) if !loadout.toggle(gun) => Some(format!(
+                "All {} slots are full. Click an equipped gun to drop it first.",
+                loadout.class.slots()
+            )),
+            Choice::Gun(_) => None,
+        };
+        loadout.save();
+    }
+}
+
+/// Highlights the chosen class and equipped guns, and numbers the guns by slot.
+fn style_choices(
+    loadout: Res<LocalLoadout>,
+    mut cards: Query<(&Interaction, &Choice, &mut BackgroundColor, &mut BorderColor)>,
+    mut badges: Query<(&SlotBadge, &mut Text)>,
+) {
+    let loadout = &loadout.0;
+    for (interaction, choice, mut background, mut border) in &mut cards {
+        let chosen = match *choice {
+            Choice::Class(class) => loadout.class == class,
+            Choice::Gun(gun) => loadout.guns.contains(&gun),
+        };
+        let (bg, edge) = match (interaction, chosen) {
+            (Interaction::Pressed, _) => (BUTTON_PRESSED, GOLD),
+            (_, true) => (Color::srgb(0.2, 0.16, 0.07), GOLD),
+            (Interaction::Hovered, false) => (BUTTON_HOVER, GOLD_FAINT),
+            (Interaction::None, false) => (BUTTON, Color::NONE),
+        };
+        background.0 = bg;
+        *border = BorderColor::all(edge);
+    }
+    for (badge, mut text) in &mut badges {
+        let slot = loadout.guns.iter().position(|&g| g == badge.0);
+        let content = slot.map_or(String::new(), |i| (i + 1).to_string());
+        if text.0 != content {
+            text.0 = content;
+        }
+    }
+}
+
+fn update_slot_count(loadout: Res<LocalLoadout>, mut text: Query<&mut Text, With<SlotCount>>) {
+    let Ok(mut text) = text.single_mut() else { return };
+    let loadout = &loadout.0;
+    let content = format!(
+        "Guns  {}/{}   -   click to equip in the next slot, again to drop",
+        loadout.guns.len(),
+        loadout.class.slots()
+    );
+    if text.0 != content {
+        text.0 = content;
     }
 }
 
@@ -503,7 +808,7 @@ fn hide_cursor(mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>) {
     cursor.visible = false;
 }
 
-fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>) {
+fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<LocalLoadout>) {
     let mut sprite = |path: &str, pos: Vec3, scale: f32, flip: bool, orbit: Option<(Vec2, f32)>, phase: f32| {
         commands.spawn((
             DespawnOnExit(GameState::Menu),
@@ -514,13 +819,21 @@ fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>) {
                 ..default()
             },
             Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
-        ));
+        ))
+        .id()
     };
 
     let pirate = Vec2::new(-140.0, -30.0);
     sprite("sprites/shadow.png", pirate.extend(9.0), 3.0, false, None, 0.0);
-    sprite("sprites/player.png", pirate.extend(10.0), 3.0, false, None, 0.0);
-    sprite("sprites/guns/pulse_rifle.png", (pirate + Vec2::new(12.0, -9.0)).extend(11.0), 2.2, false, None, 0.0);
+    let body = sprite(loadout.0.class.sprite(), pirate.extend(10.0), 3.0, false, None, 0.0);
+    let gun = sprite(
+        loadout.0.guns[0].stats().sprite,
+        (pirate + Vec2::new(12.0, -9.0)).extend(11.0),
+        2.2,
+        false,
+        None,
+        0.0,
+    );
 
     let loot = [
         "sprites/loot/alien_relic.png",
@@ -538,6 +851,32 @@ fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>) {
     sprite("sprites/enemies/warden.png", Vec3::new(150.0, -25.0, 10.0), 3.0, true, None, 0.7);
     sprite("sprites/enemies/stalker.png", Vec3::new(118.0, -55.0, 11.0), 2.5, true, None, 1.9);
     sprite("sprites/enemies/sentry_drone.png", Vec3::new(168.0, 40.0, 11.0), 2.5, true, None, 2.8);
+
+    commands.entity(body).insert(BackdropPirate::Body);
+    commands.entity(gun).insert(BackdropPirate::Gun);
+}
+
+/// The loadout and perks screens fill the window, so the backdrop would only clutter them.
+fn hide_backdrop(screen: Res<State<MenuScreen>>, mut sprites: Query<&mut Visibility, With<Backdrop>>) {
+    let full = matches!(screen.get(), MenuScreen::Loadout | MenuScreen::Perks);
+    let visibility = if full { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut sprites {
+        v.set_if_neq(visibility);
+    }
+}
+
+fn dress_backdrop_pirate(
+    assets: Res<AssetServer>,
+    loadout: Res<LocalLoadout>,
+    mut sprites: Query<(&BackdropPirate, &mut Sprite)>,
+) {
+    for (part, mut sprite) in &mut sprites {
+        let path = match part {
+            BackdropPirate::Body => loadout.0.class.sprite(),
+            BackdropPirate::Gun => loadout.0.guns[0].stats().sprite,
+        };
+        sprite.image = assets.load(path);
+    }
 }
 
 fn animate_backdrop(time: Res<Time>, mut sprites: Query<(&Backdrop, &mut Transform)>) {

@@ -14,15 +14,17 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
-use crate::combat::Health;
+use crate::class::{Loadout, Loadouts, PirateClass};
+use crate::combat::{Health, Team};
 use crate::enemies::Enemy;
 use crate::mission::Alarm;
-use crate::net::{NetMode, PlayerInput, StartSession};
+use crate::net::{HOST_ID, NetMode, PlayerInput, StartSession};
 use crate::player::{Controls, CrewSize, PirateStatus, Player};
 use crate::room::{DECKS, NextSeed};
 use crate::{GamePlugins, GameState, Rng};
 
-const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--bot random|idle] [--time SECS] [--hz N]";
+const USAGE: &str =
+    "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|mixed] [--bot random|idle] [--time SECS] [--hz N]";
 /// Bots only fight enemies this close.
 const ENGAGE: f32 = 140.0;
 
@@ -41,6 +43,8 @@ pub struct Config {
     pub seed: u32,
     pub runs: u32,
     pub crew: u8,
+    /// Every bot's class; `None` alternates through them.
+    pub class: Option<PirateClass>,
     pub bot: BotKind,
     /// Game seconds before a run is called off.
     pub time_limit: f32,
@@ -57,6 +61,7 @@ impl Config {
                 .subsec_nanos(),
             runs: 1,
             crew: 1,
+            class: None,
             bot: BotKind::Random,
             time_limit: 600.0,
             hz: 60.0,
@@ -77,6 +82,13 @@ impl Config {
                 "--crew" => {
                     let raw = value()?;
                     config.crew = raw.parse().ok().filter(|n| (1..=8).contains(n)).ok_or_else(|| bad(raw))?;
+                }
+                "--class" => {
+                    let raw = value()?;
+                    config.class = match raw.as_str() {
+                        "mixed" => None,
+                        _ => Some(PirateClass::parse(raw).ok_or_else(|| bad(raw))?),
+                    };
                 }
                 "--bot" => {
                     let raw = value()?;
@@ -102,6 +114,16 @@ impl Config {
 
     fn run_seed(&self, run: u32) -> u32 {
         self.seed.wrapping_add(run)
+    }
+
+    /// Bot `i`'s class and guns (its class's default loadout).
+    fn loadouts(&self) -> Loadouts {
+        let class = |i: usize| self.class.unwrap_or(PirateClass::ALL[i % PirateClass::ALL.len()]);
+        Loadouts(
+            (0..self.crew as usize)
+                .map(|i| (HOST_ID + i as u64, Loadout::new(class(i))))
+                .collect(),
+        )
     }
 }
 
@@ -131,8 +153,14 @@ struct Bot {
 pub fn run(config: Config) {
     let step = Duration::from_secs_f32(1.0 / config.hz);
     println!(
-        "headless: {} run(s) from seed {}, crew {}, {:?} bots, {} Hz, limit {}s",
-        config.runs, config.seed, config.crew, config.bot, config.hz, config.time_limit
+        "headless: {} run(s) from seed {}, crew {} ({}), {:?} bots, {} Hz, limit {}s",
+        config.runs,
+        config.seed,
+        config.crew,
+        config.class.map_or("mixed", PirateClass::name),
+        config.bot,
+        config.hz,
+        config.time_limit
     );
 
     let mut app = App::new();
@@ -148,6 +176,7 @@ pub fn run(config: Config) {
     .insert_resource(TimeUpdateStrategy::ManualDuration(step))
     .add_plugins(GamePlugins)
     .insert_resource(CrewSize(config.crew))
+    .insert_resource(config.loadouts())
     .insert_resource(config)
     .init_resource::<Batch>()
     .init_resource::<BotRng>()
@@ -191,7 +220,7 @@ fn drive_bots(
     config: Res<Config>,
     mut rng: ResMut<BotRng>,
     mut pirates: Query<(Entity, &Transform, &mut Controls, Option<&mut Bot>), With<Player>>,
-    enemies: Query<(&Transform, &Health), With<Enemy>>,
+    enemies: Query<(&Transform, &Health, &Team), With<Enemy>>,
 ) {
     if config.bot == BotKind::Idle {
         return;
@@ -216,8 +245,8 @@ fn drive_bots(
         let pos = transform.translation.truncate();
         let target = enemies
             .iter()
-            .filter(|(_, h)| !h.is_dead())
-            .map(|(t, _)| t.translation.truncate())
+            .filter(|(_, h, team)| **team == Team::Enemy && !h.is_dead())
+            .map(|(t, ..)| t.translation.truncate())
             .filter(|e| e.distance(pos) <= ENGAGE)
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
         let aim = target.unwrap_or(pos + bot.heading * 40.0);
@@ -228,9 +257,11 @@ fn drive_bots(
             fire_pressed: target.is_some(),
             dash: rng.unit() < 0.01,
             reload: rng.unit() < 0.002,
-            slot: (rng.unit() < 0.004).then(|| (rng.unit() * 6.0) as u8 % 6),
+            slot: (rng.unit() < 0.004).then(|| (rng.unit() * 4.0) as u8 % 4),
             cycle: 0,
             interact: true,
+            // Engineers drop a sentry now and then mid-fight.
+            ability: target.is_some() && rng.unit() < 0.01,
             restart: false,
         });
     }

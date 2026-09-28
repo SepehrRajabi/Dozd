@@ -1,3 +1,4 @@
+mod class;
 mod combat;
 mod deckgen;
 mod drops;
@@ -144,6 +145,7 @@ impl Plugin for GamePlugins {
             mission::MissionPlugin,
             perks::PerksPlugin,
             drops::DropsPlugin,
+            class::ClassPlugin,
         ));
     }
 }
@@ -163,6 +165,7 @@ impl Plugin for ViewPlugins {
             mission::MissionViewPlugin,
             perks::PerksViewPlugin,
             drops::DropsViewPlugin,
+            class::ClassViewPlugin,
             menu::MenuPlugin,
         ));
     }
