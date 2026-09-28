@@ -35,6 +35,11 @@ const SENTRY_DAMAGE: f32 = 6.0;
 const SENTRY_SPREAD: f32 = 0.08;
 const SENTRY_SHOT_SPEED: f32 = 340.0;
 const SENTRY_COLOR: Color = Color::srgb(1.0, 0.62, 0.25);
+/// How close the Engineer must be to pick their sentry back up.
+const SENTRY_PICKUP: f32 = 16.0;
+/// Picking a sentry up takes this share of its remaining life, as a share of
+/// the full cooldown, off the cooldown: a fresh one comes back 75% ready.
+const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
 
@@ -399,7 +404,7 @@ fn use_abilities(
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Ability)>,
-    sentries: Query<(Entity, &Sentry)>,
+    sentries: Query<(Entity, &Sentry, &Transform), Without<Player>>,
     riot_shields: Query<(Entity, &RiotShield)>,
     mut enemies: Query<(&mut Enemy, &Transform, &Health), Without<Player>>,
 ) {
@@ -435,6 +440,22 @@ fn use_abilities(
             continue;
         }
 
+        // Standing by their own sentry, the Engineer packs it up instead, and
+        // the time it had left comes back as a shorter cooldown.
+        if player.class == PirateClass::Engineer && controls.ability && can_act(player, health) {
+            let nearby = sentries.iter().find(|(_, s, t)| {
+                s.owner == player.owner && t.translation.truncate().distance(pos) <= SENTRY_PICKUP
+            });
+            if let Some((entity, sentry, t)) = nearby {
+                let refund = SENTRY_REFUND * (sentry.left / SENTRY_LIFE).clamp(0.0, 1.0) * SENTRY_COOLDOWN;
+                ability.cooldown = (ability.cooldown - refund).max(0.0);
+                ability.active = 0.0;
+                fx(&mut commands, FxKind::Burst, t.translation.truncate(), 0.0, SENTRY_COLOR);
+                commands.entity(entity).despawn();
+                continue;
+            }
+        }
+
         if !controls.ability || ability.cooldown > 0.0 || !can_act(player, health) {
             continue;
         }
@@ -442,7 +463,7 @@ fn use_abilities(
             PirateClass::Gunner | PirateClass::Bulwark => {}
             PirateClass::Engineer => {
                 // One sentry each: a new one replaces the old.
-                for (entity, sentry) in &sentries {
+                for (entity, sentry, _) in &sentries {
                     if sentry.owner == player.owner {
                         commands.entity(entity).despawn();
                     }
@@ -761,8 +782,8 @@ fn spawn_ability_hud(mut commands: Commands) {
 
 fn update_ability_hud(
     local: Res<LocalId>,
-    player: Option<Single<(&Player, &Ability), With<LocalPlayer>>>,
-    sentries: Query<&Sentry>,
+    player: Option<Single<(&Player, &Ability, &Transform), With<LocalPlayer>>>,
+    sentries: Query<(&Sentry, &Transform), Without<LocalPlayer>>,
     riot_shields: Query<&RiotShield>,
     mut panel: Single<&mut Node, (With<AbilityPanel>, Without<AbilityFill>)>,
     mut name: Single<&mut Text, (With<AbilityLabel>, Without<AbilityText>)>,
@@ -775,16 +796,20 @@ fn update_ability_hud(
         panel.display = display;
     }
     let (Some(player), Some(stats)) = (player, stats) else { return };
-    let (player, ability) = *player;
+    let (player, ability, transform) = *player;
     if name.0 != stats.label {
         name.0 = stats.label.into();
     }
 
     // A sentry can be destroyed early, so ask it rather than the timer.
+    let sentry = sentries.iter().find(|(s, _)| s.owner == local.0);
     let active = match player.class {
-        PirateClass::Engineer => sentries.iter().find(|s| s.owner == local.0).map(|s| s.left),
+        PirateClass::Engineer => sentry.map(|(s, _)| s.left),
         _ => (ability.active > 0.0).then_some(ability.active),
     };
+    let in_reach = sentry.is_some_and(|(_, t)| {
+        t.translation.truncate().distance(transform.translation.truncate()) <= SENTRY_PICKUP
+    });
     let (fill_node, fill_color) = &mut *fill;
     let (text, text_color) = &mut *text;
     let dim = Color::srgba(1.0, 1.0, 1.0, 0.6);
@@ -799,7 +824,8 @@ fn update_ability_hud(
             (frac, stats.color, "READY  [Q]".into(), Color::WHITE)
         }
     } else if let Some(left) = active {
-        (left / stats.life, stats.color, format!("ACTIVE {:.0}s", left.ceil()), stats.color)
+        let label = if in_reach { "PICK UP  [Q]".into() } else { format!("ACTIVE {:.0}s", left.ceil()) };
+        (left / stats.life, stats.color, label, stats.color)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
         (ready, Color::srgb(0.4, 0.45, 0.55), format!("{:.0}s", ability.cooldown.ceil()), Color::srgba(1.0, 1.0, 1.0, 0.6))
