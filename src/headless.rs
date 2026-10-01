@@ -23,8 +23,10 @@ use crate::player::{Controls, CrewSize, PirateStatus, Player};
 use crate::room::{DECKS, NextSeed};
 use crate::{GamePlugins, GameState, Rng};
 
-const USAGE: &str =
-    "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|mixed] [--bot random|idle] [--time SECS] [--hz N]";
+const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|mixed] \
+                      [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet]";
+// Column docs: tools/README.md. Keep that table in sync with this header.
+const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_behind,dead,still_in,deck,decks,credits,kills,alarm,seconds";
 /// Bots only fight enemies this close.
 const ENGAGE: f32 = 140.0;
 
@@ -50,6 +52,10 @@ pub struct Config {
     pub time_limit: f32,
     /// Simulation steps per game second.
     pub hz: f32,
+    /// Print one CSV row per run to stdout instead of the human-readable line.
+    pub csv: bool,
+    /// Suppress the status banner, per-run line (unless --csv) and summary.
+    pub quiet: bool,
 }
 
 impl Config {
@@ -65,6 +71,8 @@ impl Config {
             bot: BotKind::Random,
             time_limit: 600.0,
             hz: 60.0,
+            csv: false,
+            quiet: false,
         };
         let mut args = args.iter();
         while let Some(flag) = args.next() {
@@ -106,6 +114,8 @@ impl Config {
                     let raw = value()?;
                     config.hz = raw.parse().ok().filter(|&h: &f32| h >= 10.0).ok_or_else(|| bad(raw))?;
                 }
+                "--csv" => config.csv = true,
+                "--quiet" => config.quiet = true,
                 _ => return Err(format!("unknown option `{flag}`\n{USAGE}")),
             }
         }
@@ -151,8 +161,15 @@ struct Bot {
 }
 
 pub fn run(config: Config) {
+    if config.quiet && !config.csv {
+        eprintln!(
+            "warning: --quiet with no other output method (e.g. --csv) specified; this run will produce no output"
+        );
+    }
+
     let step = Duration::from_secs_f32(1.0 / config.hz);
-    println!(
+    // With --csv, stdout is pure CSV (for piping/redirecting); status goes to stderr instead.
+    let banner = format!(
         "headless: {} run(s) from seed {}, crew {} ({}), {:?} bots, {} Hz, limit {}s",
         config.runs,
         config.seed,
@@ -162,6 +179,16 @@ pub fn run(config: Config) {
         config.hz,
         config.time_limit
     );
+    if !config.quiet {
+        if config.csv {
+            eprintln!("{banner}");
+        } else {
+            println!("{banner}");
+        }
+    }
+    if config.csv {
+        println!("{CSV_HEADER}");
+    }
 
     let mut app = App::new();
     app.add_plugins((
@@ -310,17 +337,29 @@ fn next_run(
         }
     }
     let ending = if batch.timed_out { "TIMEOUT" } else { "OVER" };
-    println!(
-        "run {:>3}  seed {:>10}  {ending:<7}  {:<24}  deck {}/{DECKS}  carried {:>5} cr  kills {:>2}  alarm {:.1}  {:>6.1}s",
-        batch.run + 1,
-        config.run_seed(batch.run),
-        outcome.join(", "),
-        deck + 1,
-        haul,
-        batch.kills,
-        alarm.level,
-        batch.ticks as f32 / config.hz,
-    );
+    let seconds = batch.ticks as f32 / config.hz;
+    if config.csv {
+        println!(
+            "{},{},{},{ending},{extracted},{left},{dead},{active},{},{DECKS},{haul},{},{:.1},{seconds:.1}",
+            config.class.map_or("mixed", PirateClass::name),
+            batch.run + 1,
+            config.run_seed(batch.run),
+            deck + 1,
+            batch.kills,
+            alarm.level,
+        );
+    } else if !config.quiet {
+        println!(
+            "run {:>3}  seed {:>10}  {ending:<7}  {:<24}  deck {}/{DECKS}  carried {:>5} cr  kills {:>2}  alarm {:.1}  {seconds:>6.1}s",
+            batch.run + 1,
+            config.run_seed(batch.run),
+            outcome.join(", "),
+            deck + 1,
+            haul,
+            batch.kills,
+            alarm.level,
+        );
+    }
 
     batch.total_ticks += batch.ticks as u64;
     batch.extracted += (extracted > 0) as u32;
@@ -337,7 +376,7 @@ fn next_run(
 
     let wall = batch.started.map_or(0.0, |s| s.elapsed().as_secs_f64());
     let game = batch.total_ticks as f64 / config.hz as f64;
-    println!(
+    let summary = format!(
         "done: {} run(s), {} with an extraction; {:.0}s of game in {:.2}s ({:.0}x real time, {:.0} ticks/s)",
         config.runs,
         batch.extracted,
@@ -346,5 +385,12 @@ fn next_run(
         game / wall.max(1e-9),
         batch.total_ticks as f64 / wall.max(1e-9),
     );
+    if !config.quiet {
+        if config.csv {
+            eprintln!("{summary}");
+        } else {
+            println!("{summary}");
+        }
+    }
     exit.write(AppExit::Success);
 }
