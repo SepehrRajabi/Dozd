@@ -1,4 +1,4 @@
-//! What enemies leave behind: a few credits and an ammo box. Drops pop out of
+//! What enemies may leave behind: a few credits, an ammo box. Drops pop out of
 //! the body, then drift toward any pirate who comes close and are picked up
 //! on touch.
 

@@ -17,6 +17,10 @@ const HEARING: f32 = 150.0;
 /// An alerted enemy wakes idle ones within this radius.
 const ALERT_SHARE: f32 = 90.0;
 const SEPARATION: f32 = 12.0;
+/// Odds a downed enemy leaves its bounty behind.
+const CREDIT_DROP_CHANCE: f32 = 0.6;
+/// Odds of an ammo box, rolled once per box (Wardens carry two).
+const AMMO_DROP_CHANCE: f32 = 0.4;
 
 pub struct EnemiesPlugin;
 
@@ -601,9 +605,16 @@ fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(En
 
             let (lo, hi) = stats.bounty;
             let credits = lo + (rng.unit() * (hi - lo) as f32).round() as u32;
-            let mut drops = vec![EnemyDrop::Credits(credits), EnemyDrop::Ammo];
-            if enemy.kind == EnemyKind::Warden {
-                drops.push(EnemyDrop::Ammo);
+            // Each drop is its own roll, so a body may leave nothing at all.
+            let ammo_rolls = if enemy.kind == EnemyKind::Warden { 2 } else { 1 };
+            let mut drops = Vec::new();
+            if rng.unit() < CREDIT_DROP_CHANCE {
+                drops.push(EnemyDrop::Credits(credits));
+            }
+            for _ in 0..ammo_rolls {
+                if rng.unit() < AMMO_DROP_CHANCE {
+                    drops.push(EnemyDrop::Ammo);
+                }
             }
             spawn_drops(&mut commands, &mut rng, pos, &drops);
             commands.entity(entity).despawn();
