@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::{env, fs};
+use std::fs;
 
 use bevy::color::Mix;
 use bevy::prelude::*;
@@ -18,6 +18,7 @@ use crate::enemies::Enemy;
 use crate::guns::GunKind;
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
+use crate::settings::config_file;
 use crate::player::{Aim, Controls, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
 use crate::{GameState, Hud, Level, Rng};
@@ -265,9 +266,7 @@ impl Loadout {
 impl Loadout {
     /// Where this machine's pick is remembered between launches.
     fn path() -> Option<PathBuf> {
-        let base = env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("dozd"));
-        base.or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".dozd")))
-            .map(|dir| dir.join("loadout.txt"))
+        config_file("loadout.txt")
     }
 
     /// The pick saved by `save`, if there is a readable one.

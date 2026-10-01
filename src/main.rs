@@ -12,6 +12,7 @@ mod net;
 mod perks;
 mod player;
 mod room;
+mod settings;
 
 use bevy::prelude::*;
 use bevy::window::CursorOptions;
@@ -134,7 +135,9 @@ pub struct GamePlugins;
 
 impl Plugin for GamePlugins {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Rng>().init_state::<GameState>().add_plugins((
+        app.init_resource::<Rng>()
+            .init_resource::<settings::Settings>()
+            .init_state::<GameState>().add_plugins((
             net::NetPlugin,
             room::RoomPlugin,
             player::PlayerPlugin,
@@ -167,6 +170,7 @@ impl Plugin for ViewPlugins {
             drops::DropsViewPlugin,
             class::ClassViewPlugin,
             menu::MenuPlugin,
+            settings::DisplayPlugin,
         ));
     }
 }

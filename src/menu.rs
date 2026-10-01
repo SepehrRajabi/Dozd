@@ -11,6 +11,7 @@ use crate::net::{DEFAULT_PORT, EndSession, NetMode, Notice, Connection, StartSes
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
 use crate::player::Player;
+use crate::settings::Settings;
 use crate::{GameState, Hud};
 
 const GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
@@ -42,6 +43,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(MenuScreen::Join), join_screen)
             .add_systems(OnEnter(MenuScreen::Loadout), loadout_screen)
             .add_systems(OnEnter(MenuScreen::Perks), perks_screen)
+            .add_systems(OnEnter(MenuScreen::Settings), settings_screen)
             .add_systems(
                 Update,
                 (
@@ -56,6 +58,7 @@ impl Plugin for MenuPlugin {
                     (choice_actions, style_choices, update_slot_count).chain(),
                     dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
                     hide_backdrop.run_if(state_changed::<MenuScreen>),
+                    update_setting_values.run_if(resource_changed::<Settings>),
                 )
                     .run_if(in_state(GameState::Menu)),
             )
@@ -75,6 +78,7 @@ enum MenuScreen {
     Join,
     Loadout,
     Perks,
+    Settings,
 }
 
 #[derive(Component, Event, Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,6 +88,8 @@ enum MenuCommand {
     OpenJoin,
     OpenLoadout,
     OpenPerks,
+    OpenSettings,
+    Toggle(Setting),
     Quit,
     StartHost,
     Connect,
@@ -157,6 +163,28 @@ enum BackdropPirate {
     Body,
     Gun,
 }
+
+/// A row on the settings screen; clicking it flips or cycles the value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Setting {
+    Reinforcements,
+    Vsync,
+    RefreshRate,
+}
+
+impl Setting {
+    fn value(self, settings: &Settings) -> String {
+        let on = |b: bool| if b { "ON" } else { "OFF" }.to_string();
+        match self {
+            Self::Reinforcements => on(settings.reinforcements),
+            Self::Vsync => on(settings.vsync),
+            Self::RefreshRate => settings.refresh_label(),
+        }
+    }
+}
+
+#[derive(Component)]
+struct SettingValue(Setting);
 
 #[derive(Component)]
 struct SessionText;
@@ -298,6 +326,7 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
         parent.spawn(button("JOIN A CREW", MenuCommand::OpenJoin));
         parent.spawn(button(&loadout_label, MenuCommand::OpenLoadout));
         parent.spawn(button("PERKS", MenuCommand::OpenPerks));
+        parent.spawn(button("SETTINGS", MenuCommand::OpenSettings));
         parent.spawn(button("QUIT", MenuCommand::Quit));
         parent.spawn(status_line());
     });
@@ -315,6 +344,44 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
             ..default()
         },
     ));
+}
+
+fn settings_screen(mut commands: Commands, assets: Res<AssetServer>, settings: Res<Settings>) {
+    let root = screen_root(&mut commands, &assets, MenuScreen::Settings);
+    let rows = [
+        (Setting::Reinforcements, "REINFORCEMENTS", "Guard waves arrive while the alarm is up. The host's setting counts."),
+        (Setting::Vsync, "VSYNC", "Wait for the monitor between frames. Stops tearing."),
+        (Setting::RefreshRate, "REFRESH RATE", "Frames per second cap. With vsync on, the monitor's rate is the ceiling."),
+    ];
+    commands.entity(root).with_children(|parent| {
+        for (setting, name, hint) in rows {
+            parent.spawn(setting_row(setting, name, &setting.value(&settings)));
+            parent.spawn((label(hint, 13.0, DIM), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+        }
+        parent.spawn(button("BACK", MenuCommand::Back));
+    });
+}
+
+fn setting_row(setting: Setting, name: &str, value: &str) -> impl Bundle {
+    (
+        Button,
+        MenuCommand::Toggle(setting),
+        Node {
+            width: Val::Px(440.0),
+            height: Val::Px(46.0),
+            padding: UiRect::horizontal(Val::Px(18.0)),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+        BorderColor::all(GOLD_FAINT),
+        children![
+            (Text::new(name), TextFont::from_font_size(20.0), TextColor(TEXT)),
+            (SettingValue(setting), Text::new(value), TextFont::from_font_size(20.0), TextColor(GOLD)),
+        ],
+    )
 }
 
 fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<MenuMemory>) {
@@ -574,6 +641,7 @@ fn run_menu_command(
     mut notice: ResMut<Notice>,
     fields: Query<&TextField>,
     mut screen: ResMut<NextState<MenuScreen>>,
+    mut settings: ResMut<Settings>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let joining = matches!(*mode, NetMode::Join { .. });
@@ -594,6 +662,15 @@ fn run_menu_command(
             screen.set(MenuScreen::Loadout);
         }
         MenuCommand::OpenPerks => screen.set(MenuScreen::Perks),
+        MenuCommand::OpenSettings => screen.set(MenuScreen::Settings),
+        MenuCommand::Toggle(setting) => {
+            match setting {
+                Setting::Reinforcements => settings.reinforcements = !settings.reinforcements,
+                Setting::Vsync => settings.vsync = !settings.vsync,
+                Setting::RefreshRate => settings.next_refresh_rate(),
+            }
+            settings.save();
+        }
         MenuCommand::Quit => {
             exit.write(AppExit::Success);
         }
@@ -674,6 +751,15 @@ fn style_choices(
     for (badge, mut text) in &mut badges {
         let slot = loadout.guns.iter().position(|&g| g == badge.0);
         let content = slot.map_or(String::new(), |i| (i + 1).to_string());
+        if text.0 != content {
+            text.0 = content;
+        }
+    }
+}
+
+fn update_setting_values(settings: Res<Settings>, mut values: Query<(&SettingValue, &mut Text)>) {
+    for (value, mut text) in &mut values {
+        let content = value.0.value(&settings);
         if text.0 != content {
             text.0 = content;
         }

@@ -8,11 +8,10 @@ use crate::loot::LootKind;
 use crate::net::{LocalPlayer, NetMode, authority};
 use crate::player::{Controls, DASH_COOLDOWN, Dash, PirateStatus, Player};
 use crate::room::{DECKS, Heist, RoomGrid};
+use crate::settings::Settings;
 use crate::{GameState, Hud, Rng};
 
 pub const MAX_ALARM: f32 = 5.0;
-/// Reinforcement waves. Off for now while extraction is being tested; set back to true.
-const REINFORCEMENTS: bool = false;
 /// Once raised, the alarm keeps climbing on its own: lingering is dangerous.
 const ALARM_CREEP: f32 = 0.015;
 /// Seconds of holding the pad needed to extract.
@@ -159,6 +158,8 @@ pub struct MissionStatus {
     pub seed: u32,
     pub deck: u8,
     alarm: f32,
+    /// The host's reinforcements setting, so every HUD tells the same story.
+    reinforcements: bool,
     next_wave: f32,
     extraction: f32,
     on_pad: bool,
@@ -205,6 +206,7 @@ fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>
             seed: 0,
             deck: 0,
             alarm: 0.0,
+            reinforcements: false,
             next_wave: 0.0,
             extraction: 0.0,
             on_pad: false,
@@ -246,6 +248,7 @@ fn publish_status(
     extraction: Res<Extraction>,
     lift: Res<Lift>,
     banner: Res<Banner>,
+    settings: Res<Settings>,
     mut status: Single<&mut MissionStatus>,
 ) {
     status.set_if_neq(MissionStatus {
@@ -253,6 +256,7 @@ fn publish_status(
         seed: heist.seed,
         deck: heist.deck,
         alarm: alarm.level,
+        reinforcements: settings.reinforcements,
         // Whole seconds are all the HUD shows; avoids replicating every frame.
         next_wave: alarm.wave_timer.max(0.0).ceil(),
         extraction: (extraction.progress * 10.0).round() / 10.0,
@@ -300,6 +304,7 @@ fn run_waves(
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut alarm: ResMut<Alarm>,
+    settings: Res<Settings>,
     players: Query<(&Transform, &Health, &Player)>,
     enemies: Query<(), With<EnemyLook>>,
 ) {
@@ -308,7 +313,7 @@ fn run_waves(
     }
     let dt = time.delta_secs();
     alarm.level = (alarm.level + ALARM_CREEP * dt).min(MAX_ALARM);
-    if !REINFORCEMENTS {
+    if !settings.reinforcements {
         return;
     }
     alarm.wave_timer -= dt;
@@ -644,7 +649,7 @@ fn update_alarm_text(
     } else {
         let filled = (status.alarm.floor() as usize).min(MAX_ALARM as usize);
         let meter: String = (0..MAX_ALARM as usize).map(|i| if i < filled { '#' } else { '-' }).collect();
-        let waves = if REINFORCEMENTS {
+        let waves = if status.reinforcements {
             format!("next wave {:.0}s", status.next_wave)
         } else {
             "reinforcements off".into()
