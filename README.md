@@ -9,6 +9,10 @@ you. Only the pirates standing on the pad when it finishes get out.
 Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 [bevy_replicon](https://github.com/projectharmonia/bevy_replicon).
 
+> **Note:** This project has been developed entirely by Claude Opus 5.5 and is a
+> prototype. I want to figure out the game itself before starting to write it
+> myself.
+
 ## Run
 
 ```sh
