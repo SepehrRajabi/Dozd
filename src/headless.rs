@@ -16,7 +16,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use crate::class::{Loadout, Loadouts, PirateClass};
 use crate::combat::{Health, Team};
-use crate::enemies::Enemy;
+use crate::enemies::{AiState, Enemy, EnemyLook};
 use crate::mission::Alarm;
 use crate::net::{HOST_ID, NetMode, PlayerInput, StartSession};
 use crate::player::{Controls, CrewSize, PirateStatus, Player};
@@ -24,9 +24,14 @@ use crate::room::{DECKS, NextSeed};
 use crate::{GamePlugins, GameState, Rng};
 
 const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|mixed] \
-                      [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet]";
-// Column docs: tools/README.md. Keep that table in sync with this header.
+                      [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
+// Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_behind,dead,still_in,deck,decks,credits,kills,alarm,seconds";
+/// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
+/// you which columns apply — `ai_state` is enemy-only, `move_x..dash` are
+/// pirate-only, blank on the other kind.
+const TRACE_HEADER: &str =
+    "tick,run,seed,kind,entity,x,y,team,health,max_health,ai_state,move_x,move_y,aim_x,aim_y,fire,dash";
 /// Bots only fight enemies this close.
 const ENGAGE: f32 = 140.0;
 
@@ -56,6 +61,8 @@ pub struct Config {
     pub csv: bool,
     /// Suppress the status banner, per-run line (unless --csv) and summary.
     pub quiet: bool,
+    /// Print one row per pirate/enemy per tick to stdout (see TRACE_HEADER).
+    pub trace: bool,
 }
 
 impl Config {
@@ -73,6 +80,7 @@ impl Config {
             hz: 60.0,
             csv: false,
             quiet: false,
+            trace: false,
         };
         let mut args = args.iter();
         while let Some(flag) = args.next() {
@@ -116,6 +124,7 @@ impl Config {
                 }
                 "--csv" => config.csv = true,
                 "--quiet" => config.quiet = true,
+                "--trace" => config.trace = true,
                 _ => return Err(format!("unknown option `{flag}`\n{USAGE}")),
             }
         }
@@ -161,14 +170,22 @@ struct Bot {
 }
 
 pub fn run(config: Config) {
-    if config.quiet && !config.csv {
+    let has_data_output = config.csv || config.trace;
+    if config.quiet && !has_data_output {
         eprintln!(
-            "warning: --quiet with no other output method (e.g. --csv) specified; this run will produce no output"
+            "warning: --quiet with no other output method (e.g. --csv or --trace) specified; this run will produce no output"
+        );
+    }
+    if config.trace && config.runs > 1 {
+        eprintln!(
+            "warning: --trace with --runs {} will print a row per pirate/enemy per tick for every run; \
+             expect a lot of output (consider --runs 1)",
+            config.runs
         );
     }
 
     let step = Duration::from_secs_f32(1.0 / config.hz);
-    // With --csv, stdout is pure CSV (for piping/redirecting); status goes to stderr instead.
+    // With --csv/--trace, stdout is pure data (for piping/redirecting); status goes to stderr instead.
     let banner = format!(
         "headless: {} run(s) from seed {}, crew {} ({}), {:?} bots, {} Hz, limit {}s",
         config.runs,
@@ -180,7 +197,7 @@ pub fn run(config: Config) {
         config.time_limit
     );
     if !config.quiet {
-        if config.csv {
+        if has_data_output {
             eprintln!("{banner}");
         } else {
             println!("{banner}");
@@ -188,6 +205,9 @@ pub fn run(config: Config) {
     }
     if config.csv {
         println!("{CSV_HEADER}");
+    }
+    if config.trace {
+        println!("{TRACE_HEADER}");
     }
 
     let mut app = App::new();
@@ -245,16 +265,34 @@ fn drive_bots(
     mut commands: Commands,
     time: Res<Time>,
     config: Res<Config>,
+    batch: Res<Batch>,
     mut rng: ResMut<BotRng>,
-    mut pirates: Query<(Entity, &Transform, &mut Controls, Option<&mut Bot>), With<Player>>,
-    enemies: Query<(&Transform, &Health, &Team), With<Enemy>>,
+    mut pirates: Query<(Entity, &Transform, &Health, &mut Controls, Option<&mut Bot>), With<Player>>,
+    enemies: Query<(Entity, &Transform, &Health, &Team, &EnemyLook), With<Enemy>>,
 ) {
+    if config.trace {
+        for (entity, transform, health, team, look) in &enemies {
+            trace_row(TraceRow {
+                tick: batch.ticks,
+                run: batch.run,
+                seed: config.run_seed(batch.run),
+                kind: "enemy",
+                entity: entity.index().index(),
+                pos: transform.translation.truncate(),
+                team: *team,
+                health,
+                ai_state: Some(look.state),
+                input: None,
+            });
+        }
+    }
+
     if config.bot == BotKind::Idle {
         return;
     }
     let rng = &mut rng.0;
     let dt = time.delta_secs();
-    for (entity, transform, mut controls, bot) in &mut pirates {
+    for (entity, transform, health, mut controls, bot) in &mut pirates {
         let Some(mut bot) = bot else {
             commands.entity(entity).insert(Bot { heading: Vec2::ZERO, timer: 0.0 });
             continue;
@@ -272,12 +310,12 @@ fn drive_bots(
         let pos = transform.translation.truncate();
         let target = enemies
             .iter()
-            .filter(|(_, h, team)| **team == Team::Enemy && !h.is_dead())
-            .map(|(t, ..)| t.translation.truncate())
+            .filter(|(_, _, h, team, _)| **team == Team::Enemy && !h.is_dead())
+            .map(|(_, t, ..)| t.translation.truncate())
             .filter(|e| e.distance(pos) <= ENGAGE)
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
         let aim = target.unwrap_or(pos + bot.heading * 40.0);
-        controls.apply(&PlayerInput {
+        let input = PlayerInput {
             movement: bot.heading,
             aim,
             fire: target.is_some(),
@@ -290,8 +328,67 @@ fn drive_bots(
             // Engineers drop a sentry now and then mid-fight.
             ability: target.is_some() && rng.unit() < 0.01,
             restart: false,
-        });
+        };
+        if config.trace {
+            trace_row(TraceRow {
+                tick: batch.ticks,
+                run: batch.run,
+                seed: config.run_seed(batch.run),
+                kind: "player",
+                entity: entity.index().index(),
+                pos,
+                team: Team::Player,
+                health,
+                ai_state: None,
+                input: Some(&input),
+            });
+        }
+        controls.apply(&input);
     }
+}
+
+/// One row of `--trace` output: a pirate or enemy's state/action on one tick.
+struct TraceRow<'a> {
+    tick: u32,
+    run: u32,
+    seed: u32,
+    kind: &'static str,
+    entity: u32,
+    pos: Vec2,
+    team: Team,
+    health: &'a Health,
+    ai_state: Option<AiState>,
+    input: Option<&'a PlayerInput>,
+}
+
+fn trace_row(row: TraceRow) {
+    let ai_state = row.ai_state.map_or(String::new(), |s| format!("{s:?}"));
+    let (move_x, move_y, aim_x, aim_y, fire, dash) = row.input.map_or(
+        (String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
+        |i| {
+            (
+                i.movement.x.to_string(),
+                i.movement.y.to_string(),
+                i.aim.x.to_string(),
+                i.aim.y.to_string(),
+                i.fire.to_string(),
+                i.dash.to_string(),
+            )
+        },
+    );
+    println!(
+        "{},{},{},{},{},{},{},{:?},{},{},{ai_state},{move_x},{move_y},{aim_x},{aim_y},{fire},{dash}",
+        row.tick,
+        row.run + 1,
+        row.seed,
+        row.kind,
+        row.entity,
+        row.pos.x,
+        row.pos.y,
+        row.team,
+        row.health.current,
+        row.health.max,
+    );
 }
 
 /// Ends each run (by the rules, or on the time limit), reports it and starts the next.
@@ -349,7 +446,7 @@ fn next_run(
             alarm.level,
         );
     } else if !config.quiet {
-        println!(
+        let line = format!(
             "run {:>3}  seed {:>10}  {ending:<7}  {:<24}  deck {}/{DECKS}  carried {:>5} cr  kills {:>2}  alarm {:.1}  {seconds:>6.1}s",
             batch.run + 1,
             config.run_seed(batch.run),
@@ -359,6 +456,12 @@ fn next_run(
             batch.kills,
             alarm.level,
         );
+        // --trace already owns stdout as a data stream (no --csv to carry this instead).
+        if config.trace {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 
     batch.total_ticks += batch.ticks as u64;
@@ -386,7 +489,7 @@ fn next_run(
         batch.total_ticks as f64 / wall.max(1e-9),
     );
     if !config.quiet {
-        if config.csv {
+        if config.csv || config.trace {
             eprintln!("{summary}");
         } else {
             println!("{summary}");

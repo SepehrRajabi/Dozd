@@ -35,3 +35,39 @@ row since a single invocation holds them constant across its batch. If you
 sweep more than one of them, carry the value into the CSV yourself (e.g. a
 second column from the sweep script) since the binary doesn't know it's
 being swept.
+
+## Per-tick trace (`--trace`)
+
+`--trace` prints one row per pirate and one row per enemy, every tick, to
+stdout — for building (state, action) training data rather than summarizing
+a finished run. Like `--csv`, it takes over stdout as a pure data stream
+(status/per-run/summary text moves to stderr); `--quiet` additionally drops
+that stderr chatter. `--trace` and `--csv` are independent — if both are
+given, both write their own rows to stdout (CSV rows only at each run's end,
+trace rows every tick), which is rarely what you want; pick one per
+invocation. Because it's a row per entity per tick, prefer `--runs 1` — the
+binary warns on stderr if `--runs` > 1 with `--trace` set.
+
+Header: `tick,run,seed,kind,entity,x,y,team,health,max_health,ai_state,move_x,move_y,aim_x,aim_y,fire,dash`
+
+| column | type | meaning | possible values |
+|---|---|---|---|
+| `tick` | u32 | 0-based simulation tick within this run | `0..` |
+| `run` | u32 | 1-based run number, same meaning as in the per-run CSV | `1..=runs` |
+| `seed` | u32 | this run's world seed | any u32 |
+| `kind` | string | which entity this row describes | `enemy`, `player` |
+| `entity` | u32 | Bevy entity index — stable within this process, not across runs/processes | any u32 |
+| `x`, `y` | f32 | world position this tick | any f32 |
+| `team` | string | `Team` component value | `Player`, `Enemy` |
+| `health` | f32 | current health this tick | `0.0..=max_health` |
+| `max_health` | f32 | max health | `0.0..` |
+| `ai_state` | string | enemy FSM state (see `AiState` in `src/enemies.rs`); blank on `player` rows | `Idle`, `Hunt`, `Telegraph`, `Lunge`, `Recover` |
+| `move_x`, `move_y` | f32 | bot's movement input this tick; blank on `enemy` rows | `-1.0..=1.0` each axis |
+| `aim_x`, `aim_y` | f32 | bot's aim point in world space; blank on `enemy` rows | any f32 |
+| `fire` | bool | bot fired this tick; blank on `enemy` rows | `true`, `false` |
+| `dash` | bool | bot dashed this tick; blank on `enemy` rows | `true`, `false` |
+
+This is state/action data, not (state, action, **reward**, next_state) —
+derive a reward signal by diffing consecutive rows (e.g. health deltas,
+distance closed to a target) once you've picked what you're optimizing for;
+the trace deliberately doesn't bake in a reward definition.
