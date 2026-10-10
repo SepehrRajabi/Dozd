@@ -488,6 +488,34 @@ ENEMIES = {
             "s": rgb(145, 150, 165),
         },
     ),
+    # Hulking station bruiser: slow, tough, punches whoever gets close.
+    "brute": (
+        [
+            "................",
+            "......kkkk......",
+            ".....kHHHHk.....",
+            ".....kHeeHk.....",
+            "..kkkkHHHHkkkk..",
+            ".kBBBBkkkkBBBBk.",
+            "kBBBbBBBBBBbBBBk",
+            "kBBbbBBttBBbbBBk",
+            "kBBk.kBBBBk.kBBk",
+            "kFFk.kbBBbk.kFFk",
+            "kFFFkkbbbbkkFFFk",
+            ".kkk.kBkkBk.kkk.",
+            ".....kBk.kBk....",
+            "....kkBk.kBkk...",
+            "....kkkk.kkkk...",
+        ],
+        {
+            "B": rgb(150, 92, 74),
+            "b": rgb(104, 60, 50),
+            "H": rgb(92, 98, 116),
+            "e": rgb(255, 120, 40),
+            "t": rgb(210, 190, 60),
+            "F": rgb(170, 175, 190),
+        },
+    ),
 }
 
 

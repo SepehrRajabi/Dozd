@@ -17,9 +17,15 @@ const HEARING: f32 = 150.0;
 /// An alerted enemy wakes idle ones within this radius.
 const ALERT_SHARE: f32 = 90.0;
 const SEPARATION: f32 = 12.0;
+/// A brute starts winding up a punch when its target is this close.
+const BRUTE_REACH: f32 = 16.0;
+/// The punch still lands if the target hasn't backed off past this.
+const BRUTE_SWING: f32 = 22.0;
+const BRUTE_DAMAGE: f32 = 20.0;
+const STALKER_DAMAGE: f32 = 25.0;
 /// Odds a downed enemy leaves its bounty behind.
 const CREDIT_DROP_CHANCE: f32 = 0.6;
-/// Odds of an ammo box, rolled once per box (Wardens carry two).
+/// Odds of an ammo box, rolled once per box (Wardens and Brutes carry two).
 const AMMO_DROP_CHANCE: f32 = 0.4;
 
 pub struct EnemiesPlugin;
@@ -53,6 +59,8 @@ pub enum EnemyKind {
     Stalker,
     /// Slow armoured tank that fires wide spreads.
     Warden,
+    /// Hulking melee bruiser: plods after you and punches when it gets close.
+    Brute,
 }
 
 struct EnemyStats {
@@ -106,12 +114,25 @@ const WARDEN: EnemyStats = EnemyStats {
     bounty: (50, 80),
 };
 
+const BRUTE: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/brute.png",
+    health: 300.0,
+    speed: 20.0,
+    hurtbox: 8.0,
+    half: 5.5,
+    sight: 100.0,
+    knockback_taken: 0.05,
+    death_color: Color::srgb(0.85, 0.45, 0.35),
+    bounty: (40, 70),
+};
+
 impl EnemyKind {
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
             'd' => Self::SentryDrone,
             's' => Self::Stalker,
             'h' => Self::Warden,
+            'b' => Self::Brute,
             _ => return None,
         })
     }
@@ -121,6 +142,7 @@ impl EnemyKind {
             Self::SentryDrone => &SENTRY_DRONE,
             Self::Stalker => &STALKER,
             Self::Warden => &WARDEN,
+            Self::Brute => &BRUTE,
         }
     }
 }
@@ -462,9 +484,9 @@ fn think(
                 enemy.velocity = enemy.lunge_dir * 240.0;
                 if !enemy.lunge_hit && dist < 11.0 {
                     enemy.lunge_hit = match victims.get_mut(target_entity) {
-                        Ok((_, _, mut health, ..)) => health.hurt(25.0),
+                        Ok((_, _, mut health, ..)) => health.hurt(STALKER_DAMAGE),
                         Err(_) => {
-                            bites.push(target_entity);
+                            bites.push((target_entity, STALKER_DAMAGE));
                             true
                         }
                     };
@@ -502,6 +524,41 @@ fn think(
                 }
             }
 
+            (EnemyKind::Brute, AiState::Hunt) => {
+                // Plods straight in; stops at arm's length rather than shoving.
+                enemy.velocity = if los && dist < BRUTE_REACH * 0.8 { Vec2::ZERO } else { chase * stats.speed };
+                if los && dist < BRUTE_REACH && enemy.attack_cooldown <= 0.0 {
+                    enemy.state = AiState::Telegraph;
+                    enemy.timer = 0.6;
+                    enemy.lunge_dir = dir;
+                }
+            }
+            (EnemyKind::Brute, AiState::Telegraph) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    // Lands on whoever is still in reach when the fist comes down.
+                    let fist = pos + enemy.lunge_dir * 8.0;
+                    if dist < BRUTE_SWING {
+                        match victims.get_mut(target_entity) {
+                            Ok((_, _, mut health, ..)) => {
+                                health.hurt(BRUTE_DAMAGE);
+                            }
+                            Err(_) => bites.push((target_entity, BRUTE_DAMAGE)),
+                        }
+                    }
+                    fx(&mut commands, FxKind::Spark, fist, enemy.lunge_dir.to_angle(), stats.death_color);
+                    enemy.state = AiState::Recover;
+                    enemy.timer = 0.7;
+                }
+            }
+            (EnemyKind::Brute, AiState::Recover) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    enemy.state = AiState::Hunt;
+                    enemy.attack_cooldown = 0.6 + rng.unit() * 0.4;
+                }
+            }
+
             (_, state) => {
                 // States a kind never enters (e.g. a drone lunging); recover gracefully.
                 debug_assert!(false, "{:?} has no {state:?} behaviour", enemy.kind);
@@ -510,9 +567,9 @@ fn think(
         }
     }
 
-    for victim in bites {
+    for (victim, damage) in bites {
         if let Ok((.., mut health, _)) = enemies.get_mut(victim) {
-            health.hurt(25.0);
+            health.hurt(damage);
         }
     }
 }
@@ -606,7 +663,7 @@ fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(En
             let (lo, hi) = stats.bounty;
             let credits = lo + (rng.unit() * (hi - lo) as f32).round() as u32;
             // Each drop is its own roll, so a body may leave nothing at all.
-            let ammo_rolls = if enemy.kind == EnemyKind::Warden { 2 } else { 1 };
+            let ammo_rolls = if matches!(enemy.kind, EnemyKind::Warden | EnemyKind::Brute) { 2 } else { 1 };
             let mut drops = Vec::new();
             if rng.unit() < CREDIT_DROP_CHANCE {
                 drops.push(EnemyDrop::Credits(credits));
@@ -626,9 +683,12 @@ fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(En
 pub fn roll_reinforcement(rng: &mut Rng, alarm_level: f32) -> EnemyKind {
     let r = rng.unit();
     let warden = 0.08 * alarm_level;
+    let brute = 0.06 * alarm_level;
     if r < warden {
         EnemyKind::Warden
-    } else if r < warden + 0.4 {
+    } else if r < warden + brute {
+        EnemyKind::Brute
+    } else if r < warden + brute + 0.4 {
         EnemyKind::Stalker
     } else {
         EnemyKind::SentryDrone
