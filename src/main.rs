@@ -5,6 +5,7 @@ mod drops;
 mod enemies;
 mod guns;
 mod headless;
+mod hud;
 mod loot;
 mod menu;
 mod mission;
@@ -171,6 +172,7 @@ impl Plugin for ViewPlugins {
             class::ClassViewPlugin,
             menu::MenuPlugin,
             settings::DisplayPlugin,
+            hud::HudPlugin,
         ));
     }
 }

@@ -12,7 +12,8 @@ use crate::loot::LootKind;
 use crate::perks::PerkKind;
 use crate::player::Player;
 use crate::settings::Settings;
-use crate::{GameState, Hud};
+use crate::hud::{self, HudSlot};
+use crate::GameState;
 
 const GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
 const GOLD_FAINT: Color = Color::srgba(1.0, 0.82, 0.35, 0.3);
@@ -194,6 +195,9 @@ struct LootLeftText;
 
 #[derive(Component)]
 struct LeaveText;
+
+#[derive(Component)]
+struct LeavePanel;
 
 #[derive(Resource, Default)]
 struct LeavePrompt {
@@ -985,23 +989,28 @@ fn animate_backdrop(time: Res<Time>, mut sprites: Query<(&Backdrop, &mut Transfo
 // In-game: session info and leaving
 // ---------------------------------------------------------------------------
 
-fn spawn_session_hud(mut commands: Commands) {
-    commands.spawn((
-        Hud,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(14.0),
-            right: Val::Px(18.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::FlexEnd,
-            row_gap: Val::Px(6.0),
+fn spawn_session_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    commands.entity(hud::slot(&slots, HudSlot::Session)).with_children(|slot| {
+        slot.spawn((SessionText, label("", 14.0, DIM), Node {
+            align_self: AlignSelf::FlexEnd,
             ..default()
-        },
-        children![
-            (SessionText, label("", 14.0, DIM)),
-            (LootLeftText, label("", 14.0, DIM)),
-            (LeaveText, label("", 15.0, GOLD)),
-        ],
+        }));
+        slot.spawn((LootLeftText, label("", 14.0, DIM), Node {
+            align_self: AlignSelf::FlexEnd,
+            ..default()
+        }));
+    });
+    commands.entity(hud::slot(&slots, HudSlot::Notice)).with_child((
+        LeavePanel,
+        hud::panel_accent(
+            Node {
+                padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)),
+                display: Display::None,
+                ..default()
+            },
+            GOLD,
+        ),
+        children![(LeaveText, label("", 15.0, GOLD))],
     ));
 }
 
@@ -1013,6 +1022,7 @@ fn update_session_hud(
     mut session: Single<&mut Text, (With<SessionText>, Without<LeaveText>, Without<LootLeftText>)>,
     mut loot_left: Single<&mut Text, (With<LootLeftText>, Without<LeaveText>)>,
     mut leave: Single<&mut Text, With<LeaveText>>,
+    mut leave_panel: Single<&mut Node, With<LeavePanel>>,
     mut ip: Local<Option<String>>,
 ) {
     let crew = players.iter().count();
@@ -1039,6 +1049,10 @@ fn update_session_hud(
     };
     if leave.0 != warning {
         leave.0 = warning.into();
+    }
+    let display = if warning.is_empty() { Display::None } else { Display::Flex };
+    if leave_panel.display != display {
+        leave_panel.display = display;
     }
 }
 

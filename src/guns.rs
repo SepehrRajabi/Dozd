@@ -7,6 +7,7 @@ use crate::combat::{
     spawn_projectile,
 };
 use crate::enemies::Enemy;
+use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalPlayer, authority};
 use crate::perks::{PerkKind, Perks};
@@ -369,6 +370,21 @@ struct WeaponName;
 #[derive(Component)]
 struct AmmoText;
 
+#[derive(Component)]
+struct SpareText;
+
+/// The magazine, or the reload's progress while reloading.
+#[derive(Component)]
+struct MagazineBar;
+
+/// The panel around the weapon readout; its top edge takes the gun's colour.
+#[derive(Component)]
+struct WeaponPanel;
+
+/// One of the carried guns in the strip along the top of the weapon panel.
+#[derive(Component)]
+struct WeaponSlot(usize);
+
 fn can_act(player: &Player, health: &Health) -> bool {
     player.status == PirateStatus::Active && !health.is_dead()
 }
@@ -658,22 +674,42 @@ fn spawn_crosshair(mut commands: Commands, assets: Res<AssetServer>) {
     ));
 }
 
-fn spawn_weapon_hud(mut commands: Commands) {
-    commands.spawn((
-        Hud,
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            right: Val::Px(18.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::FlexEnd,
-            row_gap: Val::Px(4.0),
-            padding: UiRect::all(Val::Px(10.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.02, 0.02, 0.06, 0.75)),
-        children![
-            (
+fn spawn_weapon_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    commands.entity(hud::slot(&slots, HudSlot::Weapon)).with_children(|slot| {
+        slot.spawn((
+            WeaponPanel,
+            hud::panel(Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(6.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                min_width: Val::Px(190.0),
+                ..default()
+            }),
+        ))
+        .with_children(|panel| {
+            panel
+                .spawn(Node {
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                })
+                .with_children(|strip| {
+                    for i in 0..GunKind::ALL.len().min(4) {
+                        strip.spawn((
+                            WeaponSlot(i),
+                            Node {
+                                width: Val::Px(36.0),
+                                height: Val::Px(20.0),
+                                border: UiRect::all(Val::Px(1.0)),
+                                padding: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor::all(hud::EDGE),
+                            ImageNode::default(),
+                        ));
+                    }
+                });
+            panel.spawn((
                 WeaponIcon,
                 ImageNode::default(),
                 Node {
@@ -681,30 +717,33 @@ fn spawn_weapon_hud(mut commands: Commands) {
                     height: Val::Px(48.0),
                     ..default()
                 },
-            ),
-            (
-                WeaponName,
-                Text::new(""),
-                TextFont::from_font_size(20.0),
-                TextColor(Color::WHITE),
-            ),
-            (
-                AmmoText,
-                Text::new(""),
-                TextFont::from_font_size(18.0),
-                TextColor(Color::WHITE),
-            ),
-        ],
-    ));
+            ));
+            panel.spawn((WeaponName, hud::text("", 16.0, Color::WHITE)));
+            panel.spawn(Node {
+                column_gap: Val::Px(6.0),
+                align_items: AlignItems::Baseline,
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((AmmoText, hud::text("", 26.0, Color::WHITE)));
+                row.spawn((SpareText, hud::text("", 14.0, hud::DIM)));
+            });
+            panel.spawn((MagazineBar, hud::meter(168.0, 5.0, Color::WHITE)));
+        });
+    });
 }
 
 fn update_weapon_hud(
     assets: Res<AssetServer>,
     arsenal: Option<Single<(&Player, &Arsenal, &Perks), With<LocalPlayer>>>,
     riot_shields: Query<&RiotShield>,
+    mut panel: Single<&mut BorderColor, (With<WeaponPanel>, Without<WeaponSlot>)>,
+    mut strip: Query<(&WeaponSlot, &mut Node, &mut ImageNode, &mut BorderColor), Without<WeaponIcon>>,
     mut icon: Single<&mut ImageNode, With<WeaponIcon>>,
-    mut name: Single<(&mut Text, &mut TextColor), (With<WeaponName>, Without<AmmoText>)>,
-    mut ammo: Single<(&mut Text, &mut TextColor), With<AmmoText>>,
+    name: Single<(&mut Text, &mut TextColor), (With<WeaponName>, Without<AmmoText>, Without<SpareText>)>,
+    ammo: Single<(&mut Text, &mut TextColor), (With<AmmoText>, Without<SpareText>)>,
+    mut spare: Single<&mut Text, With<SpareText>>,
+    mut magazine: Single<&mut Meter, With<MagazineBar>>,
 ) {
     let Some(arsenal) = arsenal else { return };
     let (player, arsenal, perks) = *arsenal;
@@ -716,38 +755,51 @@ fn update_weapon_hud(
     if icon.image != image {
         icon.image = image;
     }
+    panel.top = stats.color;
+    for (slot, mut node, mut image, mut border) in &mut strip {
+        let Some(carried) = arsenal.guns.get(slot.0) else {
+            node.display = Display::None;
+            continue;
+        };
+        node.display = Display::Flex;
+        let handle = assets.load(carried.kind.stats().sprite);
+        if image.image != handle {
+            image.image = handle;
+        }
+        let current = slot.0 == arsenal.current;
+        let empty = carried.ammo == 0 && carried.spare == Some(0);
+        image.color = Color::WHITE.with_alpha(if current { 1.0 } else if empty { 0.2 } else { 0.45 });
+        *border = BorderColor::all(if current { stats.color } else { hud::EDGE });
+    }
 
-    let (name_text, name_color) = &mut *name;
-    name_text.0 = format!("[{}] {}", arsenal.current + 1, stats.name);
+    let (mut name_text, mut name_color) = name.into_inner();
+    name_text.set_if_neq(Text(format!("{}  {}", arsenal.current + 1, stats.name.to_uppercase())));
     name_color.0 = stats.color;
 
-    let (ammo_text, ammo_color) = &mut *ammo;
-    match arsenal.reloading {
-        _ if shielding => {
-            ammo_text.0 = "SHIELD UP".into();
-            ammo_color.0 = RIOT_COLOR;
-        }
+    let (mut ammo_text, mut ammo_color) = ammo.into_inner();
+    let red = Color::srgb(1.0, 0.35, 0.35);
+    let (big, small, color, frac, bar) = match arsenal.reloading {
+        _ if shielding => ("SHIELD UP".into(), String::new(), RIOT_COLOR, 1.0, RIOT_COLOR),
         _ if perks.has(PerkKind::Overdrive) => {
-            ammo_text.0 = "INFINITE".into();
-            ammo_color.0 = PerkKind::Overdrive.color();
+            let color = PerkKind::Overdrive.color();
+            ("INFINITE".into(), String::new(), color, 1.0, color)
         }
         Some(left) => {
-            ammo_text.0 = format!("RELOADING  {left:.1}s");
-            ammo_color.0 = Color::srgb(1.0, 0.8, 0.3);
+            let amber = Color::srgb(1.0, 0.8, 0.3);
+            ("RELOADING".into(), format!("{left:.1}s"), amber, 1.0 - left / stats.reload_time, amber)
         }
-        None if gun.ammo == 0 && gun.spare == Some(0) => {
-            ammo_text.0 = "OUT OF AMMO".into();
-            ammo_color.0 = Color::srgb(1.0, 0.35, 0.35);
-        }
+        None if gun.ammo == 0 && gun.spare == Some(0) => ("EMPTY".into(), "no spare ammo".into(), red, 0.0, red),
         None => {
-            let spare = gun.spare.map_or("INF".to_string(), |s| s.to_string());
-            ammo_text.0 = format!("{} / {spare}", gun.ammo);
-            ammo_color.0 = if gun.ammo == 0 {
-                Color::srgb(1.0, 0.35, 0.35)
-            } else {
-                Color::WHITE
-            };
+            let spare = gun.spare.map_or("/ INF".to_string(), |s| format!("/ {s}"));
+            let frac = gun.ammo as f32 / stats.magazine as f32;
+            let color = if gun.ammo == 0 { red } else { Color::WHITE };
+            let bar = if frac <= 0.25 { red } else { Color::srgba(1.0, 1.0, 1.0, 0.85) };
+            (gun.ammo.to_string(), spare, color, frac, bar)
         }
-    }
+    };
+    ammo_text.set_if_neq(Text(big));
+    ammo_color.0 = color;
+    spare.set_if_neq(Text(small));
+    magazine.frac = frac;
+    magazine.color = bar;
 }
-

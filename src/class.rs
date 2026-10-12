@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{FxKind, Health, Hurtbox, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::enemies::Enemy;
 use crate::guns::GunKind;
+use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
 use crate::player::{Aim, Controls, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
-use crate::{GameState, Hud, Level, Rng};
+use crate::{GameState, Level, Rng};
 
 /// Guns every pirate can carry; the Gunner gets one more.
 pub const BASE_SLOTS: usize = 3;
@@ -727,54 +728,23 @@ fn draw_riot_shields(
     }
 }
 
-fn spawn_ability_hud(mut commands: Commands) {
+fn spawn_ability_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     // Under the shield, hull and dash bars.
-    commands.spawn((
-        Hud,
+    commands.entity(hud::slot(&slots, HudSlot::Ability)).with_child((
         AbilityPanel,
         Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(112.0),
-            left: Val::Px(18.0),
-            column_gap: Val::Px(10.0),
+            column_gap: Val::Px(8.0),
             align_items: AlignItems::Center,
             display: Display::None,
             ..default()
         },
         children![
-            (
-                AbilityLabel,
-                Text::new(""),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.8, 0.85, 0.95)),
-                Node {
-                    min_width: Val::Px(44.0),
-                    ..default()
-                },
-            ),
-            (
-                Node {
-                    width: Val::Px(60.0),
-                    height: Val::Px(8.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                children![(
-                    AbilityFill,
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(SENTRY_COLOR),
-                )],
-            ),
-            (
-                AbilityText,
-                Text::new(""),
-                TextFont::from_font_size(13.0),
-                TextColor(Color::WHITE),
-            ),
+            (AbilityLabel, hud::text("", 12.0, hud::LABEL), Node {
+                width: Val::Px(hud::ROW_LABEL),
+                ..default()
+            }),
+            (AbilityFill, hud::meter(hud::ROW_METER, 10.0, SENTRY_COLOR)),
+            (AbilityText, hud::text("", 12.0, Color::WHITE)),
         ],
     ));
 }
@@ -786,7 +756,7 @@ fn update_ability_hud(
     riot_shields: Query<&RiotShield>,
     mut panel: Single<&mut Node, (With<AbilityPanel>, Without<AbilityFill>)>,
     mut name: Single<&mut Text, (With<AbilityLabel>, Without<AbilityText>)>,
-    mut fill: Single<(&mut Node, &mut BackgroundColor), With<AbilityFill>>,
+    mut fill: Single<&mut Meter, With<AbilityFill>>,
     mut text: Single<(&mut Text, &mut TextColor), With<AbilityText>>,
 ) {
     let stats = player.as_ref().and_then(|p| p.0.class.ability());
@@ -809,7 +779,6 @@ fn update_ability_hud(
     let in_reach = sentry.is_some_and(|(_, t)| {
         t.translation.truncate().distance(transform.translation.truncate()) <= SENTRY_PICKUP
     });
-    let (fill_node, fill_color) = &mut *fill;
     let (text, text_color) = &mut *text;
     let dim = Color::srgba(1.0, 1.0, 1.0, 0.6);
     let (frac, color, label, label_color) = if player.class == PirateClass::Bulwark {
@@ -818,7 +787,7 @@ fn update_ability_hud(
         if riot_shields.iter().any(|s| s.owner == local.0) {
             (frac, stats.color, format!("UP {:.0}s", ability.charge.ceil()), stats.color)
         } else if ability.charge < RIOT_MIN_CHARGE {
-            (frac, Color::srgb(0.4, 0.45, 0.55), "CHARGING".into(), dim)
+            (frac, hud::SPENT, "CHARGING".into(), dim)
         } else {
             (frac, stats.color, "READY  [Q]".into(), Color::WHITE)
         }
@@ -827,12 +796,12 @@ fn update_ability_hud(
         (left / stats.life, stats.color, label, stats.color)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
-        (ready, Color::srgb(0.4, 0.45, 0.55), format!("{:.0}s", ability.cooldown.ceil()), Color::srgba(1.0, 1.0, 1.0, 0.6))
+        (ready, hud::SPENT, format!("{:.0}s", ability.cooldown.ceil()), dim)
     } else {
         (1.0, stats.color, "READY  [Q]".into(), Color::WHITE)
     };
-    fill_node.width = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
-    fill_color.0 = color;
+    fill.frac = frac;
+    fill.color = color;
     if text.0 != label {
         text.0 = label;
     }

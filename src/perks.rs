@@ -10,7 +10,8 @@ use crate::enemies::Enemy;
 use crate::guns::Arsenal;
 use crate::net::{LocalPlayer, authority};
 use crate::player::{Dash, PirateStatus, Player};
-use crate::{GameState, Hud, Level};
+use crate::hud::{self, HudSlot, Meter};
+use crate::{GameState, Level};
 
 const PICKUP_RADIUS: f32 = 10.0;
 /// Enemies this close to a pirate with a shock field are stunned.
@@ -331,30 +332,24 @@ fn shock_rings(
     }
 }
 
-fn spawn_perk_hud(mut commands: Commands, assets: Res<AssetServer>) {
-    // Bottom left, above the controls hint and clear of the centre banners.
+fn spawn_perk_hud(mut commands: Commands, assets: Res<AssetServer>, slots: Query<(Entity, &HudSlot)>) {
     commands
-        .spawn((Hud, Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(44.0),
-            left: Val::Px(18.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(6.0),
-            ..default()
-        }))
+        .entity(hud::slot(&slots, HudSlot::Perks))
         .with_children(|panel| {
             for kind in PerkKind::ALL {
                 panel
                     .spawn((
                         PerkRow(kind),
-                        Node {
-                            display: Display::None,
-                            column_gap: Val::Px(8.0),
-                            align_items: AlignItems::Center,
-                            padding: UiRect::axes(Val::Px(6.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.02, 0.02, 0.06, 0.7)),
+                        hud::panel_accent(
+                            Node {
+                                display: Display::None,
+                                column_gap: Val::Px(8.0),
+                                align_items: AlignItems::Center,
+                                padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
+                                ..default()
+                            },
+                            kind.color(),
+                        ),
                     ))
                     .with_children(|row| {
                         row.spawn((
@@ -399,23 +394,7 @@ fn spawn_perk_hud(mut commands: Commands, assets: Res<AssetServer>) {
                                 TextFont::from_font_size(11.0),
                                 TextColor(Color::srgba(0.85, 0.9, 1.0, 0.7)),
                             ));
-                            info.spawn((
-                                Node {
-                                    width: Val::Px(150.0),
-                                    height: Val::Px(4.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                            ))
-                            .with_child((
-                                PerkFill(kind),
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Percent(100.0),
-                                    ..default()
-                                },
-                                BackgroundColor(kind.color()),
-                            ));
+                            info.spawn((PerkFill(kind), hud::meter(150.0, 5.0, kind.color())));
                         });
                     });
             }
@@ -425,9 +404,9 @@ fn spawn_perk_hud(mut commands: Commands, assets: Res<AssetServer>) {
 fn update_perk_hud(
     time: Res<Time>,
     perks: Option<Single<&Perks, With<LocalPlayer>>>,
-    mut rows: Query<(&PerkRow, &mut Node), (Without<PerkFill>, Without<PerkTime>)>,
+    mut rows: Query<(&PerkRow, &mut Node)>,
     mut times: Query<(&PerkTime, &mut Text, &mut TextColor)>,
-    mut fills: Query<(&PerkFill, &mut Node), Without<PerkRow>>,
+    mut fills: Query<(&PerkFill, &mut Meter)>,
 ) {
     let active = |kind| perks.as_ref().and_then(|p| p.get(kind)).copied();
     for (row, mut node) in &mut rows {
@@ -447,9 +426,9 @@ fn update_perk_hud(
             color.0 = Color::srgba(1.0, 1.0, 1.0, 0.8);
         }
     }
-    for (fill, mut node) in &mut fills {
+    for (fill, mut meter) in &mut fills {
         let Some(perk) = active(fill.0) else { continue };
-        node.width = Val::Percent((perk.left / perk.total).clamp(0.0, 1.0) * 100.0);
+        meter.frac = perk.left / perk.total;
     }
 }
 

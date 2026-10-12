@@ -6,7 +6,8 @@ use crate::combat::{FxKind, Health, fx};
 use crate::mission::Alarm;
 use crate::net::{LocalPlayer, authority};
 use crate::player::{Controls, PirateStatus, Player};
-use crate::{GameState, Hud, Level};
+use crate::hud::{self, HudSlot};
+use crate::{GameState, Level};
 
 const PICKUP_RADIUS: f32 = 14.0;
 
@@ -110,6 +111,12 @@ struct HaulText;
 #[derive(Component)]
 struct PromptText;
 
+#[derive(Component)]
+struct PromptPanel;
+
+#[derive(Component)]
+struct ItemsText;
+
 pub fn spawn_loot(commands: &mut Commands, kind: LootKind, pos: Vec2) {
     commands.spawn((Level, Replicated, kind, Transform::from_translation(pos.extend(5.0))));
 }
@@ -175,66 +182,55 @@ fn pick_up_loot(
     }
 }
 
-fn spawn_hud(mut commands: Commands) {
-    commands.spawn((
-        Hud,
-        HaulText,
-        Text::new(""),
-        TextFont::from_font_size(22.0),
-        TextColor(Color::srgb(1.0, 0.84, 0.3)),
+fn spawn_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    commands.entity(hud::slot(&slots, HudSlot::Haul)).with_child((
         Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(14.0),
-            left: Val::Px(18.0),
+            column_gap: Val::Px(8.0),
+            align_items: AlignItems::Baseline,
             ..default()
         },
+        children![
+            hud::text("HAUL", 12.0, hud::LABEL),
+            (HaulText, hud::text("", 22.0, hud::GOLD)),
+            (ItemsText, hud::text("", 13.0, hud::DIM)),
+        ],
     ));
 
-    commands.spawn((
-        Hud,
-        Text::new("WASD move   SPACE dash   Mouse aim   LMB fire   R reload   1-4 / wheel switch gun   Q ability   E loot"),
-        TextFont::from_font_size(16.0),
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            left: Val::Px(18.0),
+    commands.entity(hud::slot(&slots, HudSlot::Prompt)).with_child((
+        PromptPanel,
+        hud::panel(Node {
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+            display: Display::None,
             ..default()
-        },
+        }),
+        children![hud::key_cap("E"), (PromptText, hud::text("", 17.0, Color::WHITE))],
     ));
-
-    commands
-        .spawn((Hud, Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(70.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        }))
-        .with_child((
-            PromptText,
-            Text::new(""),
-            TextFont::from_font_size(20.0),
-            TextColor(Color::WHITE),
-        ));
 }
 
 fn update_hud(
     player: Option<Single<(&Player, &Transform), With<LocalPlayer>>>,
     loot: Query<(Entity, &LootKind, &Transform)>,
-    mut haul_text: Single<&mut Text, (With<HaulText>, Without<PromptText>)>,
-    mut prompt: Single<(&mut Text, &mut TextColor), With<PromptText>>,
+    mut haul_text: Single<&mut Text, (With<HaulText>, Without<ItemsText>, Without<PromptText>)>,
+    mut items_text: Single<&mut Text, (With<ItemsText>, Without<PromptText>)>,
+    mut panel: Single<&mut Node, With<PromptPanel>>,
+    prompt: Single<(&mut Text, &mut TextColor), With<PromptText>>,
 ) {
     let Some(player) = player else { return };
     let (player, transform) = *player;
-    haul_text.0 = format!("HAUL  {} cr    {} items", player.credits, player.items);
+    haul_text.set_if_neq(Text(format!("{} cr", player.credits)));
+    let items = if player.items == 1 { "1 item".into() } else { format!("{} items", player.items) };
+    items_text.set_if_neq(Text(items));
 
-    let (text, color) = &mut *prompt;
-    match nearest_loot(transform.translation.truncate(), loot.iter()) {
-        Some((_, kind, _)) => {
-            text.0 = format!("[E]  Take {}  ({} cr)", kind.name(), kind.value());
-            color.0 = kind.color();
-        }
-        None => text.0.clear(),
+    let nearest = nearest_loot(transform.translation.truncate(), loot.iter());
+    let display = if nearest.is_some() { Display::Flex } else { Display::None };
+    if panel.display != display {
+        panel.display = display;
+    }
+    if let Some((_, kind, _)) = nearest {
+        let (mut text, mut color) = prompt.into_inner();
+        text.set_if_neq(Text(format!("Take {}  ({} cr)", kind.name(), kind.value())));
+        color.0 = kind.color();
     }
 }

@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::combat::{FxKind, Health, fx};
 use crate::enemies::{EnemyLook, roll_reinforcement, spawn_enemy};
+use crate::hud::{self, HudSlot, Meter};
 use crate::loot::LootKind;
 use crate::net::{LocalPlayer, NetMode, authority};
 use crate::player::{Controls, DASH_COOLDOWN, Dash, PirateStatus, Player};
 use crate::room::{DECKS, Heist, RoomGrid};
 use crate::settings::Settings;
-use crate::{GameState, Hud, Rng};
+use crate::{GameState, Rng};
 
 pub const MAX_ALARM: f32 = 5.0;
 /// Once raised, the alarm keeps climbing on its own: lingering is dangerous.
@@ -62,7 +63,7 @@ impl Plugin for MissionViewPlugin {
             .add_systems(OnEnter(GameState::Over), spawn_results)
             .add_systems(
                 Update,
-                (update_player_bars, update_alarm_text, update_banner, update_extraction_hud)
+                (update_player_bars, update_alarm_hud, update_banner, update_extraction_hud)
                     .chain()
                     .after(follow_host_state),
             );
@@ -171,16 +172,35 @@ pub struct MissionStatus {
 }
 
 #[derive(Component)]
-struct HullFill;
+struct HullBar;
 
 #[derive(Component)]
-struct ShieldFill;
+struct HullValue;
 
 #[derive(Component)]
-struct DashFill;
+struct ShieldBar;
+
+#[derive(Component)]
+struct ShieldValue;
+
+#[derive(Component)]
+struct DashBar;
+
+#[derive(Component)]
+struct DeckText;
+
+/// One step of the alarm meter, filling as the alarm passes through its level.
+#[derive(Component)]
+struct AlarmPip(usize);
 
 #[derive(Component)]
 struct AlarmText;
+
+#[derive(Component)]
+struct WaveText;
+
+#[derive(Component)]
+struct BannerPanel;
 
 #[derive(Component)]
 struct BannerText;
@@ -189,7 +209,7 @@ struct BannerText;
 struct ExtractionPanel;
 
 #[derive(Component)]
-struct ExtractionFill;
+struct ExtractionBar;
 
 #[derive(Component)]
 struct ExtractionText;
@@ -471,199 +491,188 @@ fn alarm_color(level: f32) -> Color {
     Color::srgb(1.0, 0.85 - 0.6 * t, 0.3 - 0.15 * t)
 }
 
-/// A labelled bar whose fill node carries `marker`.
-fn stat_row(panel: &mut ChildSpawnerCommands, label: &str, width: f32, marker: impl Component, color: Color) {
+const SHIELD_COLOR: Color = Color::srgb(0.4, 0.72, 1.0);
+const HULL_COLOR: Color = Color::srgb(0.35, 0.9, 0.45);
+const DASH_COLOR: Color = Color::srgb(0.75, 0.92, 1.0);
+
+/// A labelled meter with a number after it.
+fn stat_row(panel: &mut ChildSpawnerCommands, label: &str, color: Color, bar: impl Component, value: impl Bundle) {
     panel
         .spawn(Node {
-            column_gap: Val::Px(10.0),
+            column_gap: Val::Px(8.0),
             align_items: AlignItems::Center,
             ..default()
         })
         .with_children(|row| {
-            row.spawn((
-                Text::new(label),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.8, 0.85, 0.95)),
-                Node {
-                    width: Val::Px(44.0),
-                    ..default()
-                },
-            ));
-            row.spawn((bar(width, 8.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6))))
-                .with_child((
-                    marker,
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(color),
-                ));
+            row.spawn((hud::text(label, 12.0, hud::LABEL), Node {
+                width: Val::Px(hud::ROW_LABEL),
+                ..default()
+            }));
+            row.spawn((bar, hud::meter(hud::ROW_METER, 10.0, color)));
+            row.spawn(value);
         });
 }
 
-fn bar(width: f32, height: f32) -> Node {
-    Node {
-        width: Val::Px(width),
-        height: Val::Px(height),
-        ..default()
-    }
-}
+fn spawn_mission_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    commands.entity(hud::slot(&slots, HudSlot::Vitals)).with_children(|panel| {
+        stat_row(panel, "SHLD", SHIELD_COLOR, ShieldBar, (ShieldValue, hud::text("", 12.0, hud::TEXT)));
+        stat_row(panel, "HULL", HULL_COLOR, HullBar, (HullValue, hud::text("", 12.0, hud::TEXT)));
+        stat_row(panel, "DASH", DASH_COLOR, DashBar, ());
+    });
 
-fn spawn_mission_hud(mut commands: Commands) {
-    // Shield, hull and dash readiness, under the haul counter.
-    commands
-        .spawn((Hud, Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(46.0),
-            left: Val::Px(18.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(5.0),
+    // Deck, alarm meter and what security is up to.
+    commands.entity(hud::slot(&slots, HudSlot::Status)).with_children(|slot| {
+        slot.spawn(hud::panel(Node {
+            column_gap: Val::Px(12.0),
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)),
             ..default()
         }))
         .with_children(|panel| {
-            stat_row(panel, "SHLD", 180.0, ShieldFill, Color::srgb(0.4, 0.72, 1.0));
-            stat_row(panel, "HULL", 180.0, HullFill, Color::srgb(0.35, 0.9, 0.45));
-            stat_row(panel, "DASH", 60.0, DashFill, Color::srgb(0.75, 0.92, 1.0));
-        });
-
-    // Alarm meter and banner, top centre.
-    commands.spawn((
-        Hud,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(14.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(8.0),
-            ..default()
-        },
-        children![
-            (
-                AlarmText,
-                Text::new(""),
-                TextFont::from_font_size(20.0),
-                TextColor(Color::WHITE),
-            ),
-            (
-                BannerText,
-                Text::new(""),
-                TextFont::from_font_size(22.0),
-                TextColor(Color::WHITE),
-                // Clear of the stat bars in the top-left.
+            panel.spawn((DeckText, hud::text("", 15.0, hud::TEXT)));
+            panel.spawn((
                 Node {
-                    margin: UiRect::top(Val::Px(56.0)),
+                    width: Val::Px(1.0),
+                    height: Val::Px(16.0),
                     ..default()
                 },
-            ),
-        ],
-    ));
+                BackgroundColor(hud::EDGE),
+            ));
+            panel.spawn(hud::text("ALARM", 12.0, hud::LABEL));
+            panel
+                .spawn(Node {
+                    column_gap: Val::Px(3.0),
+                    ..default()
+                })
+                .with_children(|pips| {
+                    for i in 0..MAX_ALARM as usize {
+                        pips.spawn((AlarmPip(i), hud::meter(18.0, 9.0, alarm_color(i as f32 + 1.0))));
+                    }
+                });
+            panel.spawn((AlarmText, hud::text("", 15.0, hud::TEXT)));
+            panel.spawn((WaveText, hud::text("", 12.0, hud::DIM)));
+        });
+    });
 
-    // Extraction progress, lower centre.
-    commands.spawn((
-        Hud,
-        ExtractionPanel,
+    commands.entity(hud::slot(&slots, HudSlot::Banner)).with_child((
+        BannerPanel,
         Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(110.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(6.0),
+            max_width: Val::Px(560.0),
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(6.0)),
             display: Display::None,
             ..default()
         },
+        BackgroundColor(Color::NONE),
+        children![(BannerText, hud::text("", 18.0, Color::WHITE), TextLayout::justify(Justify::Center))],
+    ));
+
+    // Extraction or lift progress.
+    commands.entity(hud::slot(&slots, HudSlot::Progress)).with_child((
+        ExtractionPanel,
+        hud::panel(Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(6.0),
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+            display: Display::None,
+            ..default()
+        }),
         children![
-            (
-                ExtractionText,
-                Text::new(""),
-                TextFont::from_font_size(20.0),
-                TextColor(Color::srgb(1.0, 0.85, 0.3)),
-            ),
-            (
-                bar(320.0, 10.0),
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                children![(
-                    ExtractionFill,
-                    Node {
-                        width: Val::Percent(0.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(1.0, 0.8, 0.25)),
-                )],
-            ),
+            (ExtractionText, hud::text("", 16.0, hud::GOLD)),
+            (ExtractionBar, hud::meter(340.0, 10.0, hud::GOLD)),
         ],
     ));
 }
 
 fn update_player_bars(
     player: Option<Single<(&Health, &Dash), With<LocalPlayer>>>,
-    mut hull: Single<(&mut Node, &mut BackgroundColor), With<HullFill>>,
-    mut shield: Single<&mut Node, (With<ShieldFill>, Without<HullFill>)>,
-    mut dash_fill: Single<(&mut Node, &mut BackgroundColor), (With<DashFill>, Without<HullFill>, Without<ShieldFill>)>,
+    mut hull: Single<&mut Meter, With<HullBar>>,
+    mut shield: Single<&mut Meter, (With<ShieldBar>, Without<HullBar>)>,
+    mut dash_bar: Single<&mut Meter, (With<DashBar>, Without<HullBar>, Without<ShieldBar>)>,
+    mut hull_value: Single<&mut Text, (With<HullValue>, Without<ShieldValue>)>,
+    mut shield_value: Single<&mut Text, With<ShieldValue>>,
 ) {
     let Some(player) = player else { return };
     let (health, dash) = *player;
 
     let frac = (health.current / health.max).clamp(0.0, 1.0);
-    let (hull_node, hull_color) = &mut *hull;
-    hull_node.width = Val::Percent(frac * 100.0);
-    hull_color.0 = if frac > 0.5 {
-        Color::srgb(0.35, 0.9, 0.45)
+    hull.frac = frac;
+    hull.color = if frac > 0.5 {
+        HULL_COLOR
     } else if frac > 0.25 {
         Color::srgb(1.0, 0.75, 0.25)
     } else {
         Color::srgb(1.0, 0.3, 0.3)
     };
-
-    shield.width = Val::Percent((health.shield / health.max_shield).clamp(0.0, 1.0) * 100.0);
+    shield.frac = (health.shield / health.max_shield).clamp(0.0, 1.0);
+    hull_value.set_if_neq(Text(format!("{:.0}", health.current.max(0.0).ceil())));
+    shield_value.set_if_neq(Text(format!("{:.0}", health.shield.max(0.0).ceil())));
 
     let ready = 1.0 - (dash.cooldown / DASH_COOLDOWN).clamp(0.0, 1.0);
-    let (dash_node, dash_color) = &mut *dash_fill;
-    dash_node.width = Val::Percent(ready * 100.0);
-    dash_color.0 = if ready >= 1.0 {
-        Color::srgb(0.75, 0.92, 1.0)
-    } else {
-        Color::srgb(0.4, 0.45, 0.55)
-    };
+    dash_bar.frac = ready;
+    dash_bar.color = if ready >= 1.0 { DASH_COLOR } else { hud::SPENT };
 }
 
-fn update_alarm_text(
+fn update_alarm_hud(
     status: Option<Single<&MissionStatus>>,
     local: Option<Single<&Player, With<LocalPlayer>>>,
-    text: Single<(&mut Text, &mut TextColor), With<AlarmText>>,
+    mut deck: Single<&mut Text, (With<DeckText>, Without<AlarmText>, Without<WaveText>)>,
+    mut pips: Query<(&AlarmPip, &mut Meter)>,
+    alarm_text: Single<(&mut Text, &mut TextColor), (With<AlarmText>, Without<WaveText>)>,
+    mut wave: Single<&mut Text, With<WaveText>>,
 ) {
     let Some(status) = status else { return };
-    let (mut text, mut color) = text.into_inner();
-    let deck = format!("DECK {}/{DECKS}", status.deck + 1);
+    for (pip, mut meter) in &mut pips {
+        meter.frac = status.alarm - pip.0 as f32;
+    }
+
     let left_behind = local.is_some_and(|p| p.status == PirateStatus::LeftBehind);
+    deck.set_if_neq(Text(format!("DECK {}/{DECKS}", status.deck + 1)));
     let (content, tint) = if left_behind && status.phase == GameState::Playing {
-        (
-            format!("LEFT BEHIND  -  watching the crew on deck {}", status.deck + 1),
-            Color::srgb(1.0, 0.7, 0.3),
-        )
+        ("LEFT BEHIND", Color::srgb(1.0, 0.7, 0.3))
     } else if status.alarm <= 0.0 {
-        (format!("{deck}    UNDETECTED"), Color::srgba(0.7, 0.9, 1.0, 0.7))
+        ("UNDETECTED", Color::srgba(0.7, 0.9, 1.0, 0.8))
+    } else if status.alarm < 2.0 {
+        ("ALERT", alarm_color(status.alarm))
     } else {
-        let filled = (status.alarm.floor() as usize).min(MAX_ALARM as usize);
-        let meter: String = (0..MAX_ALARM as usize).map(|i| if i < filled { '#' } else { '-' }).collect();
-        let waves = if status.reinforcements {
-            format!("next wave {:.0}s", status.next_wave)
-        } else {
-            "reinforcements off".into()
-        };
-        (format!("{deck}    ALARM [{meter}]   {waves}"), alarm_color(status.alarm))
+        ("LOCKDOWN", alarm_color(status.alarm))
     };
+    let (mut text, mut color) = alarm_text.into_inner();
     if text.0 != content {
-        text.0 = content;
+        text.0 = content.into();
     }
     color.0 = tint;
+
+    let waves = if left_behind {
+        "watching the crew".into()
+    } else if status.alarm <= 0.0 {
+        String::new()
+    } else if status.reinforcements {
+        format!("next wave {:.0}s", status.next_wave)
+    } else {
+        "no reinforcements".into()
+    };
+    if wave.0 != waves {
+        wave.0 = waves;
+    }
 }
 
-fn update_banner(status: Option<Single<&MissionStatus>>, text: Single<(&mut Text, &mut TextColor), With<BannerText>>) {
+fn update_banner(
+    status: Option<Single<&MissionStatus>>,
+    panel: Single<(&mut Node, &mut BackgroundColor), With<BannerPanel>>,
+    text: Single<(&mut Text, &mut TextColor), With<BannerText>>,
+) {
     let Some(status) = status else { return };
+    let (mut node, mut background) = panel.into_inner();
+    let display = if status.banner.is_empty() || status.banner_alpha <= 0.0 {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    if node.display != display {
+        node.display = display;
+    }
+    background.0 = hud::PANEL.with_alpha(0.7 * status.banner_alpha);
     let (mut text, mut color) = text.into_inner();
     if text.0 != status.banner {
         text.0.clone_from(&status.banner);
@@ -673,38 +682,45 @@ fn update_banner(status: Option<Single<&MissionStatus>>, text: Single<(&mut Text
 
 fn update_extraction_hud(
     status: Option<Single<&MissionStatus>>,
-    mut panel: Single<&mut Node, (With<ExtractionPanel>, Without<ExtractionFill>)>,
-    mut fill: Single<&mut Node, With<ExtractionFill>>,
-    mut text: Single<&mut Text, With<ExtractionText>>,
+    mut panel: Single<&mut Node, With<ExtractionPanel>>,
+    mut bar: Single<&mut Meter, With<ExtractionBar>>,
+    text: Single<(&mut Text, &mut TextColor), With<ExtractionText>>,
 ) {
     let Some(status) = status else { return };
+    let paused = Color::srgb(1.0, 0.55, 0.4);
     // Extraction matters more, so it wins if both are running.
     let content = if status.extraction > 0.0 {
         let frac = (status.extraction / EXTRACT_TIME).clamp(0.0, 1.0);
         let pct = frac * 100.0;
         Some((frac, if status.on_pad {
-            format!("EXTRACTING  {pct:.0}%  -  be on the pad when it hits 100")
+            (format!("EXTRACTING  {pct:.0}%  -  be on the pad when it hits 100"), hud::GOLD)
         } else {
-            format!("EXTRACTION PAUSED  {pct:.0}%  -  get back on the pad")
+            (format!("EXTRACTION PAUSED  {pct:.0}%  -  get back on the pad"), paused)
         }))
     } else if status.lift > 0.0 {
         let frac = (status.lift / LIFT_TIME).clamp(0.0, 1.0);
         let pct = frac * 100.0;
         let next = status.deck + 2;
         Some((frac, if status.on_lift {
-            format!("LIFT TO DECK {next}  {pct:.0}%  -  anyone not aboard stays behind")
+            (format!("LIFT TO DECK {next}  {pct:.0}%  -  anyone not aboard stays behind"), hud::GOLD)
         } else {
-            format!("LIFT PAUSED  {pct:.0}%  -  get back aboard")
+            (format!("LIFT PAUSED  {pct:.0}%  -  get back aboard"), paused)
         }))
     } else {
         None
     };
-    panel.display = if content.is_some() { Display::Flex } else { Display::None };
-    let Some((frac, content)) = content else { return };
-    fill.width = Val::Percent(frac * 100.0);
+    let display = if content.is_some() { Display::Flex } else { Display::None };
+    if panel.display != display {
+        panel.display = display;
+    }
+    let Some((frac, (content, color))) = content else { return };
+    bar.frac = frac;
+    bar.color = color;
+    let (mut text, mut text_color) = text.into_inner();
     if text.0 != content {
         text.0 = content;
     }
+    text_color.0 = color;
 }
 
 fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health), With<LocalPlayer>>>) {
@@ -733,21 +749,42 @@ fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
             height: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            row_gap: Val::Px(18.0),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.02, 0.75)),
-        children![
-            (Text::new(title), TextFont::from_font_size(64.0), TextColor(title_color)),
-            (Text::new(detail), TextFont::from_font_size(24.0), TextColor(Color::WHITE)),
-            (
-                Text::new("ENTER  run it again        ESC  main menu"),
-                TextFont::from_font_size(18.0),
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.02, 0.7)),
+        children![(
+            hud::panel_accent(
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(18.0),
+                    padding: UiRect::axes(Val::Px(48.0), Val::Px(32.0)),
+                    ..default()
+                },
+                title_color,
             ),
-        ],
+            children![
+                hud::text(title, 56.0, title_color),
+                (
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(1.0),
+                        ..default()
+                    },
+                    BackgroundColor(hud::EDGE),
+                ),
+                hud::text(detail, 22.0, hud::TEXT),
+                (
+                    Node {
+                        column_gap: Val::Px(24.0),
+                        margin: UiRect::top(Val::Px(8.0)),
+                        ..default()
+                    },
+                    children![hud::key_hint("ENTER", "run it again"), hud::key_hint("ESC", "main menu")],
+                ),
+            ],
+        )],
     ));
 }
