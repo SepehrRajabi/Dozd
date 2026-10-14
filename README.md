@@ -30,7 +30,7 @@ can hand to friends.
 Pick a class and your guns under **LOADOUT** in the main menu before a raid.
 Every pirate carries 3 guns, in the order you pick them.
 
-The Doctor's and Bulwark's passives show as chips under your bars and on each
+The Doctor's, Bulwark's and Hacker's passives show as chips under your bars and on each
 crewmate's card, alongside a Doctor's ward.
 
 Online, a crew holds at most one of each class, so up to 5 pirates. Hosting
@@ -43,7 +43,7 @@ mid-run picks from the classes still free.
 | Gunner | Carries a 4th gun |
 | Engineer | Q drops a sentry gun that shoots guards for 15 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
 | Bulwark | Crewmates within reach deal 25% more damage. Q raises or lowers a riot shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
-| Hacker | Q turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
+| Hacker | Guards within reach are jammed: 35% of their shots go wide and their blows whiff. Q turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
 | Doctor | Slowly heals crewmates within reach; Q wards them and the Doctor against all harm for 4 s (28 s cooldown) |
 
 ## Controls

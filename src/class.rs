@@ -3,8 +3,9 @@
 //! others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns a guard against the
 //! station and the Doctor wards the crew nearby against all harm. The Doctor
-//! also slowly patches up any crewmate close by, and the Bulwark's presence
-//! makes the crew around them hit harder.
+//! also slowly patches up any crewmate close by, the Bulwark's presence makes
+//! the crew around them hit harder, and the Hacker jams the guards around them
+//! so their attacks sometimes miss.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,7 +83,11 @@ const HACK_COOLDOWN: f32 = 30.0;
 const HACK_RANGE: f32 = 140.0;
 /// How close to the crosshair the guard must be.
 const HACK_AIM_RADIUS: f32 = 36.0;
-const HACK_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
+pub const HACK_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
+/// How close guards must be to the Hacker to be jammed.
+pub const JAM_RADIUS: f32 = 72.0;
+/// Odds a jammed guard's attack misses: shots go wide, blows whiff.
+pub const JAM_MISS: f32 = 0.35;
 
 /// How close a crewmate must be for the Doctor to patch them up.
 pub const HEAL_RADIUS: f32 = 56.0;
@@ -173,7 +178,7 @@ impl PirateClass {
             Self::Gunner => "Carries a 4th gun",
             Self::Engineer => "Q: drop a sentry gun",
             Self::Bulwark => "Rallies crew nearby\nQ: riot shield",
-            Self::Hacker => "Q: turn a guard",
+            Self::Hacker => "Jams guards nearby\nQ: turn a guard",
             Self::Doctor => "Heals crew nearby\nQ: ward the crew",
         }
     }
@@ -358,6 +363,8 @@ pub struct Boons {
     pub rallied: bool,
     /// For a Doctor or Bulwark: how many crewmates their passive reaches.
     pub aura: u8,
+    /// For a Hacker: how many guards they're jamming.
+    pub jamming: u8,
     /// Heard a hacked Herald's war cry: hits `WAR_CRY_POWER` harder for the
     /// rest of the run.
     pub empowered: bool,
@@ -386,6 +393,9 @@ pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(Strin
     }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
+    }
+    if boons.jamming > 0 {
+        effects.push((format!("JAMMING {}", boons.jamming), HACK_COLOR));
     }
     if boons.aura > 0 {
         effects.push((format!("AURA {}", boons.aura), class.color()));
@@ -461,9 +471,10 @@ struct SentryBar {
     fill: bool,
 }
 
-/// The Doctor's reach, drawn faintly on the floor around them.
+/// How far a Doctor's healing or a Hacker's jamming reaches, drawn faintly on
+/// the floor around them.
 #[derive(Component)]
-struct HealAura;
+struct ClassAura;
 
 /// The bubble around a warded pirate.
 #[derive(Component)]
@@ -893,8 +904,8 @@ fn draw_riot_shields(
     }
 }
 
-/// Gives every pirate a ward bubble, hidden until warded, and each Doctor the
-/// ring that shows how far their healing reaches.
+/// Gives every pirate a ward bubble, hidden until warded, and each Doctor and
+/// Hacker the ring that shows how far their passive reaches.
 fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<AssetServer>, players: Query<&Player>) {
     let Ok(player) = players.get(add.entity) else { return };
     let ring = assets.load("sprites/fx/shock_ring.png");
@@ -905,21 +916,24 @@ fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<A
             Sprite { image: ring.clone(), color: MEDIC_COLOR, ..default() },
             Transform::from_xyz(0.0, 0.0, 0.5).with_scale(Vec3::splat(22.0 / RING_SIZE)),
         ));
-        if player.class == PirateClass::Doctor {
-            parent.spawn((
-                HealAura,
-                Sprite { image: ring, color: MEDIC_COLOR.with_alpha(0.12), ..default() },
-                Transform::from_xyz(0.0, -5.0, -0.2).with_scale(Vec3::splat(2.0 * HEAL_RADIUS / RING_SIZE)),
-            ));
-        }
+        let reach = match player.class {
+            PirateClass::Doctor => HEAL_RADIUS,
+            PirateClass::Hacker => JAM_RADIUS,
+            _ => return,
+        };
+        parent.spawn((
+            ClassAura,
+            Sprite { image: ring, color: player.class.color().with_alpha(0.12), ..default() },
+            Transform::from_xyz(0.0, -5.0, -0.2).with_scale(Vec3::splat(2.0 * reach / RING_SIZE)),
+        ));
     });
 }
 
 fn draw_medic_auras(
     time: Res<Time>,
     players: Query<(&Player, &Health)>,
-    mut bubbles: Query<(&ChildOf, &mut Visibility, &mut Sprite, &mut Transform), (With<WardBubble>, Without<HealAura>)>,
-    mut auras: Query<(&ChildOf, &mut Visibility, &mut Sprite), With<HealAura>>,
+    mut bubbles: Query<(&ChildOf, &mut Visibility, &mut Sprite, &mut Transform), (With<WardBubble>, Without<ClassAura>)>,
+    mut auras: Query<(&ChildOf, &mut Visibility, &mut Sprite), With<ClassAura>>,
 ) {
     let t = time.elapsed_secs();
     for (parent, mut visibility, mut sprite, mut transform) in &mut bubbles {
@@ -941,7 +955,7 @@ fn draw_medic_auras(
         let Ok((player, health)) = players.get(parent.parent()) else { continue };
         let on = can_act(player, health);
         visibility.set_if_neq(if on { Visibility::Inherited } else { Visibility::Hidden });
-        sprite.color = MEDIC_COLOR.with_alpha(0.2 + 0.05 * (t * 2.0).sin());
+        sprite.color = player.class.color().with_alpha(0.2 + 0.05 * (t * 2.0).sin());
     }
 }
 

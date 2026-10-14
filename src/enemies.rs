@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Boons, Sentry};
+use crate::class::{Boons, HACK_COLOR, JAM_MISS, JAM_RADIUS, PirateClass, Sentry};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::drops::{EnemyDrop, spawn_drops};
 use crate::mission::Alarm;
@@ -213,6 +213,8 @@ pub struct EnemyLook {
     pub empowered: bool,
     /// A Herald in a frenzy.
     pub frenzied: bool,
+    /// A Hacker nearby is jamming it.
+    pub jammed: bool,
 }
 
 /// Host-only AI state.
@@ -238,6 +240,8 @@ pub struct Enemy {
     empowered: bool,
     /// A Herald's rally, once it has rallied.
     phase: Option<HeraldPhase>,
+    /// A Hacker nearby is jamming it: its attacks may miss.
+    jammed: bool,
 }
 
 impl Enemy {
@@ -269,6 +273,7 @@ impl Enemy {
             hacked: self.hacked > 0.0,
             empowered: self.empowered,
             frenzied: self.phase == Some(HeraldPhase::Frenzy),
+            jammed: self.jammed,
         }
     }
 
@@ -313,6 +318,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             hacked: 0.0,
             empowered: false,
             phase: None,
+            jammed: false,
         };
     commands.spawn((
         Level,
@@ -433,6 +439,38 @@ fn think(
     }
     let heard = std::mem::take(&mut noise.0);
 
+    // Hackers jam the station's guards around them, and count them.
+    let jammers: Vec<(Entity, Vec2)> = victims
+        .iter()
+        .filter(|(_, _, health, player, ..)| {
+            !health.is_dead() && player.is_some_and(|p| p.class == PirateClass::Hacker && p.status == PirateStatus::Active)
+        })
+        .map(|(e, t, ..)| (e, t.translation.truncate()))
+        .collect();
+    let mut jamming = vec![0u8; jammers.len()];
+    for (_, mut enemy, transform, health, _) in &mut enemies {
+        let pos = transform.translation.truncate();
+        let mut jammed = false;
+        if enemy.hacked <= 0.0 && !health.is_dead() {
+            for (i, (_, at)) in jammers.iter().enumerate() {
+                if at.distance(pos) <= JAM_RADIUS {
+                    jamming[i] = jamming[i].saturating_add(1);
+                    jammed = true;
+                }
+            }
+        }
+        if enemy.jammed != jammed {
+            enemy.jammed = jammed;
+        }
+    }
+    for ((hacker, _), count) in jammers.iter().zip(jamming) {
+        if let Ok((.., Some(mut boons))) = victims.get_mut(*hacker)
+            && boons.jamming != count
+        {
+            boons.jamming = count;
+        }
+    }
+
     // Waking up: sight, gunfire, getting shot, or a station-wide lockdown.
     let mut woken = Vec::new();
     for (_, mut enemy, transform, health, _) in &mut enemies {
@@ -477,6 +515,7 @@ fn think(
         enemy.timer -= dt;
         enemy.attack_cooldown -= dt;
         let power = enemy.power();
+        let jammed = enemy.jammed;
 
         let hacked = enemy.hacked > 0.0;
         let foes = if hacked { &station } else { &crew };
@@ -533,7 +572,8 @@ fn think(
                 };
 
                 if enemy.burst_left > 0 && enemy.timer <= 0.0 {
-                    let angle = dir.to_angle() + rng.signed() * 0.08;
+                    let aim = dir.to_angle() + rng.signed() * 0.08;
+                    let angle = jam_aim(&mut rng, jammed, aim);
                     let color = Color::srgb(1.0, 0.3, 0.25);
                     enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 150.0, 8.0 * power, ProjectileLook::EnemyBolt, color);
                     enemy.burst_left -= 1;
@@ -571,7 +611,10 @@ fn think(
             }
             (EnemyKind::Stalker, AiState::Lunge) => {
                 enemy.velocity = enemy.lunge_dir * 240.0;
-                if !enemy.lunge_hit && dist < 11.0 {
+                if !enemy.lunge_hit && dist < 11.0 && whiffs(&mut rng, jammed) {
+                    enemy.lunge_hit = true;
+                    fx(&mut commands, FxKind::Spark, pos, enemy.lunge_dir.to_angle(), HACK_COLOR);
+                } else if !enemy.lunge_hit && dist < 11.0 {
                     enemy.lunge_hit = match victims.get_mut(target_entity) {
                         Ok((_, _, mut health, ..)) => health.hurt(STALKER_DAMAGE * power),
                         Err(_) => {
@@ -605,7 +648,7 @@ fn think(
                 if enemy.timer <= 0.0 {
                     let color = Color::srgb(1.0, 0.55, 0.2);
                     for i in 0..5 {
-                        let angle = dir.to_angle() + (i as f32 / 4.0 - 0.5) * 0.7;
+                        let angle = jam_aim(&mut rng, jammed, dir.to_angle() + (i as f32 / 4.0 - 0.5) * 0.7);
                         enemy_shot(&mut commands, side, pos + dir * 8.0, angle, 115.0, 12.0 * power, ProjectileLook::EnemyOrb, color);
                     }
                     enemy.state = AiState::Hunt;
@@ -627,7 +670,8 @@ fn think(
                 if enemy.timer <= 0.0 {
                     // Lands on whoever is still in reach when the fist comes down.
                     let fist = pos + enemy.lunge_dir * 8.0;
-                    if dist < BRUTE_SWING {
+                    let whiffed = dist < BRUTE_SWING && whiffs(&mut rng, jammed);
+                    if dist < BRUTE_SWING && !whiffed {
                         match victims.get_mut(target_entity) {
                             Ok((_, _, mut health, ..)) => {
                                 health.hurt(BRUTE_DAMAGE * power);
@@ -635,7 +679,8 @@ fn think(
                             Err(_) => bites.push((target_entity, BRUTE_DAMAGE * power)),
                         }
                     }
-                    fx(&mut commands, FxKind::Spark, fist, enemy.lunge_dir.to_angle(), stats.death_color);
+                    let color = if whiffed { HACK_COLOR } else { stats.death_color };
+                    fx(&mut commands, FxKind::Spark, fist, enemy.lunge_dir.to_angle(), color);
                     enemy.state = AiState::Recover;
                     enemy.timer = 0.7;
                 }
@@ -664,7 +709,8 @@ fn think(
                     enemy.state = AiState::Telegraph;
                     enemy.timer = HERALD_RALLY_TIME;
                 } else if los && dist < 170.0 && enemy.attack_cooldown <= 0.0 {
-                    let angle = dir.to_angle() + rng.signed() * 0.06;
+                    let aim = dir.to_angle() + rng.signed() * 0.06;
+                    let angle = jam_aim(&mut rng, jammed, aim);
                     let damage = HERALD_DAMAGE * power;
                     enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 170.0, damage, ProjectileLook::EnemyBolt, stats.death_color);
                     enemy.attack_cooldown = if frenzied { 0.6 } else { 1.1 } + rng.unit() * 0.3;
@@ -733,6 +779,21 @@ fn think(
     }
 }
 
+/// Whether a guard's blow misses, if a Hacker is jamming it.
+fn whiffs(rng: &mut Rng, jammed: bool) -> bool {
+    jammed && rng.unit() < JAM_MISS
+}
+
+/// Where a guard's shot goes: if a Hacker is jamming it, now and then well
+/// wide of `angle`.
+fn jam_aim(rng: &mut Rng, jammed: bool, angle: f32) -> f32 {
+    if whiffs(rng, jammed) {
+        angle + rng.signed().signum() * (0.4 + 0.4 * rng.unit())
+    } else {
+        angle
+    }
+}
+
 fn move_enemies(
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -784,6 +845,9 @@ fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut 
             if blink { Color::srgb(0.55, 0.85, 1.0) } else { Color::srgb(0.85, 0.95, 1.0) }
         } else if look.state == AiState::Telegraph && blink {
             Color::srgb(1.0, 0.85, 0.3)
+        } else if look.jammed && ((time.elapsed_secs() * 23.0).sin() * (time.elapsed_secs() * 7.0).sin()) > 0.45 {
+            // Glitches now and then: its targeting is being jammed.
+            Color::srgb(0.55, 0.8, 0.6)
         } else if look.empowered {
             // Smoulders orange: it hits much harder now.
             let heat = 0.5 + 0.5 * (time.elapsed_secs() * 4.0).sin();
