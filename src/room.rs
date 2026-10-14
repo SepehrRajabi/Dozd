@@ -355,36 +355,84 @@ fn build_grid(layout: Layout) -> RoomGrid {
 /// Spawns the tile sprites for the deck just built. They carry `Level`, so the
 /// next deck's `sync_deck` clears them.
 fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>, grid: Res<RoomGrid>) {
-    let floor = assets.load("sprites/tiles/floor.png");
-    let grate = assets.load("sprites/tiles/grate.png");
-    let wall = assets.load("sprites/tiles/wall.png");
-    let hazard = assets.load("sprites/tiles/hazard.png");
-    let door = assets.load("sprites/tiles/door.png");
-    let vent = assets.load("sprites/tiles/vent.png");
-    let lift = assets.load("sprites/tiles/lift.png");
+    let tile = |name: &str| assets.load(format!("sprites/tiles/{name}.png"));
+    let floors: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("floor_{i}"))).collect();
+    let faces: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("wall_face_{i}"))).collect();
+    let caps: Vec<Handle<Image>> = (0..16).map(|i| tile(&format!("wall_cap_{i}"))).collect();
+    let lift: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("lift_{i}"))).collect();
+    let (grate, hazard, door, vent) = (tile("grate"), tile("hazard"), tile("door"), tile("vent"));
+    let shades = [tile("shade_n"), tile("shade_w"), tile("shade_e")];
 
+    // Off the edge of the deck counts as solid.
+    let open = |col: isize, row: isize| {
+        col >= 0 && row >= 0 && (col as usize) < grid.cols() && (row as usize) < grid.rows() && grid.is_open(col as usize, row as usize)
+    };
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
-            let sprite = match grid.tiles[row][col] {
+            let (c, r) = (col as isize, row as isize);
+            let ch = grid.tiles[row][col];
+            let image = match ch {
                 // Solid rock with no floor next to it is just dark hull.
-                '#' if !grid.touches_floor(col, row) => Sprite::from_color(HULL, Vec2::splat(TILE)),
-                '#' => Sprite::from_image(wall.clone()),
-                'D' => Sprite::from_image(door.clone()),
-                ',' => Sprite::from_image(grate.clone()),
-                '=' => Sprite::from_image(hazard.clone()),
-                'v' => Sprite::from_image(vent.clone()),
-                'L' => Sprite::from_image(lift.clone()),
-                'u' => Sprite {
-                    image: lift.clone(),
-                    color: Color::srgb(0.45, 0.45, 0.5),
-                    ..default()
-                },
-                _ => Sprite::from_image(floor.clone()),
+                '#' if !grid.touches_floor(col, row) => None,
+                // Floor below: the wall's front face shows.
+                '#' if open(c, r + 1) => Some(faces[variant(col, row, &[45, 30, 17, 8])].clone()),
+                '#' => {
+                    let mask = open(c, r - 1) as usize
+                        | (open(c + 1, r) as usize) << 1
+                        | (open(c, r + 1) as usize) << 2
+                        | (open(c - 1, r) as usize) << 3;
+                    Some(caps[mask].clone())
+                }
+                'D' => Some(door.clone()),
+                ',' => Some(grate.clone()),
+                '=' => Some(hazard.clone()),
+                'v' => Some(vent.clone()),
+                // A lift is one 2x2 platform; each tile shows its quarter.
+                'L' | 'u' => {
+                    let same = |c: isize, r: isize| open(c, r) && grid.tiles[r as usize][c as usize] == ch;
+                    Some(lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize].clone())
+                }
+                _ => Some(floors[variant(col, row, &[58, 16, 18, 8])].clone()),
             };
             let pos = grid.tile_center(col, row);
+            let sprite = match image {
+                // The shaft the crew rode in on is dimmed: it doesn't go anywhere.
+                Some(image) if ch == 'u' => Sprite { image, color: Color::srgb(0.45, 0.45, 0.5), ..default() },
+                Some(image) => Sprite::from_image(image),
+                None => Sprite::from_color(HULL, Vec2::splat(TILE)),
+            };
             commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
+
+            // Walls shade the floor beside them.
+            if grid.is_open(col, row) {
+                for (shade, (dc, dr)) in shades.iter().zip([(0, -1), (-1, 0), (1, 0)]) {
+                    if !open(c + dc, r + dr) {
+                        commands.spawn((Level, Sprite::from_image(shade.clone()), Transform::from_translation(pos.extend(0.05))));
+                    }
+                }
+            }
         }
     }
+}
+
+/// Picks one of a tile's looks by weight, from its position alone, so every
+/// machine draws a deck the same way.
+fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
+    // Murmur3's finaliser, so neighbours don't fall into patterns.
+    let mut h = (col as u32) | (row as u32) << 16;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 16;
+    let mut roll = h % weights.iter().sum::<u32>();
+    for (i, &weight) in weights.iter().enumerate() {
+        if roll < weight {
+            return i;
+        }
+        roll -= weight;
+    }
+    0
 }
 
 /// Places loot and guards. Host only; everyone else receives them by replication.
