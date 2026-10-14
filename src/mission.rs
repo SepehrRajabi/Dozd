@@ -37,6 +37,7 @@ impl Plugin for MissionPlugin {
                 OnEnter(GameState::Playing),
                 (spawn_status, reset_mission).run_if(authority),
             )
+            .add_systems(OnEnter(GameState::Lobby), spawn_status.run_if(authority))
             .add_systems(
                 Update,
                 (announce_alarm, run_waves, ride_lift, extraction, check_crew_wiped)
@@ -723,7 +724,13 @@ fn update_extraction_hud(
     text_color.0 = color;
 }
 
-fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health), With<LocalPlayer>>>) {
+fn spawn_results(
+    mut commands: Commands,
+    mode: Res<NetMode>,
+    player: Option<Single<(&Player, &Health), With<LocalPlayer>>>,
+) {
+    // Online, the crew regroups in the lobby, where classes can change hands.
+    let again = if *mode == NetMode::Solo { "run it again" } else { "back to the lobby" };
     let (title, title_color, detail) = match player.as_deref() {
         Some((p, _)) if p.status == PirateStatus::Extracted => (
             "EXTRACTED",
@@ -782,7 +789,7 @@ fn spawn_results(mut commands: Commands, player: Option<Single<(&Player, &Health
                         margin: UiRect::top(Val::Px(8.0)),
                         ..default()
                     },
-                    children![hud::key_hint("ENTER", "run it again"), hud::key_hint("ESC", "main menu")],
+                    children![hud::key_hint("ENTER", again), hud::key_hint("ESC", "main menu")],
                 ),
             ],
         )],

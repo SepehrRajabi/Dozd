@@ -30,6 +30,11 @@ can hand to friends.
 Pick a class and your guns under **LOADOUT** in the main menu before a raid.
 Every pirate carries 3 guns, in the order you pick them.
 
+Online, a crew holds at most one of each class, so up to 5 pirates. Hosting
+opens a lobby where everyone picks a free class and their guns, then the host
+starts the run; after each run the crew returns to the lobby. Someone joining
+mid-run picks from the classes still free.
+
 | Class | Ability |
 | --- | --- |
 | Gunner | Carries a 4th gun |

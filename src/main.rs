@@ -29,6 +29,8 @@ pub const PIXEL_SCALE: f32 = 3.0;
 pub enum GameState {
     #[default]
     Menu,
+    /// A networked crew picking classes and guns until the host starts the run.
+    Lobby,
     Playing,
     /// The run ended; the world stays frozen behind the results screen.
     Over,
@@ -181,7 +183,7 @@ impl Plugin for ViewPlugins {
 }
 
 fn toggle_hud(state: Res<State<GameState>>, mut hud: Query<&mut Visibility, With<Hud>>) {
-    let visibility = if *state.get() == GameState::Menu {
+    let visibility = if matches!(state.get(), GameState::Menu | GameState::Lobby) {
         Visibility::Hidden
     } else {
         Visibility::Inherited

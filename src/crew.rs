@@ -1,16 +1,21 @@
 //! The crew panel: every other pirate's class, hull, shield, haul and state, and
 //! over the network how well they're connected. The host measures each
 //! client's link and shares it on their pirate, so every machine sees the same.
+//!
+//! Also the roster: a crew has at most one of each class. The host shares who
+//! holds which, and a joiner whose class is taken picks another from it.
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
+use crate::GameState;
+use crate::class::{LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::MissionStatus;
-use crate::net::{LocalId, NetMode, authority};
+use crate::net::{ChooseLoadout, LocalId, NetMode, authority};
 use crate::player::{PirateStatus, Player, slot_color};
 
 /// Seconds between link measurements; sooner just churns replication.
@@ -30,7 +35,8 @@ pub struct CrewPlugin;
 
 impl Plugin for CrewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, measure_links.run_if(authority));
+        app.init_resource::<JoinOrder>()
+            .add_systems(Update, (measure_links, update_roster).run_if(authority));
     }
 }
 
@@ -38,7 +44,9 @@ pub struct CrewViewPlugin;
 
 impl Plugin for CrewViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_crew_panel);
+        app.init_resource::<PickedClass>()
+            .add_systems(Startup, spawn_class_picker)
+            .add_systems(Update, (update_crew_panel, update_class_picker));
     }
 }
 
@@ -57,6 +65,63 @@ impl Link {
             (_, 10..) | (250.., _) => (BAD, "POOR"),
             (_, 3..) | (120.., _) => (FAIR, "FAIR"),
             _ => (GOOD, "GOOD"),
+        }
+    }
+}
+
+/// The crew by `Player::owner`, host first and then in join order, with the
+/// class the host accepted for each (`None` while they're still choosing).
+/// Lives on the mission status entity. A pirate's place here is their slot.
+#[derive(Component, Serialize, Deserialize, Clone, PartialEq, Eq, Default, Debug)]
+pub struct Roster(pub Vec<(u64, Option<PirateClass>)>);
+
+impl Roster {
+    /// Who holds `class`, if anyone.
+    pub fn holder(&self, class: PirateClass) -> Option<u64> {
+        self.0.iter().find(|(_, c)| *c == Some(class)).map(|(owner, _)| *owner)
+    }
+
+    /// `owner`'s place in the crew, from 0.
+    pub fn slot(&self, owner: u64) -> Option<usize> {
+        self.0.iter().position(|(o, _)| *o == owner)
+    }
+
+    pub fn class_of(&self, owner: u64) -> Option<PirateClass> {
+        self.0.iter().find(|(o, _)| *o == owner).and_then(|(_, c)| *c)
+    }
+}
+
+/// Host-side: connected clients' ids, in the order they joined.
+#[derive(Resource, Default)]
+pub struct JoinOrder(pub Vec<u64>);
+
+/// Host-side: keeps the roster in step with the loadouts the host accepted.
+fn update_roster(
+    mut commands: Commands,
+    mode: Res<NetMode>,
+    local: Res<LocalId>,
+    loadout: Res<LocalLoadout>,
+    loadouts: Res<Loadouts>,
+    order: Res<JoinOrder>,
+    clients: Query<&NetworkId, With<AuthorizedClient>>,
+    mut status: Query<(Entity, Option<&mut Roster>), With<MissionStatus>>,
+) {
+    if !matches!(*mode, NetMode::Host { .. }) {
+        return;
+    }
+    let Ok((entity, roster)) = status.single_mut() else { return };
+    let joiners = order
+        .0
+        .iter()
+        .filter(|id| clients.iter().any(|c| c.get() == **id))
+        .map(|&id| (id, loadouts.0.get(&id).map(|l| l.class)));
+    let current = Roster([(local.0, Some(loadout.0.class))].into_iter().chain(joiners).collect());
+    match roster {
+        Some(mut roster) => {
+            roster.set_if_neq(current);
+        }
+        None => {
+            commands.entity(entity).insert(current);
         }
     }
 }
@@ -266,4 +331,169 @@ fn set_text(texts: &mut Query<(&mut Text, &mut TextColor)>, entity: Entity, cont
         text.0 = content.into();
     }
     text_color.set_if_neq(TextColor(color));
+}
+
+/// The class this machine last asked the host for from the picker.
+#[derive(Resource, Default)]
+struct PickedClass(Option<PirateClass>);
+
+#[derive(Component)]
+struct ClassPicker;
+
+#[derive(Component)]
+struct PickerHint;
+
+/// A class on the picker; free ones are buttons.
+#[derive(Component)]
+struct ClassCard(PirateClass);
+
+#[derive(Component)]
+struct CardImage;
+
+/// Who holds a card's class, or that it's free.
+#[derive(Component)]
+struct CardNote;
+
+fn spawn_class_picker(mut commands: Commands, assets: Res<AssetServer>) {
+    commands
+        .spawn((
+            ClassPicker,
+            ZIndex(10),
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|root| {
+            root.spawn(hud::panel_accent(
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(10.0),
+                    padding: UiRect::all(Val::Px(24.0)),
+                    ..default()
+                },
+                hud::GOLD,
+            ))
+            .with_children(|panel| {
+                panel.spawn(hud::text("CLASS TAKEN", 28.0, hud::GOLD));
+                panel.spawn((PickerHint, hud::text("", 15.0, hud::DIM)));
+                panel
+                    .spawn(Node { column_gap: Val::Px(12.0), margin: UiRect::top(Val::Px(8.0)), ..default() })
+                    .with_children(|row| {
+                        for class in PirateClass::ALL {
+                            row.spawn((
+                                Button,
+                                ClassCard(class),
+                                Node {
+                                    width: Val::Px(150.0),
+                                    height: Val::Px(150.0),
+                                    flex_direction: FlexDirection::Column,
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    row_gap: Val::Px(4.0),
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(hud::PANEL),
+                                BorderColor::all(hud::EDGE),
+                            ))
+                            .with_children(|card| {
+                                card.spawn((
+                                    CardImage,
+                                    ImageNode::new(assets.load(class.sprite())),
+                                    Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
+                                ));
+                                card.spawn(hud::text(class.name(), 18.0, class.color()));
+                                card.spawn((CardNote, hud::text("", 12.0, hud::DIM)));
+                            });
+                        }
+                    });
+            });
+        });
+}
+
+/// Shows the picker to a joiner whose class someone else holds, marks each
+/// taken class with who took it, and asks the host for the one they click.
+fn update_class_picker(
+    mode: Res<NetMode>,
+    state: Res<State<GameState>>,
+    local: Res<LocalId>,
+    loadout: Res<LocalLoadout>,
+    mut picked: ResMut<PickedClass>,
+    roster: Option<Single<&Roster>>,
+    players: Query<&Player>,
+    mut picker: Single<&mut Node, With<ClassPicker>>,
+    mut hint: Single<&mut Text, (With<PickerHint>, Without<CardNote>)>,
+    mut cards: Query<(&ClassCard, &Interaction, &Children, &mut BackgroundColor, &mut BorderColor)>,
+    mut images: Query<&mut ImageNode, With<CardImage>>,
+    mut notes: Query<(&mut Text, &mut TextColor), With<CardNote>>,
+    mut messages: MessageWriter<ChooseLoadout>,
+) {
+    // The lobby has its own class cards; this is for joining mid-run.
+    let joining = matches!(*mode, NetMode::Join { .. })
+        && matches!(state.get(), GameState::Playing | GameState::Over);
+    if !joining {
+        picked.0 = None;
+    }
+    let wanted = picked.0.unwrap_or(loadout.0.class);
+    let roster = roster.filter(|_| joining);
+    let show = roster.as_ref().is_some_and(|roster| {
+        !players.iter().any(|p| p.owner == local.0)
+            && roster.holder(wanted).is_some_and(|owner| owner != local.0)
+            && roster.class_of(local.0).is_none()
+    });
+    let display = if show { Display::Flex } else { Display::None };
+    if picker.display != display {
+        picker.display = display;
+    }
+    let Some(roster) = roster.filter(|_| show) else { return };
+
+    let hint_text = format!("Someone already plays the {}. Pick another pirate.", wanted.name());
+    if hint.0 != hint_text {
+        hint.0 = hint_text;
+    }
+    for (card, interaction, children, mut background, mut border) in &mut cards {
+        let class = card.0;
+        let holder = roster.holder(class).filter(|owner| *owner != local.0);
+        let (note, note_color) = match holder {
+            None => ("FREE".to_string(), class.color()),
+            Some(owner) => match roster.slot(owner) {
+                Some(slot) => (format!("TAKEN  P{}", slot + 1), hud::DIM),
+                None => ("TAKEN".to_string(), hud::DIM),
+            },
+        };
+        for child in children.iter() {
+            if let Ok((mut text, mut color)) = notes.get_mut(child) {
+                if text.0 != note {
+                    text.0.clone_from(&note);
+                }
+                color.0 = note_color;
+            }
+            if let Ok(mut image) = images.get_mut(child) {
+                image.color = Color::WHITE.with_alpha(if holder.is_some() { 0.3 } else { 1.0 });
+            }
+        }
+
+        let free = holder.is_none();
+        let (bg, edge) = match (free, interaction) {
+            (false, _) => (hud::PANEL, hud::EDGE),
+            (true, Interaction::None) => (hud::PANEL, class.color().with_alpha(0.4)),
+            (true, _) => (Color::srgb(0.14, 0.15, 0.25), class.color()),
+        };
+        background.0 = bg;
+        *border = BorderColor::all(edge);
+
+        if free && *interaction == Interaction::Pressed && picked.0 != Some(class) {
+            picked.0 = Some(class);
+            let choice = Loadout { class, guns: loadout.0.guns.clone() }.sanitized();
+            messages.write(ChooseLoadout(choice));
+        }
+    }
 }

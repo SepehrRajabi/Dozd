@@ -403,7 +403,7 @@ fn next_run(
     mut exit: MessageWriter<AppExit>,
 ) {
     match state.get() {
-        GameState::Menu => return,
+        GameState::Menu | GameState::Lobby => return,
         GameState::Playing => {
             batch.ticks += 1;
             if batch.ticks as f32 / config.hz >= config.time_limit {

@@ -41,7 +41,7 @@ impl Plugin for RoomPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_deck.run_if(not(in_state(GameState::Menu))),
+                    sync_deck.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
                     update_flow_field
                         .run_if(in_state(GameState::Playing))
                         .run_if(authority),

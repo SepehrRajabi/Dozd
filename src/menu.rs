@@ -7,7 +7,11 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::class::{LocalLoadout, Loadout, PirateClass};
 use crate::guns::GunKind;
-use crate::net::{DEFAULT_PORT, EndSession, NetMode, Notice, Connection, StartSession, local_ip, parse_port, resolve};
+use crate::crew::Roster;
+use crate::net::{
+    ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, local_ip, parse_port,
+    resolve,
+};
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
 use crate::player::Player;
@@ -39,6 +43,8 @@ impl Plugin for MenuPlugin {
             .add_systems(Startup, spawn_session_hud)
             .add_systems(OnEnter(GameState::Menu), (spawn_backdrop, reset_camera, show_cursor))
             .add_systems(OnExit(GameState::Menu), hide_cursor)
+            .add_systems(OnEnter(GameState::Lobby), (lobby_screen, show_cursor))
+            .add_systems(OnExit(GameState::Lobby), hide_cursor)
             .add_systems(OnEnter(MenuScreen::Main), main_screen)
             .add_systems(OnEnter(MenuScreen::Host), host_screen)
             .add_systems(OnEnter(MenuScreen::Join), join_screen)
@@ -48,20 +54,31 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (
-                    button_styles,
-                    button_actions,
                     edit_fields,
                     draw_fields,
                     update_host_hint,
-                    update_status,
                     animate_backdrop,
                     back_on_escape,
-                    (choice_actions, style_choices, update_slot_count).chain(),
                     dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
                     hide_backdrop.run_if(state_changed::<MenuScreen>),
                     update_setting_values.run_if(resource_changed::<Settings>),
                 )
                     .run_if(in_state(GameState::Menu)),
+            )
+            .add_systems(
+                Update,
+                (
+                    button_styles,
+                    button_actions,
+                    update_status,
+                    (choice_actions, style_choices, update_slot_count).chain(),
+                )
+                    .run_if(in_state(GameState::Menu).or_else(in_state(GameState::Lobby))),
+            )
+            .add_systems(
+                Update,
+                (update_lobby, send_lobby_loadout.run_if(resource_changed::<LocalLoadout>))
+                    .run_if(in_state(GameState::Lobby)),
             )
             .add_systems(
                 Update,
@@ -95,6 +112,10 @@ enum MenuCommand {
     StartHost,
     Connect,
     Back,
+    /// The host sets off from the lobby.
+    StartRun,
+    /// Back to the main menu from the lobby.
+    Leave,
 }
 
 /// What the player typed last time, so rejoining after a disconnect is one click.
@@ -150,6 +171,10 @@ enum Choice {
     Class(PirateClass),
     Gun(GunKind),
 }
+
+/// Under a class card in the lobby: who has the class, if anyone.
+#[derive(Component)]
+struct ClassNote(PirateClass);
 
 /// Shows which slot a gun card's gun sits in.
 #[derive(Component)]
@@ -337,7 +362,7 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
     commands.spawn((
         DespawnOnExit(MenuScreen::Main),
         label(
-            format!("v{}   -   LAN co-op for up to 8 pirates", env!("CARGO_PKG_VERSION")),
+            format!("v{}   -   LAN co-op for up to {} pirates", env!("CARGO_PKG_VERSION"), PirateClass::ALL.len()),
             13.0,
             DIM,
         ),
@@ -419,6 +444,30 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
 }
 
 fn loadout_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    commands
+        .spawn((
+            DespawnOnExit(MenuScreen::Loadout),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::top(Val::Px(40.0)),
+                row_gap: Val::Px(14.0),
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn(label("LOADOUT", 28.0, GOLD));
+            parent.spawn(label("Pick your pirate", 15.0, DIM));
+            loadout_cards(parent, &assets);
+            parent.spawn(button("DONE", MenuCommand::Back));
+            parent.spawn(status_line());
+        });
+}
+
+/// The class and gun cards: on the loadout screen, and in the lobby.
+fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
     let card = |width: f32, height: f32, direction: FlexDirection| Node {
         width: Val::Px(width),
         height: Val::Px(height),
@@ -439,92 +488,74 @@ fn loadout_screen(mut commands: Commands, assets: Res<AssetServer>) {
         ..default()
     };
 
-    commands
-        .spawn((
-            DespawnOnExit(MenuScreen::Loadout),
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                padding: UiRect::top(Val::Px(40.0)),
-                row_gap: Val::Px(14.0),
-                ..default()
-            },
-        ))
-        .with_children(|parent| {
-            parent.spawn(label("LOADOUT", 28.0, GOLD));
-            parent.spawn(label("Pick your pirate", 15.0, DIM));
-            // Wider than the gun rows, so every class fits on one line.
-            parent.spawn(Node { max_width: Val::Px(1100.0), ..row(16.0) }).with_children(|classes| {
-                for class in PirateClass::ALL {
-                    classes
-                        .spawn((
-                            Button,
-                            Choice::Class(class),
-                            card(196.0, 130.0, FlexDirection::Column),
-                            BackgroundColor(BUTTON),
-                            BorderColor::all(GOLD_FAINT),
-                        ))
-                        .with_children(|card| {
-                            card.spawn((
-                                ImageNode::new(assets.load(class.sprite())),
-                                Node {
-                                    width: Val::Px(64.0),
-                                    height: Val::Px(64.0),
-                                    ..default()
-                                },
-                            ));
-                            card.spawn(label(class.name(), 20.0, class.color()));
-                            card.spawn(label(class.perk(), 14.0, TEXT));
-                        });
-                }
-            });
-
-            parent.spawn((SlotCount, label("", 15.0, DIM)));
-            parent.spawn(row(10.0)).with_children(|guns| {
-                for gun in GunKind::ALL {
-                    let stats = gun.stats();
-                    guns.spawn((
-                        Button,
-                        Choice::Gun(gun),
-                        card(280.0, 60.0, FlexDirection::Row),
-                        BackgroundColor(BUTTON),
-                        BorderColor::all(GOLD_FAINT),
-                    ))
-                    .with_children(|card| {
-                        card.spawn((
-                            ImageNode::new(assets.load(stats.sprite)),
-                            Node {
-                                width: Val::Px(64.0),
-                                height: Val::Px(32.0),
-                                ..default()
-                            },
-                        ));
-                        card.spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            width: Val::Px(165.0),
+    // Wider than the gun rows, so every class fits on one line.
+    parent.spawn(Node { max_width: Val::Px(1100.0), ..row(16.0) }).with_children(|classes| {
+        for class in PirateClass::ALL {
+            classes
+                .spawn((
+                    Button,
+                    Choice::Class(class),
+                    card(196.0, 150.0, FlexDirection::Column),
+                    BackgroundColor(BUTTON),
+                    BorderColor::all(GOLD_FAINT),
+                ))
+                .with_children(|card| {
+                    card.spawn((
+                        ImageNode::new(assets.load(class.sprite())),
+                        Node {
+                            width: Val::Px(64.0),
+                            height: Val::Px(64.0),
                             ..default()
-                        })
-                        .with_children(|info| {
-                            info.spawn(label(stats.name, 16.0, TEXT));
-                            info.spawn(label(stats.role, 12.0, DIM));
-                        });
-                        card.spawn((
-                            SlotBadge(gun),
-                            label("", 20.0, GOLD),
-                            Node {
-                                width: Val::Px(14.0),
-                                ..default()
-                            },
-                        ));
-                    });
-                }
-            });
+                        },
+                    ));
+                    card.spawn(label(class.name(), 20.0, class.color()));
+                    card.spawn(label(class.perk(), 14.0, TEXT));
+                    card.spawn((ClassNote(class), label("", 12.0, DIM)));
+                });
+        }
+    });
 
-            parent.spawn(button("DONE", MenuCommand::Back));
-            parent.spawn(status_line());
-        });
+    parent.spawn((SlotCount, label("", 15.0, DIM)));
+    parent.spawn(row(10.0)).with_children(|guns| {
+        for gun in GunKind::ALL {
+            let stats = gun.stats();
+            guns.spawn((
+                Button,
+                Choice::Gun(gun),
+                card(280.0, 60.0, FlexDirection::Row),
+                BackgroundColor(BUTTON),
+                BorderColor::all(GOLD_FAINT),
+            ))
+            .with_children(|card| {
+                card.spawn((
+                    ImageNode::new(assets.load(stats.sprite)),
+                    Node {
+                        width: Val::Px(64.0),
+                        height: Val::Px(32.0),
+                        ..default()
+                    },
+                ));
+                card.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    width: Val::Px(165.0),
+                    ..default()
+                })
+                .with_children(|info| {
+                    info.spawn(label(stats.name, 16.0, TEXT));
+                    info.spawn(label(stats.role, 12.0, DIM));
+                });
+                card.spawn((
+                    SlotBadge(gun),
+                    label("", 20.0, GOLD),
+                    Node {
+                        width: Val::Px(14.0),
+                        ..default()
+                    },
+                ));
+            });
+        }
+    });
+
 }
 
 fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
@@ -648,6 +679,8 @@ fn run_menu_command(
     mut screen: ResMut<NextState<MenuScreen>>,
     mut settings: ResMut<Settings>,
     mut exit: MessageWriter<AppExit>,
+    roster: Option<Single<&Roster>>,
+    mut next_state: ResMut<NextState<GameState>>,
 ) {
     let joining = matches!(*mode, NetMode::Join { .. });
     let field = fields.iter().next().map(|f| f.value.clone()).unwrap_or_default();
@@ -694,6 +727,14 @@ fn run_menu_command(
                 Err(message) => notice.0 = Some(message),
             }
         }
+        MenuCommand::StartRun => match roster.as_deref().and_then(|r| waiting_on(r)) {
+            Some(slot) => notice.0 = Some(format!("Waiting for P{} to pick a class", slot + 1)),
+            None => {
+                notice.0 = None;
+                next_state.set(GameState::Playing);
+            }
+        },
+        MenuCommand::Leave => commands.trigger(EndSession(None)),
         MenuCommand::Back => {
             if joining {
                 // Cancels the pending connection; stays on this screen.
@@ -708,15 +749,28 @@ fn run_menu_command(
 
 fn choice_actions(
     choices: Query<(&Interaction, &Choice), Changed<Interaction>>,
+    state: Res<State<GameState>>,
+    local: Res<LocalId>,
+    roster: Option<Single<&Roster>>,
     mut loadout: ResMut<LocalLoadout>,
     mut notice: ResMut<Notice>,
 ) {
+    // In the lobby, one of each class per crew.
+    let taken_by = |class: PirateClass| {
+        let roster = roster.as_deref().filter(|_| *state.get() == GameState::Lobby)?;
+        let owner = roster.holder(class).filter(|owner| *owner != local.0)?;
+        Some(roster.slot(owner).unwrap_or(0))
+    };
     for (interaction, choice) in &choices {
         if *interaction != Interaction::Pressed {
             continue;
         }
         let loadout = &mut loadout.0;
         notice.0 = match *choice {
+            Choice::Class(class) if let Some(slot) = taken_by(class) => {
+                notice.0 = Some(format!("P{} already plays the {}", slot + 1, class.name()));
+                continue;
+            }
             Choice::Class(class) => {
                 loadout.set_class(class);
                 None
@@ -733,18 +787,43 @@ fn choice_actions(
 }
 
 /// Highlights the chosen class and equipped guns, and numbers the guns by slot.
+/// In the lobby, marks each class someone else took with who took it.
 fn style_choices(
     loadout: Res<LocalLoadout>,
+    state: Res<State<GameState>>,
+    local: Res<LocalId>,
+    roster: Option<Single<&Roster>>,
     mut cards: Query<(&Interaction, &Choice, &mut BackgroundColor, &mut BorderColor)>,
-    mut badges: Query<(&SlotBadge, &mut Text)>,
+    mut badges: Query<(&SlotBadge, &mut Text), Without<ClassNote>>,
+    mut notes: Query<(&ClassNote, &mut Text, &mut TextColor)>,
 ) {
+    let roster = roster.as_deref().filter(|_| *state.get() == GameState::Lobby);
+    let taken_by = |class: PirateClass| {
+        let owner = roster?.holder(class).filter(|owner| *owner != local.0)?;
+        Some(roster?.slot(owner).unwrap_or(0))
+    };
+    for (note, mut text, mut color) in &mut notes {
+        let (content, tint) = match (roster, taken_by(note.0)) {
+            (None, _) => (String::new(), DIM),
+            (_, Some(slot)) => (format!("TAKEN BY P{}", slot + 1), ERROR),
+            (Some(roster), None) if roster.class_of(local.0) == Some(note.0) => ("YOURS".into(), GOLD),
+            (Some(_), None) => (String::new(), DIM),
+        };
+        if text.0 != content {
+            text.0 = content;
+        }
+        color.0 = tint;
+    }
+
     let loadout = &loadout.0;
     for (interaction, choice, mut background, mut border) in &mut cards {
         let chosen = match *choice {
-            Choice::Class(class) => loadout.class == class,
+            Choice::Class(class) => loadout.class == class && taken_by(class).is_none(),
             Choice::Gun(gun) => loadout.guns.contains(&gun),
         };
+        let taken = matches!(*choice, Choice::Class(class) if taken_by(class).is_some());
         let (bg, edge) = match (interaction, chosen) {
+            _ if taken => (Color::srgb(0.04, 0.04, 0.07), Color::NONE),
             (Interaction::Pressed, _) => (BUTTON_PRESSED, GOLD),
             (_, true) => (Color::srgb(0.2, 0.16, 0.07), GOLD),
             (Interaction::Hovered, false) => (BUTTON_HOVER, GOLD_FAINT),
@@ -857,13 +936,15 @@ fn update_host_hint(fields: Query<&TextField>, mut hint: Query<&mut Text, With<H
 
 fn update_status(
     mode: Res<NetMode>,
+    state: Res<State<GameState>>,
     notice: Res<Notice>,
     connection: Res<Connection>,
     mut status: Query<(&mut Text, &mut TextColor), With<StatusText>>,
 ) {
     let Ok((mut text, mut color)) = status.single_mut() else { return };
+    let connecting = matches!(*mode, NetMode::Join { .. }) && *state.get() == GameState::Menu;
     let (content, tint) = match (&*mode, &notice.0) {
-        (NetMode::Join { addr }, _) => (
+        (NetMode::Join { addr }, _) if connecting => (
             format!("Connecting to {addr}...  {:.0}s", connection.waited),
             GOLD,
         ),
@@ -1069,10 +1150,147 @@ fn leave_on_escape(
         return;
     }
     // Mid-run, ESC needs confirming so it can't end a raid by accident.
-    if *state.get() == GameState::Over || prompt.timer > 0.0 {
+    if matches!(state.get(), GameState::Over | GameState::Lobby) || prompt.timer > 0.0 {
         prompt.timer = 0.0;
         commands.trigger(EndSession(None));
     } else {
         prompt.timer = LEAVE_WINDOW;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lobby: the crew picks classes and guns, then the host sets off
+// ---------------------------------------------------------------------------
+
+/// Under the title: where friends can join, or which host this is.
+#[derive(Component)]
+struct LobbyInfo;
+
+/// A crewmate's tag in the lobby, by place in the roster.
+#[derive(Component)]
+struct CrewChip(usize);
+
+/// What the crew is waiting on before the run can start.
+#[derive(Component)]
+struct LobbyHint;
+
+/// The first pirate in the roster still choosing a class, if any.
+fn waiting_on(roster: &Roster) -> Option<usize> {
+    roster.0.iter().position(|(_, class)| class.is_none())
+}
+
+fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetMode>) {
+    let hosting = matches!(*mode, NetMode::Host { .. });
+    commands
+        .spawn((
+            DespawnOnExit(GameState::Lobby),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::top(Val::Px(24.0)),
+                row_gap: Val::Px(12.0),
+                ..default()
+            },
+            // Hides the last run's frozen deck.
+            BackgroundColor(Color::srgb(0.02, 0.02, 0.045)),
+        ))
+        .with_children(|parent| {
+            parent.spawn(label("CREW LOBBY", 28.0, GOLD));
+            parent.spawn((LobbyInfo, label("", 15.0, DIM)));
+            parent
+                .spawn(Node { column_gap: Val::Px(10.0), ..default() })
+                .with_children(|chips| {
+                    for i in 0..PirateClass::ALL.len() {
+                        chips.spawn((
+                            CrewChip(i),
+                            hud::panel(Node {
+                                padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                                display: Display::None,
+                                ..default()
+                            }),
+                            children![label("", 14.0, TEXT)],
+                        ));
+                    }
+                });
+            loadout_cards(parent, &assets);
+            parent
+                .spawn(Node { column_gap: Val::Px(16.0), align_items: AlignItems::Center, ..default() })
+                .with_children(|buttons| {
+                    if hosting {
+                        buttons.spawn(button("START", MenuCommand::StartRun));
+                    }
+                    buttons.spawn(button("LEAVE", MenuCommand::Leave));
+                });
+            parent.spawn((LobbyHint, label("", 15.0, DIM)));
+            parent.spawn(status_line());
+        });
+}
+
+fn update_lobby(
+    mode: Res<NetMode>,
+    local: Res<LocalId>,
+    roster: Option<Single<&Roster>>,
+    mut info: Single<&mut Text, (With<LobbyInfo>, Without<LobbyHint>)>,
+    mut hint: Single<&mut Text, (With<LobbyHint>, Without<LobbyInfo>)>,
+    mut chips: Query<(&CrewChip, &mut Node, &mut BorderColor, &Children)>,
+    mut chip_texts: Query<(&mut Text, &mut TextColor), (Without<LobbyInfo>, Without<LobbyHint>)>,
+    mut ip: Local<Option<String>>,
+) {
+    let content = match &*mode {
+        NetMode::Host { port } => {
+            let ip = ip.get_or_insert_with(|| local_ip().map_or("?".into(), |ip| ip.to_string()));
+            format!("Friends join at  {ip}:{port}")
+        }
+        NetMode::Join { addr } => format!("Aboard {addr}'s crew"),
+        NetMode::Solo => String::new(),
+    };
+    if info.0 != content {
+        info.0 = content;
+    }
+
+    let Some(roster) = roster else { return };
+    for (chip, mut node, mut border, children) in &mut chips {
+        let entry = roster.0.get(chip.0);
+        let display = if entry.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let Some(&(owner, class)) = entry else { continue };
+        let you = if owner == local.0 { "  (you)" } else { "" };
+        let (content, color) = match class {
+            Some(class) => (format!("P{}  {}{you}", chip.0 + 1, class.name()), class.color()),
+            None => (format!("P{}  choosing...{you}", chip.0 + 1), DIM),
+        };
+        *border = BorderColor { top: color, ..BorderColor::all(hud::EDGE) };
+        if let Some(Ok((mut text, mut tint))) = children.first().map(|c| chip_texts.get_mut(*c)) {
+            if text.0 != content {
+                text.0 = content;
+            }
+            tint.0 = color;
+        }
+    }
+
+    let mine = roster.class_of(local.0);
+    let content = match (waiting_on(&roster), &*mode) {
+        _ if mine.is_none() => "Your class is taken: pick a free one".to_string(),
+        (Some(slot), _) => format!("Waiting for P{} to pick a class", slot + 1),
+        (None, NetMode::Host { .. }) => "Everyone's ready. Start when you are".to_string(),
+        (None, _) => "Waiting for the host to start".to_string(),
+    };
+    if hint.0 != content {
+        hint.0 = content;
+    }
+}
+
+/// Tells the host about every change a joiner makes in the lobby.
+fn send_lobby_loadout(
+    mode: Res<NetMode>,
+    loadout: Res<LocalLoadout>,
+    mut messages: MessageWriter<ChooseLoadout>,
+) {
+    if matches!(*mode, NetMode::Join { .. }) {
+        messages.write(ChooseLoadout(loadout.0.clone()));
     }
 }

@@ -6,9 +6,10 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::class::{Ability, LocalLoadout, Loadout, Loadouts, PirateClass};
+use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::Arsenal;
-use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, PlayerInput, authority};
+use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, NetMode, PlayerInput, authority};
 use crate::mission::MissionStatus;
 use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
@@ -62,7 +63,7 @@ impl Plugin for PlayerViewPlugin {
         app.init_resource::<LocalAim>().add_observer(dress_player).add_systems(
             Update,
             (
-                gather_input.run_if(not(in_state(GameState::Menu))),
+                gather_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
                 (animate_players, dash_trails, hide_other_decks, follow_camera)
                     .chain()
                     .after(move_players),
@@ -240,11 +241,15 @@ pub fn spawn_crew(
     crew: Res<CrewSize>,
     local: Res<LocalLoadout>,
     loadouts: Res<Loadouts>,
+    order: Res<JoinOrder>,
     clients: Query<&NetworkId, With<AuthorizedClient>>,
 ) {
     let local_owners = (0..crew.0 as u64).map(|i| HOST_ID + i);
-    // A client whose loadout hasn't arrived yet joins as soon as it does.
-    let client_owners = clients.iter().map(NetworkId::get).filter(|id| loadouts.0.contains_key(id));
+    // In join order, so slots match the lobby's. A client whose loadout hasn't
+    // arrived yet joins as soon as it does.
+    let mut client_owners: Vec<u64> =
+        clients.iter().map(NetworkId::get).filter(|id| loadouts.0.contains_key(id)).collect();
+    client_owners.sort_by_key(|id| order.0.iter().position(|o| o == id));
     for (slot, owner) in local_owners.chain(client_owners).enumerate() {
         let pos = crew_spot(grid.crew_spawn, slot);
         spawn_player(&mut commands, owner, loadouts.get(owner, &local), slot as u8, pos, heist.deck);
@@ -280,9 +285,12 @@ fn on_client_joined(
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
     state: Res<State<GameState>>,
+    mut order: ResMut<JoinOrder>,
 ) {
     let Ok(id) = ids.get(add.entity) else { return };
     info!("client {} joined", id.get());
+    order.0.retain(|o| *o != id.get());
+    order.0.push(id.get());
     if let Some(loadout) = loadouts.0.get(&id.get()) {
         spawn_joiner(&mut commands, id.get(), loadout, &players, grid.as_deref(), &heist, &state);
     }
@@ -297,6 +305,7 @@ fn receive_loadouts(
     mut commands: Commands,
     mut messages: MessageReader<FromClient<ChooseLoadout>>,
     clients: Query<(&NetworkId, Has<AuthorizedClient>)>,
+    local: Res<LocalLoadout>,
     mut loadouts: ResMut<Loadouts>,
     players: Query<&Player>,
     grid: Option<Res<RoomGrid>>,
@@ -305,12 +314,24 @@ fn receive_loadouts(
 ) {
     for FromClient { client_id, message } in messages.read() {
         let Some((id, authorized)) = client_id.entity().and_then(|e| clients.get(e).ok()) else { continue };
-        let loadout = message.0.clone().sanitized();
-        if authorized {
-            spawn_joiner(&mut commands, id.get(), &loadout, &players, grid.as_deref(), &heist, &state);
+        let id = id.get();
+        // Once aboard, a pirate keeps their class and guns until the lobby.
+        if *state.get() != GameState::Lobby && players.iter().any(|p| p.owner == id) {
+            continue;
         }
-        // Chosen once in the menu; later messages don't swap guns mid-run.
-        loadouts.0.entry(id.get()).or_insert(loadout);
+        // One of each class per crew. A joiner whose class is taken waits,
+        // and picks another from what the roster shows is free.
+        let loadout = message.0.clone().sanitized();
+        let taken = local.0.class == loadout.class
+            || loadouts.0.iter().any(|(&owner, l)| owner != id && l.class == loadout.class);
+        if taken {
+            info!("client {id} asked for {}, which is taken", loadout.class.name());
+            continue;
+        }
+        if authorized {
+            spawn_joiner(&mut commands, id, &loadout, &players, grid.as_deref(), &heist, &state);
+        }
+        loadouts.0.insert(id, loadout);
     }
 }
 
@@ -319,11 +340,13 @@ fn on_client_left(
     mut commands: Commands,
     ids: Query<&NetworkId>,
     mut loadouts: ResMut<Loadouts>,
+    mut order: ResMut<JoinOrder>,
     players: Query<(Entity, &Player)>,
 ) {
     let Ok(id) = ids.get(remove.entity) else { return };
     info!("client {} left", id.get());
     loadouts.0.remove(&id.get());
+    order.0.retain(|o| *o != id.get());
     for (entity, player) in &players {
         if player.owner == id.get() {
             commands.entity(entity).despawn();
@@ -420,6 +443,7 @@ fn receive_input(
     ids: Query<&NetworkId>,
     mut players: Query<(&Player, &mut Controls)>,
     state: Res<State<GameState>>,
+    mode: Res<NetMode>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for FromClient { client_id, message } in inputs.read() {
@@ -431,7 +455,7 @@ fn receive_input(
             },
         };
         if message.restart && *state.get() == GameState::Over {
-            next_state.set(GameState::Playing);
+            next_state.set(if *mode == NetMode::Solo { GameState::Playing } else { GameState::Lobby });
         }
         if let Some((_, mut controls)) = players.iter_mut().find(|(p, _)| p.owner == owner) {
             controls.apply(message);

@@ -10,9 +10,9 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Ability, Loadout, RiotShield, Sentry};
+use crate::class::{Ability, Loadout, PirateClass, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
-use crate::crew::Link;
+use crate::crew::{Link, Roster};
 use crate::drops::EnemyDrop;
 use crate::enemies::EnemyLook;
 use crate::guns::Arsenal;
@@ -24,7 +24,8 @@ use crate::{GameState, Level};
 
 pub const DEFAULT_PORT: u16 = 5000;
 const PROTOCOL_ID: u64 = 0xD02D;
-const MAX_CLIENTS: usize = 7;
+/// One pirate per class: the host plus a joiner for each class left.
+const MAX_CLIENTS: usize = PirateClass::ALL.len() - 1;
 /// Give up on reaching a host after this long.
 const CONNECT_TIMEOUT: f32 = 10.0;
 /// Player id of the host (or solo player); joining clients get random non-zero ids.
@@ -183,6 +184,7 @@ impl Plugin for NetPlugin {
             .replicate::<Sentry>()
             .replicate::<RiotShield>()
             .replicate::<Link>()
+            .replicate::<Roster>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)
@@ -257,9 +259,12 @@ fn start_session(
             notice.0 = None;
             *connection = Connection::default();
             commands.insert_resource(LocalId(id));
-            // Joiners wait in the menu until the host's world arrives.
-            if mode.is_authority() {
-                next_state.set(GameState::Playing);
+            // A host gathers the crew in the lobby first. Joiners wait in the
+            // menu until the host's world arrives, then follow it.
+            match &mode {
+                NetMode::Solo => next_state.set(GameState::Playing),
+                NetMode::Host { .. } => next_state.set(GameState::Lobby),
+                NetMode::Join { .. } => {}
             }
             commands.insert_resource(mode);
         }
