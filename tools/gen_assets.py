@@ -273,6 +273,14 @@ HACKER_PALETTE = {
     "t": rgb(48, 34, 68),
 }
 
+# The Doctor: a white coat and a red bandana.
+DOCTOR_PALETTE = {
+    **PLAYER[1],
+    "G": rgb(235, 70, 85),
+    "T": rgb(218, 226, 232),
+    "t": rgb(140, 152, 170),
+}
+
 # The Engineer's sentry: a tripod base, and a gun head that turns to aim.
 SENTRY_METAL = {
     "O": rgb(220, 130, 45),
@@ -1006,6 +1014,8 @@ def main():
     write_png(os.path.join(ROOT, "player_bulwark.png"), bulwark)
     hacker = from_ascii("player_hacker", PLAYER[0], HACKER_PALETTE)
     write_png(os.path.join(ROOT, "player_hacker.png"), hacker)
+    doctor = from_ascii("player_doctor", PLAYER[0], DOCTOR_PALETTE)
+    write_png(os.path.join(ROOT, "player_doctor.png"), doctor)
     sentry = from_ascii("sentry", SENTRY, SENTRY_METAL)
     write_png(os.path.join(ROOT, "sentry.png"), sentry)
     sentry_gun = from_ascii("sentry_gun", SENTRY_GUN, SENTRY_METAL, width=12, height=6)
@@ -1069,7 +1079,7 @@ def main():
     write_png(os.path.join(preview, "loot.png"), contact_sheet(list(loot.values())))
     write_png(
         os.path.join(preview, "player_tiles.png"),
-        contact_sheet([player, engineer, bulwark, hacker, sentry] + list(tiles.values())),
+        contact_sheet([player, engineer, bulwark, hacker, doctor, sentry] + list(tiles.values())),
     )
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))

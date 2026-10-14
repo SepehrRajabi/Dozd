@@ -23,7 +23,7 @@ use crate::player::{Controls, CrewSize, PirateStatus, Player};
 use crate::room::{DECKS, NextSeed};
 use crate::{GamePlugins, GameState, Rng};
 
-const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|mixed] \
+const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|doctor|mixed] \
                       [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_behind,dead,still_in,deck,decks,credits,kills,alarm,seconds";

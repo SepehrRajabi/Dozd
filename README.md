@@ -36,6 +36,7 @@ Every pirate carries 3 guns, in the order you pick them.
 | Engineer | Q drops a sentry gun that shoots guards for 15 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
 | Bulwark | Q raises or lowers a riot shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
 | Hacker | Q turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
+| Doctor | Slowly heals crewmates within reach; Q wards them and the Doctor against all harm for 4 s (28 s cooldown) |
 
 ## Controls
 
@@ -62,7 +63,7 @@ cargo run --release -- headless --seed 1 --runs 20
 ```
 
 Options: `--seed N`, `--runs N`, `--crew 1-8`,
-`--class gunner|engineer|bulwark|hacker|mixed` (bots' class; mixed rotates), `--bot random|idle`,
+`--class gunner|engineer|bulwark|hacker|doctor|mixed` (bots' class; mixed rotates), `--bot random|idle`,
 `--time SECS` (per-run limit), `--hz N` (steps per game second).
 
 ## Development

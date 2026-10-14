@@ -455,13 +455,14 @@ fn loadout_screen(mut commands: Commands, assets: Res<AssetServer>) {
         .with_children(|parent| {
             parent.spawn(label("LOADOUT", 28.0, GOLD));
             parent.spawn(label("Pick your pirate", 15.0, DIM));
-            parent.spawn(row(16.0)).with_children(|classes| {
+            // Wider than the gun rows, so every class fits on one line.
+            parent.spawn(Node { max_width: Val::Px(1100.0), ..row(16.0) }).with_children(|classes| {
                 for class in PirateClass::ALL {
                     classes
                         .spawn((
                             Button,
                             Choice::Class(class),
-                            card(200.0, 130.0, FlexDirection::Column),
+                            card(196.0, 130.0, FlexDirection::Column),
                             BackgroundColor(BUTTON),
                             BorderColor::all(GOLD_FAINT),
                         ))

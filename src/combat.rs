@@ -56,6 +56,9 @@ pub struct Health {
     pub shield_hit: bool,
     /// Seconds left before this can be hurt again.
     pub invulnerable: f32,
+    /// Seconds left on a Doctor's ward: unhurtable, like `invulnerable`, but
+    /// drawn as a bubble rather than the post-hit blink.
+    pub warded: f32,
     /// Grace period granted after each hit.
     grace: f32,
 }
@@ -75,6 +78,7 @@ impl Health {
             flash: 0.0,
             shield_hit: false,
             invulnerable: 0.0,
+            warded: 0.0,
             grace,
         }
     }
@@ -89,9 +93,16 @@ impl Health {
         self.current <= 0.0
     }
 
-    /// Returns false if the hit was ignored (dead or invulnerable).
+    /// Restores hull, up to the max. The dead stay dead.
+    pub fn heal(&mut self, amount: f32) {
+        if !self.is_dead() {
+            self.current = (self.current + amount).min(self.max);
+        }
+    }
+
+    /// Returns false if the hit was ignored (dead, invulnerable or warded).
     pub fn hurt(&mut self, damage: f32) -> bool {
-        if self.invulnerable > 0.0 || self.is_dead() {
+        if self.invulnerable > 0.0 || self.warded > 0.0 || self.is_dead() {
             return false;
         }
         let absorbed = damage.min(self.shield);
@@ -371,6 +382,7 @@ fn tick_health(time: Res<Time>, mut health: Query<&mut Health>) {
     for mut h in &mut health {
         h.flash = (h.flash - dt).max(0.0);
         h.invulnerable = (h.invulnerable - dt).max(0.0);
+        h.warded = (h.warded - dt).max(0.0);
         h.since_hit += dt;
         if h.since_hit >= SHIELD_DELAY && !h.is_dead() && h.shield < h.max_shield {
             h.shield = (h.shield + SHIELD_REGEN * dt).min(h.max_shield);

@@ -14,7 +14,7 @@ are not generated from a single source of truth.
 
 | column | type | meaning | possible values |
 | --- | --- | --- | --- |
-| `class` | string | `--class` this run used | `GUNNER`, `ENGINEER`, `BULWARK`, `HACKER`, or `mixed` (bots rotate through all four by crew index when `--class` isn't given) |
+| `class` | string | `--class` this run used | `GUNNER`, `ENGINEER`, `BULWARK`, `HACKER`, `DOCTOR`, or `mixed` (bots rotate through all five by crew index when `--class` isn't given) |
 | `run` | u32 | 1-based run number within this process's batch | `1..=runs` |
 | `seed` | u32 | this run's world seed (`--seed + (run - 1)`); rerun a single result with `--seed <this> --runs 1` | any u32 |
 | `ending` | string | why the run stopped | `OVER` (the mission resolved — crew wiped or all pirates left the deck one way or another), `TIMEOUT` (hit `--time` first) |

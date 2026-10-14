@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 BIN="target/release/dozd"
-CLASSES=(gunner engineer bulwark hacker)
+CLASSES=(gunner engineer bulwark hacker doctor)
 OUT=""
 
 while [[ $# -gt 0 ]]; do

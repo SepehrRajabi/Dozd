@@ -1,8 +1,9 @@
 //! Pirate classes and loadouts. Each pirate picks a class and their guns in the
 //! menu; the host spawns them with it. The Gunner carries an extra gun; the
 //! others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
-//! carries a bulletproof riot shield and the Hacker turns a guard against the
-//! station.
+//! carries a bulletproof riot shield, the Hacker turns a guard against the
+//! station and the Doctor wards the crew nearby against all harm. The Doctor
+//! also slowly patches up any crewmate close by.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +23,7 @@ use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
 use crate::player::{Aim, Controls, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
-use crate::{GameState, Level, Rng};
+use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
 /// Guns every pirate can carry; the Gunner gets one more.
 pub const BASE_SLOTS: usize = 3;
@@ -77,6 +78,19 @@ const HACK_RANGE: f32 = 140.0;
 const HACK_AIM_RADIUS: f32 = 36.0;
 const HACK_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
 
+/// How close a crewmate must be for the Doctor to patch them up.
+pub const HEAL_RADIUS: f32 = 56.0;
+/// Hull per second the Doctor restores to each crewmate in reach.
+pub const HEAL_RATE: f32 = 4.0;
+/// Seconds the ward keeps the crew from harm.
+pub const WARD_LIFE: f32 = 4.0;
+const WARD_COOLDOWN: f32 = 28.0;
+/// How close crewmates must be to share the Doctor's ward.
+const WARD_RADIUS: f32 = 80.0;
+const MEDIC_COLOR: Color = Color::srgb(1.0, 0.45, 0.55);
+/// The shock ring sprite's width, to scale it to a radius.
+const RING_SIZE: f32 = 113.0;
+
 pub struct ClassPlugin;
 
 impl Plugin for ClassPlugin {
@@ -85,7 +99,7 @@ impl Plugin for ClassPlugin {
             .init_resource::<Loadouts>()
             .add_systems(
                 Update,
-                (use_abilities, run_sentries, carry_riot_shields)
+                (use_abilities, run_sentries, carry_riot_shields, heal_crew)
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -100,8 +114,9 @@ impl Plugin for ClassViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(dress_sentry)
             .add_observer(dress_riot_shield)
+            .add_observer(dress_medic_auras)
             .add_systems(Startup, spawn_ability_hud)
-            .add_systems(Update, (draw_sentries, draw_riot_shields, update_ability_hud));
+            .add_systems(Update, (draw_sentries, draw_riot_shields, draw_medic_auras, heal_motes, update_ability_hud));
     }
 }
 
@@ -116,6 +131,8 @@ pub enum PirateClass {
     Bulwark,
     /// Turns a guard against the station.
     Hacker,
+    /// Heals crewmates nearby and wards them against harm.
+    Doctor,
 }
 
 /// A class ability's timings and look.
@@ -129,7 +146,7 @@ pub struct AbilityStats {
 }
 
 impl PirateClass {
-    pub const ALL: [PirateClass; 4] = [Self::Gunner, Self::Engineer, Self::Bulwark, Self::Hacker];
+    pub const ALL: [PirateClass; 5] = [Self::Gunner, Self::Engineer, Self::Bulwark, Self::Hacker, Self::Doctor];
 
     pub fn parse(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.name().eq_ignore_ascii_case(raw))
@@ -141,6 +158,7 @@ impl PirateClass {
             Self::Engineer => "ENGINEER",
             Self::Bulwark => "BULWARK",
             Self::Hacker => "HACKER",
+            Self::Doctor => "DOCTOR",
         }
     }
 
@@ -150,13 +168,14 @@ impl PirateClass {
             Self::Engineer => "Q: drop a sentry gun",
             Self::Bulwark => "Q: riot shield",
             Self::Hacker => "Q: turn a guard",
+            Self::Doctor => "Heals crew nearby\nQ: ward the crew",
         }
     }
 
     pub fn slots(self) -> usize {
         match self {
             Self::Gunner => BASE_SLOTS + 1,
-            Self::Engineer | Self::Bulwark | Self::Hacker => BASE_SLOTS,
+            Self::Engineer | Self::Bulwark | Self::Hacker | Self::Doctor => BASE_SLOTS,
         }
     }
 
@@ -183,6 +202,12 @@ impl PirateClass {
                 life: HACK_LIFE,
                 color: HACK_COLOR,
             },
+            Self::Doctor => AbilityStats {
+                label: "WARD",
+                cooldown: WARD_COOLDOWN,
+                life: WARD_LIFE,
+                color: MEDIC_COLOR,
+            },
         })
     }
 
@@ -192,6 +217,7 @@ impl PirateClass {
             Self::Engineer => "sprites/player_engineer.png",
             Self::Bulwark => "sprites/player_bulwark.png",
             Self::Hacker => "sprites/player_hacker.png",
+            Self::Doctor => "sprites/player_doctor.png",
         }
     }
 
@@ -201,6 +227,7 @@ impl PirateClass {
             Self::Engineer => SENTRY_COLOR,
             Self::Bulwark => RIOT_COLOR,
             Self::Hacker => HACK_COLOR,
+            Self::Doctor => MEDIC_COLOR,
         }
     }
 }
@@ -383,6 +410,20 @@ struct SentryBar {
     fill: bool,
 }
 
+/// The Doctor's reach, drawn faintly on the floor around them.
+#[derive(Component)]
+struct HealAura;
+
+/// The bubble around a warded pirate.
+#[derive(Component)]
+struct WardBubble;
+
+/// A little "+" drifting up off a pirate being patched up.
+#[derive(Component)]
+struct HealMote {
+    age: f32,
+}
+
 #[derive(Component)]
 struct AbilityPanel;
 
@@ -403,13 +444,16 @@ fn use_abilities(
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
-    mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Ability)>,
+    mut players: Query<(&Player, &mut Health, &Controls, &Transform, &Aim, &mut Ability)>,
     sentries: Query<(Entity, &Sentry, &Transform), Without<Player>>,
     riot_shields: Query<(Entity, &RiotShield)>,
     mut enemies: Query<(&mut Enemy, &Transform, &Health), Without<Player>>,
 ) {
     let dt = time.delta_secs();
+    // Where Doctors raised a ward this frame; the crew around them is warded below.
+    let mut wards = Vec::new();
     for (player, health, controls, transform, aim, mut ability) in &mut players {
+        let health = &*health;
         ability.cooldown = (ability.cooldown - dt).max(0.0);
         ability.active = (ability.active - dt).max(0.0);
         let Some(stats) = player.class.ability() else { continue };
@@ -461,6 +505,10 @@ fn use_abilities(
         }
         match player.class {
             PirateClass::Gunner | PirateClass::Bulwark => {}
+            PirateClass::Doctor => {
+                wards.push(pos);
+                fx(&mut commands, FxKind::Burst, pos, 0.0, MEDIC_COLOR);
+            }
             PirateClass::Engineer => {
                 // One sentry each: a new one replaces the old.
                 for (entity, sentry, _) in &sentries {
@@ -511,6 +559,48 @@ fn use_abilities(
         }
         ability.cooldown = stats.cooldown;
         ability.active = stats.life;
+    }
+
+    if wards.is_empty() {
+        return;
+    }
+    for (player, mut health, _, transform, ..) in &mut players {
+        let pos = transform.translation.truncate();
+        let covered = wards
+            .iter()
+            .any(|&at| at.distance(pos) <= WARD_RADIUS && grid.line_of_sight(at, pos));
+        if covered && can_act(player, &health) {
+            health.warded = WARD_LIFE;
+            fx(&mut commands, FxKind::Burst, pos, 0.0, MEDIC_COLOR);
+        }
+    }
+}
+
+/// Each Doctor patches up the crewmates around them, a little at a time. Not
+/// themselves: a Doctor needs a crew.
+fn heal_crew(time: Res<Time>, grid: Res<RoomGrid>, mut players: Query<(&Player, &mut Health, &Transform)>) {
+    let doctors: Vec<(u64, Vec2)> = players
+        .iter()
+        .filter(|(p, h, _)| p.class == PirateClass::Doctor && can_act(p, h))
+        .map(|(p, _, t)| (p.owner, t.translation.truncate()))
+        .collect();
+    if doctors.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs();
+    for (player, mut health, transform) in &mut players {
+        if !can_act(player, &health) || health.current >= health.max {
+            continue;
+        }
+        let pos = transform.translation.truncate();
+        // Two Doctors heal twice as fast.
+        let medics = doctors
+            .iter()
+            .filter(|&&(owner, at)| owner != player.owner && at.distance(pos) <= HEAL_RADIUS && grid.line_of_sight(at, pos))
+            .count();
+        if medics > 0 {
+            health.heal(HEAL_RATE * medics as f32 * dt);
+        }
     }
 }
 
@@ -725,6 +815,103 @@ fn draw_riot_shields(
             alpha *= 0.3;
         }
         sprite.color = color.with_alpha(alpha).into();
+    }
+}
+
+/// Gives every pirate a ward bubble, hidden until warded, and each Doctor the
+/// ring that shows how far their healing reaches.
+fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<AssetServer>, players: Query<&Player>) {
+    let Ok(player) = players.get(add.entity) else { return };
+    let ring = assets.load("sprites/fx/shock_ring.png");
+    commands.entity(add.entity).with_children(|parent| {
+        parent.spawn((
+            WardBubble,
+            Visibility::Hidden,
+            Sprite { image: ring.clone(), color: MEDIC_COLOR, ..default() },
+            Transform::from_xyz(0.0, 0.0, 0.5).with_scale(Vec3::splat(22.0 / RING_SIZE)),
+        ));
+        if player.class == PirateClass::Doctor {
+            parent.spawn((
+                HealAura,
+                Sprite { image: ring, color: MEDIC_COLOR.with_alpha(0.12), ..default() },
+                Transform::from_xyz(0.0, -5.0, -0.2).with_scale(Vec3::splat(2.0 * HEAL_RADIUS / RING_SIZE)),
+            ));
+        }
+    });
+}
+
+fn draw_medic_auras(
+    time: Res<Time>,
+    players: Query<(&Player, &Health)>,
+    mut bubbles: Query<(&ChildOf, &mut Visibility, &mut Sprite, &mut Transform), (With<WardBubble>, Without<HealAura>)>,
+    mut auras: Query<(&ChildOf, &mut Visibility, &mut Sprite), With<HealAura>>,
+) {
+    let t = time.elapsed_secs();
+    for (parent, mut visibility, mut sprite, mut transform) in &mut bubbles {
+        let Ok((_, health)) = players.get(parent.parent()) else { continue };
+        let warded = health.warded > 0.0 && !health.is_dead();
+        visibility.set_if_neq(if warded { Visibility::Inherited } else { Visibility::Hidden });
+        if !warded {
+            continue;
+        }
+        // Breathes while it holds, and flickers out over the last second.
+        let mut alpha = 0.75 + 0.2 * (t * 6.0).sin();
+        if health.warded < 1.0 && (t * 18.0).sin() < 0.0 {
+            alpha *= 0.3;
+        }
+        sprite.color = MEDIC_COLOR.with_alpha(alpha);
+        transform.scale = Vec3::splat((22.0 + (t * 6.0).sin()) / RING_SIZE);
+    }
+    for (parent, mut visibility, mut sprite) in &mut auras {
+        let Ok((player, health)) = players.get(parent.parent()) else { continue };
+        let on = can_act(player, health);
+        visibility.set_if_neq(if on { Visibility::Inherited } else { Visibility::Hidden });
+        sprite.color = MEDIC_COLOR.with_alpha(0.2 + 0.05 * (t * 2.0).sin());
+    }
+}
+
+/// Floats a "+" off pirates whose hull is climbing, wherever the healing came from.
+fn heal_motes(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut rng: Local<Rng>,
+    players: Query<(Entity, &Health, &Transform), With<Player>>,
+    mut last: Local<HashMap<Entity, (f32, f32)>>,
+    mut motes: Query<(Entity, &mut HealMote, &mut Transform, &mut TextColor), Without<Player>>,
+) {
+    const LIFETIME: f32 = 0.9;
+    /// Hull restored per mote.
+    const PER_MOTE: f32 = 3.0;
+    let dt = time.delta_secs();
+    last.retain(|entity, _| players.contains(*entity));
+    for (entity, health, transform) in &players {
+        let (previous, gained) = last.entry(entity).or_insert((health.current, 0.0));
+        let delta = health.current - *previous;
+        // Small steps only: a full heal from a perk or a new deck isn't a Doctor's work.
+        if delta > 0.0 && delta < 10.0 {
+            *gained += delta;
+        }
+        *previous = health.current;
+        if *gained >= PER_MOTE {
+            *gained -= PER_MOTE;
+            let at = transform.translation.truncate() + Vec2::new(rng.signed() * 6.0, rng.signed() * 4.0 + 4.0);
+            commands.spawn((
+                Level,
+                HealMote { age: 0.0 },
+                Text2d::new("+"),
+                TextFont::from_font_size(9.0 * PIXEL_SCALE),
+                TextColor(MEDIC_COLOR),
+                Transform::from_translation(at.extend(20.0)).with_scale(Vec3::splat(1.0 / PIXEL_SCALE)),
+            ));
+        }
+    }
+    for (entity, mut mote, mut transform, mut color) in &mut motes {
+        mote.age += dt;
+        transform.translation.y += 14.0 * dt;
+        color.0.set_alpha(1.0 - (mote.age / LIFETIME).powi(2));
+        if mote.age >= LIFETIME {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
