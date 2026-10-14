@@ -1,7 +1,7 @@
 //! Pirate classes and loadouts. Each pirate picks a class and their guns in the
 //! menu; the host spawns them with it. The Gunner carries an extra gun and
-//! keeps the whole crew supplied, so their shots sometimes cost no ammo; the
-//! others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
+//! keeps the whole crew supplied, so their shots sometimes cost no ammo, and
+//! the Engineer wears heavier armour; the others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns a guard against the
 //! station and the Doctor wards the crew nearby against all harm. The Doctor
 //! also slowly patches up any crewmate close by, the Bulwark's presence makes
@@ -24,12 +24,14 @@ use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
-use crate::player::{Aim, Controls, PirateStatus, Player, move_players};
+use crate::player::{Aim, Controls, MAX_SHIELD, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
 /// Guns every pirate can carry; the Gunner gets one more.
 pub const BASE_SLOTS: usize = 3;
+/// Extra shield an Engineer's armour carries, as a share of a pirate's usual.
+pub const ENGINEER_ARMOR: f32 = 0.8;
 /// Seconds a sentry keeps fighting.
 pub const SENTRY_LIFE: f32 = 15.0;
 /// Seconds from dropping a sentry until the next one is ready.
@@ -181,10 +183,18 @@ impl PirateClass {
     pub fn perk(self) -> &'static str {
         match self {
             Self::Gunner => "Supplies the crew\nCarries a 4th gun",
-            Self::Engineer => "Q: drop a sentry gun",
+            Self::Engineer => "Heavier armour\nQ: drop a sentry gun",
             Self::Bulwark => "Rallies crew nearby\nQ: riot shield",
             Self::Hacker => "Jams guards nearby\nQ: turn a guard",
             Self::Doctor => "Heals crew nearby\nQ: ward the crew",
+        }
+    }
+
+    /// The shield a pirate of this class starts each run with.
+    pub fn shield(self) -> f32 {
+        match self {
+            Self::Engineer => MAX_SHIELD * (1.0 + ENGINEER_ARMOR),
+            _ => MAX_SHIELD,
         }
     }
 
@@ -403,6 +413,9 @@ pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(Strin
     }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
+    }
+    if class == PirateClass::Engineer {
+        effects.push((format!("ARMOR +{:.0}%", ENGINEER_ARMOR * 100.0), SENTRY_COLOR));
     }
     if boons.jamming > 0 {
         effects.push((format!("JAMMING {}", boons.jamming), HACK_COLOR));

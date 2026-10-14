@@ -198,7 +198,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
             deck,
         },
         Team::Player,
-        Health::new(MAX_HEALTH, 0.5).with_shield(MAX_SHIELD),
+        Health::new(MAX_HEALTH, 0.5).with_shield(loadout.class.shield()),
         Hurtbox(6.0),
         Walking::default(),
         Dash::default(),
