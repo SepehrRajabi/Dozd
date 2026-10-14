@@ -54,8 +54,8 @@ mid-run picks from the classes still free.
 
 | Class | Ability |
 | --- | --- |
-| Gunner | Every crewmate, wherever they are, has a 30% chance for a shot not to use up ammo. Carries a 4th gun |
-| Engineer | Wears heavier armour: 80% more shield. Q drops a sentry gun that shoots guards for 15 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
+| Gunner | They and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. Carries a 4th gun |
+| Engineer | Wears heavier armour: 80% more shield. Q drops a sentry gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
 | Bulwark | Crewmates within reach deal 25% more damage. Q raises or lowers a riot shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
 | Hacker | Guards within reach are jammed: 35% of their shots go wide and their blows whiff. Q turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
 | Doctor | Slowly heals crewmates within reach; Q wards them and the Doctor against all harm for 4 s (28 s cooldown) |

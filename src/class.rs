@@ -33,13 +33,13 @@ pub const BASE_SLOTS: usize = 3;
 /// Extra shield an Engineer's armour carries, as a share of a pirate's usual.
 pub const ENGINEER_ARMOR: f32 = 0.8;
 /// Seconds a sentry keeps fighting.
-pub const SENTRY_LIFE: f32 = 15.0;
+pub const SENTRY_LIFE: f32 = 20.0;
 /// Seconds from dropping a sentry until the next one is ready.
 pub const SENTRY_COOLDOWN: f32 = 25.0;
-const SENTRY_HEALTH: f32 = 80.0;
-const SENTRY_RANGE: f32 = 120.0;
-const SENTRY_FIRE_GAP: f32 = 0.22;
-const SENTRY_DAMAGE: f32 = 6.0;
+const SENTRY_HEALTH: f32 = 140.0;
+const SENTRY_RANGE: f32 = 145.0;
+const SENTRY_FIRE_GAP: f32 = 0.18;
+const SENTRY_DAMAGE: f32 = 9.0;
 const SENTRY_SPREAD: f32 = 0.08;
 const SENTRY_SHOT_SPEED: f32 = 340.0;
 const SENTRY_COLOR: Color = Color::srgb(1.0, 0.62, 0.25);
@@ -51,7 +51,7 @@ const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
 
-/// Odds a shot by any crewmate of a Gunner, wherever they are, costs no ammo.
+/// Odds a shot by a Gunner or any crewmate of theirs, wherever they are, costs no ammo.
 pub const SUPPLY_CHANCE: f32 = 0.3;
 const GUNNER_COLOR: Color = Color::srgb(1.0, 0.82, 0.35);
 
@@ -663,8 +663,8 @@ fn use_abilities(
 
 /// Each Doctor patches up the crewmates around them, a little at a time, each
 /// Bulwark rallies them to hit harder, and a Gunner keeps the whole crew, near
-/// or far, supplied, so their shots sometimes cost no ammo. None helps themselves: their
-/// passives need a crew. Records who's getting what in everyone's `Boons`.
+/// or far and themselves included, supplied, so their shots sometimes cost no
+/// ammo. The Doctor and Bulwark don't help themselves: their passives need a crew. Records who's getting what in everyone's `Boons`.
 fn support_crew(
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -687,7 +687,9 @@ fn support_crew(
         let mut supplied = false;
         if can_act(player, &health) {
             for (i, &(owner, class, at)) in supporters.iter().enumerate() {
-                if owner == player.owner {
+                let own = owner == player.owner;
+                // Only the Gunner's passive covers themselves too.
+                if own && class != PirateClass::Gunner {
                     continue;
                 }
                 let radius = match class {
@@ -699,7 +701,9 @@ fn support_crew(
                 if radius.is_some_and(|r| at.distance(pos) > r || !grid.line_of_sight(at, pos)) {
                     continue;
                 }
-                reached[i] += 1;
+                if !own {
+                    reached[i] += 1;
+                }
                 match class {
                     PirateClass::Doctor => medics += 1,
                     PirateClass::Bulwark => rallied = true,
