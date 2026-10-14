@@ -117,10 +117,11 @@ impl Alarm {
         self.surge = 0;
     }
 
+    /// Guards per wave, in proportion to the crew that set out: each pirate
+    /// brings a solo run's worth.
     fn wave_size(&self, crew: usize) -> usize {
-        let base = 1.0 + (self.level * 0.8).floor();
-        // Each extra pirate adds half a wave: a crew is stronger, but not twice as safe.
-        (base * (1.0 + 0.5 * crew.saturating_sub(1) as f32)).round() as usize
+        let base = 1 + (self.level * 0.8).floor() as usize;
+        base * crew.max(1)
     }
 }
 
@@ -358,9 +359,12 @@ fn run_waves(
         points = grid.spawn_points.clone();
     }
 
-    let cap = MAX_ALIVE + 4 * crew.len().saturating_sub(1);
+    // Everyone who set out from the lobby, fallen or gone: the station sizes
+    // its response to the crew it saw come aboard.
+    let aboard = players.iter().count();
+    let cap = MAX_ALIVE + 4 * aboard.saturating_sub(1);
     let room = cap.saturating_sub(enemies.iter().count());
-    let count = (alarm.wave_size(crew.len()) + alarm.surge).min(room);
+    let count = (alarm.wave_size(aboard) + alarm.surge).min(room);
     alarm.surge = 0;
     for i in 0..count {
         let point = points[(i + (rng.unit() * points.len() as f32) as usize) % points.len()];
@@ -794,4 +798,19 @@ fn spawn_results(
             ],
         )],
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waves_grow_with_the_crew() {
+        let alarm = Alarm { level: 2.0, ..default() };
+        let solo = alarm.wave_size(1);
+        assert_eq!(solo, 2);
+        assert_eq!(alarm.wave_size(3), 3 * solo);
+        assert_eq!(alarm.wave_size(5), 5 * solo);
+        assert_eq!(alarm.wave_size(0), solo, "an empty deck still gets a wave");
+    }
 }
