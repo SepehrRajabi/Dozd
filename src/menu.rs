@@ -772,7 +772,8 @@ fn run_menu_command(
     mut memory: ResMut<MenuMemory>,
     mut notice: ResMut<Notice>,
     fields: Query<&TextField>,
-    current: Res<State<MenuScreen>>,
+    // Absent outside the menu, e.g. in the lobby.
+    current: Option<Res<State<MenuScreen>>>,
     mut screen: ResMut<NextState<MenuScreen>>,
     mut settings: ResMut<Settings>,
     mut exit: MessageWriter<AppExit>,
@@ -841,7 +842,7 @@ fn run_menu_command(
                 commands.trigger(EndSession(None));
             } else {
                 notice.0 = None;
-                screen.set(current.get().parent());
+                screen.set(current.map_or(MenuScreen::Main, |c| c.get().parent()));
             }
         }
     }
