@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::Sentry;
+use crate::class::{Boons, Sentry};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::drops::{EnemyDrop, spawn_drops};
 use crate::mission::Alarm;
@@ -23,6 +23,22 @@ const BRUTE_REACH: f32 = 16.0;
 const BRUTE_SWING: f32 = 22.0;
 const BRUTE_DAMAGE: f32 = 20.0;
 const STALKER_DAMAGE: f32 = 25.0;
+/// A Herald's rifle shot.
+const HERALD_DAMAGE: f32 = 10.0;
+/// How long a Herald stands rallying before its phase kicks in. Stunning or
+/// killing it in this window stops it.
+const HERALD_RALLY_TIME: f32 = 1.0;
+/// Guards this close hear a Herald's war cry; and it needs this many of them
+/// nearby to cry out, or it goes into a frenzy instead.
+const HERALD_REACH: f32 = 90.0;
+const HERALD_PACK: usize = 2;
+/// A war cry's lasting damage multiplier for everyone it reaches: guards, or,
+/// from a hacked Herald, the crew.
+pub const WAR_CRY_POWER: f32 = 1.6;
+pub const EMPOWERED_COLOR: Color = Color::srgb(1.0, 0.45, 0.2);
+/// A frenzied Herald's speed and damage multipliers.
+const FRENZY_SPEED: f32 = 1.9;
+const FRENZY_POWER: f32 = 1.35;
 /// Odds a downed enemy leaves its bounty behind.
 const CREDIT_DROP_CHANCE: f32 = 0.6;
 /// Odds of an ammo box, rolled once per box (Wardens and Brutes carry two).
@@ -47,7 +63,7 @@ pub struct EnemiesViewPlugin;
 impl Plugin for EnemiesViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(dress_enemy)
-            .add_systems(Update, (enemy_visuals, update_health_bars));
+            .add_systems(Update, (enemy_visuals, update_health_bars, draw_power_rings));
     }
 }
 
@@ -61,6 +77,18 @@ pub enum EnemyKind {
     Warden,
     /// Hulking melee bruiser: plods after you and punches when it gets close.
     Brute,
+    /// Station officer with a rifle. Meeting the crew, it rallies: a war cry
+    /// that empowers the guards around it for good, or, alone, a frenzy.
+    Herald,
+}
+
+/// Which way a Herald's rally went.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HeraldPhase {
+    /// Its war cry empowered the guards around it.
+    WarCry,
+    /// Nobody to rally: it hunts faster and hits harder itself.
+    Frenzy,
 }
 
 struct EnemyStats {
@@ -126,6 +154,18 @@ const BRUTE: EnemyStats = EnemyStats {
     bounty: (40, 70),
 };
 
+const HERALD: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/herald.png",
+    health: 90.0,
+    speed: 40.0,
+    hurtbox: 6.5,
+    half: 4.0,
+    sight: 120.0,
+    knockback_taken: 0.5,
+    death_color: Color::srgb(0.9, 0.3, 0.55),
+    bounty: (35, 60),
+};
+
 impl EnemyKind {
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
@@ -133,6 +173,7 @@ impl EnemyKind {
             's' => Self::Stalker,
             'h' => Self::Warden,
             'b' => Self::Brute,
+            'g' => Self::Herald,
             _ => return None,
         })
     }
@@ -143,6 +184,7 @@ impl EnemyKind {
             Self::Stalker => &STALKER,
             Self::Warden => &WARDEN,
             Self::Brute => &BRUTE,
+            Self::Herald => &HERALD,
         }
     }
 }
@@ -167,6 +209,10 @@ pub struct EnemyLook {
     pub stunned: bool,
     /// Fighting for the crew.
     pub hacked: bool,
+    /// Hits harder for good, after a Herald's war cry.
+    pub empowered: bool,
+    /// A Herald in a frenzy.
+    pub frenzied: bool,
 }
 
 /// Host-only AI state.
@@ -188,6 +234,10 @@ pub struct Enemy {
     stun: f32,
     /// Seconds left fighting for the crew after a Hacker turned it.
     hacked: f32,
+    /// Heard a Herald's war cry: its attacks hit `WAR_CRY_POWER` harder for good.
+    empowered: bool,
+    /// A Herald's rally, once it has rallied.
+    phase: Option<HeraldPhase>,
 }
 
 impl Enemy {
@@ -197,6 +247,29 @@ impl Enemy {
         self.state = AiState::Hunt;
         self.burst_left = 0;
         self.velocity = Vec2::ZERO;
+    }
+
+    /// What its attacks' damage is multiplied by.
+    fn power(&self) -> f32 {
+        let cry = if self.empowered { WAR_CRY_POWER } else { 1.0 };
+        let frenzy = if self.phase == Some(HeraldPhase::Frenzy) { FRENZY_POWER } else { 1.0 };
+        cry * frenzy
+    }
+
+    fn speed(&self) -> f32 {
+        let frenzy = if self.phase == Some(HeraldPhase::Frenzy) { FRENZY_SPEED } else { 1.0 };
+        self.kind.stats().speed * frenzy
+    }
+
+    fn look(&self) -> EnemyLook {
+        EnemyLook {
+            kind: self.kind,
+            state: self.state,
+            stunned: self.stun > 0.0,
+            hacked: self.hacked > 0.0,
+            empowered: self.empowered,
+            frenzied: self.phase == Some(HeraldPhase::Frenzy),
+        }
     }
 
     pub fn is_hacked(&self) -> bool {
@@ -217,14 +290,14 @@ struct HealthBar {
     fill: bool,
 }
 
+/// Glows at an empowered guard's feet.
+#[derive(Component)]
+struct PowerRing;
+
 pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool) {
     let stats = kind.stats();
     let state = if alerted { AiState::Hunt } else { AiState::Idle };
-    commands.spawn((
-        Level,
-        Replicated,
-        EnemyLook { kind, state, stunned: false, hacked: false },
-        Enemy {
+    let enemy = Enemy {
             kind,
             state,
             home: pos,
@@ -238,7 +311,14 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             velocity: Vec2::ZERO,
             stun: 0.0,
             hacked: 0.0,
-        },
+            empowered: false,
+            phase: None,
+        };
+    commands.spawn((
+        Level,
+        Replicated,
+        enemy.look(),
+        enemy,
         Team::Enemy,
         Health::new(stats.health, 0.0),
         Hurtbox(stats.hurtbox),
@@ -256,6 +336,12 @@ fn dress_enemy(add: On<Add, EnemyLook>, mut commands: Commands, assets: Res<Asse
             parent.spawn((
                 Sprite::from_image(assets.load("sprites/shadow.png")),
                 Transform::from_xyz(0.0, 0.0, -0.1),
+            ));
+            parent.spawn((
+                PowerRing,
+                Sprite { image: assets.load("sprites/fx/shock_ring.png"), color: EMPOWERED_COLOR, ..default() },
+                Transform::from_xyz(0.0, -4.0, -0.05).with_scale(Vec3::new(24.0 / 113.0, 14.0 / 113.0, 1.0)),
+                Visibility::Hidden,
             ));
             parent.spawn((
                 HealthBar { fill: false },
@@ -309,7 +395,7 @@ fn think(
     mut noise: ResMut<Noise>,
     mut rng: ResMut<Rng>,
     mut victims: Query<
-        (Entity, &Transform, &mut Health, Option<&Player>, Option<&Perks>),
+        (Entity, &Transform, &mut Health, Option<&Player>, Option<&Perks>, Option<&mut Boons>),
         (Without<Enemy>, Or<(With<Player>, With<Sentry>)>),
     >,
     mut enemies: Query<(Entity, &mut Enemy, &Transform, &mut Health, &mut Team)>,
@@ -330,7 +416,7 @@ fn think(
     // simply don't exist as far as the AI is concerned.
     let mut crew: Vec<(Entity, Vec2)> = victims
         .iter()
-        .filter(|(_, _, health, player, perks)| {
+        .filter(|(_, _, health, player, perks, _)| {
             !health.is_dead()
                 && player.is_none_or(|p| p.status == PirateStatus::Active)
                 && perks.is_none_or(|p| !p.has(PerkKind::Cloak))
@@ -378,6 +464,8 @@ fn think(
 
     // Lunges landing on other enemies, applied once the loop lets go of them.
     let mut bites = Vec::new();
+    // Where Heralds cried out this frame, and whether for the crew.
+    let mut cries: Vec<(Vec2, bool)> = Vec::new();
     for (entity, mut enemy, transform, _, team) in &mut enemies {
         let stats = enemy.kind.stats();
         let pos = transform.translation.truncate();
@@ -388,6 +476,7 @@ fn think(
         }
         enemy.timer -= dt;
         enemy.attack_cooldown -= dt;
+        let power = enemy.power();
 
         let hacked = enemy.hacked > 0.0;
         let foes = if hacked { &station } else { &crew };
@@ -446,7 +535,7 @@ fn think(
                 if enemy.burst_left > 0 && enemy.timer <= 0.0 {
                     let angle = dir.to_angle() + rng.signed() * 0.08;
                     let color = Color::srgb(1.0, 0.3, 0.25);
-                    enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 150.0, 8.0, ProjectileLook::EnemyBolt, color);
+                    enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 150.0, 8.0 * power, ProjectileLook::EnemyBolt, color);
                     enemy.burst_left -= 1;
                     enemy.timer = 0.1;
                 } else if enemy.burst_left == 0 && enemy.attack_cooldown <= 0.0 && los && dist < 150.0 {
@@ -484,9 +573,9 @@ fn think(
                 enemy.velocity = enemy.lunge_dir * 240.0;
                 if !enemy.lunge_hit && dist < 11.0 {
                     enemy.lunge_hit = match victims.get_mut(target_entity) {
-                        Ok((_, _, mut health, ..)) => health.hurt(STALKER_DAMAGE),
+                        Ok((_, _, mut health, ..)) => health.hurt(STALKER_DAMAGE * power),
                         Err(_) => {
-                            bites.push((target_entity, STALKER_DAMAGE));
+                            bites.push((target_entity, STALKER_DAMAGE * power));
                             true
                         }
                     };
@@ -517,7 +606,7 @@ fn think(
                     let color = Color::srgb(1.0, 0.55, 0.2);
                     for i in 0..5 {
                         let angle = dir.to_angle() + (i as f32 / 4.0 - 0.5) * 0.7;
-                        enemy_shot(&mut commands, side, pos + dir * 8.0, angle, 115.0, 12.0, ProjectileLook::EnemyOrb, color);
+                        enemy_shot(&mut commands, side, pos + dir * 8.0, angle, 115.0, 12.0 * power, ProjectileLook::EnemyOrb, color);
                     }
                     enemy.state = AiState::Hunt;
                     enemy.attack_cooldown = 2.4 + rng.unit() * 0.6;
@@ -541,9 +630,9 @@ fn think(
                     if dist < BRUTE_SWING {
                         match victims.get_mut(target_entity) {
                             Ok((_, _, mut health, ..)) => {
-                                health.hurt(BRUTE_DAMAGE);
+                                health.hurt(BRUTE_DAMAGE * power);
                             }
-                            Err(_) => bites.push((target_entity, BRUTE_DAMAGE)),
+                            Err(_) => bites.push((target_entity, BRUTE_DAMAGE * power)),
                         }
                     }
                     fx(&mut commands, FxKind::Spark, fist, enemy.lunge_dir.to_angle(), stats.death_color);
@@ -556,6 +645,49 @@ fn think(
                 if enemy.timer <= 0.0 {
                     enemy.state = AiState::Hunt;
                     enemy.attack_cooldown = 0.6 + rng.unit() * 0.4;
+                }
+            }
+
+            (EnemyKind::Herald, AiState::Hunt) => {
+                let frenzied = enemy.phase == Some(HeraldPhase::Frenzy);
+                // Keeps a rifle's distance; frenzied, it closes right in.
+                let keep = if frenzied { 30.0 } else { 80.0 };
+                enemy.velocity = if !los || dist > keep + 20.0 {
+                    chase * enemy.speed()
+                } else if dist < keep - 20.0 {
+                    -dir * enemy.speed() * 0.6
+                } else {
+                    Vec2::ZERO
+                };
+                // A hacked Herald rallies too, for whichever side it's on.
+                if enemy.phase.is_none() && los && dist < stats.sight {
+                    enemy.state = AiState::Telegraph;
+                    enemy.timer = HERALD_RALLY_TIME;
+                } else if los && dist < 170.0 && enemy.attack_cooldown <= 0.0 {
+                    let angle = dir.to_angle() + rng.signed() * 0.06;
+                    let damage = HERALD_DAMAGE * power;
+                    enemy_shot(&mut commands, side, pos + dir * 6.0, angle, 170.0, damage, ProjectileLook::EnemyBolt, stats.death_color);
+                    enemy.attack_cooldown = if frenzied { 0.6 } else { 1.1 } + rng.unit() * 0.3;
+                }
+            }
+            (EnemyKind::Herald, AiState::Telegraph) => {
+                enemy.velocity = Vec2::ZERO;
+                if enemy.timer <= 0.0 {
+                    let allies = if hacked { &crew } else { &station };
+                    let pack = allies
+                        .iter()
+                        .filter(|(e, at)| *e != entity && at.distance(pos) <= HERALD_REACH)
+                        .count();
+                    if pack >= HERALD_PACK {
+                        enemy.phase = Some(HeraldPhase::WarCry);
+                        cries.push((pos, hacked));
+                        fx(&mut commands, FxKind::Explosion, pos, 0.0, EMPOWERED_COLOR);
+                    } else {
+                        enemy.phase = Some(HeraldPhase::Frenzy);
+                        fx(&mut commands, FxKind::Burst, pos, 0.0, Color::srgb(1.0, 0.2, 0.25));
+                    }
+                    enemy.state = AiState::Hunt;
+                    enemy.attack_cooldown = 0.4;
                 }
             }
 
@@ -572,6 +704,33 @@ fn think(
             health.hurt(damage);
         }
     }
+
+    // A war cry empowers everyone on the Herald's side in earshot for good, the
+    // Herald too: guards, or for a hacked Herald, the crew and its turned guards.
+    for (cry, for_crew) in cries {
+        for (_, mut enemy, transform, health, _) in &mut enemies {
+            let at = transform.translation.truncate();
+            let ally = (enemy.hacked > 0.0) == for_crew;
+            if enemy.empowered || !ally || health.is_dead() || at.distance(cry) > HERALD_REACH {
+                continue;
+            }
+            enemy.empowered = true;
+            fx(&mut commands, FxKind::Zap(at), cry, 0.0, EMPOWERED_COLOR);
+        }
+        if !for_crew {
+            continue;
+        }
+        for (_, transform, health, player, _, boons) in &mut victims {
+            let at = transform.translation.truncate();
+            let Some(mut boons) = boons else { continue };
+            let active = player.is_some_and(|p| p.status == PirateStatus::Active);
+            if boons.empowered || !active || health.is_dead() || at.distance(cry) > HERALD_REACH {
+                continue;
+            }
+            boons.empowered = true;
+            fx(&mut commands, FxKind::Zap(at), cry, 0.0, EMPOWERED_COLOR);
+        }
+    }
 }
 
 fn move_enemies(
@@ -586,12 +745,7 @@ fn move_enemies(
         .collect();
 
     for (entity, enemy, mut look, mut transform, mut knockback) in &mut enemies {
-        look.set_if_neq(EnemyLook {
-            kind: enemy.kind,
-            state: enemy.state,
-            stunned: enemy.stun > 0.0,
-            hacked: enemy.hacked > 0.0,
-        });
+        look.set_if_neq(enemy.look());
 
         let stats = enemy.kind.stats();
         let pos = transform.translation.truncate();
@@ -630,11 +784,34 @@ fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut 
             if blink { Color::srgb(0.55, 0.85, 1.0) } else { Color::srgb(0.85, 0.95, 1.0) }
         } else if look.state == AiState::Telegraph && blink {
             Color::srgb(1.0, 0.85, 0.3)
+        } else if look.empowered {
+            // Smoulders orange: it hits much harder now.
+            let heat = 0.5 + 0.5 * (time.elapsed_secs() * 4.0).sin();
+            Color::srgb(1.0, 0.7 + 0.15 * heat, 0.45 + 0.2 * heat)
+        } else if look.frenzied {
+            // Seething red.
+            let heat = 0.5 + 0.5 * (time.elapsed_secs() * 9.0).sin();
+            Color::srgb(1.0, 0.45 + 0.25 * heat, 0.45 + 0.25 * heat)
         } else if look.state == AiState::Recover {
             Color::srgb(0.6, 0.6, 0.75)
         } else {
             Color::WHITE
         };
+    }
+}
+
+fn draw_power_rings(
+    time: Res<Time>,
+    looks: Query<&EnemyLook>,
+    mut rings: Query<(&ChildOf, &mut Sprite, &mut Visibility), With<PowerRing>>,
+) {
+    let pulse = 0.85 + 0.15 * (time.elapsed_secs() * 5.0).sin();
+    for (parent, mut sprite, mut visibility) in &mut rings {
+        let on = looks.get(parent.parent()).is_ok_and(|l| l.empowered);
+        visibility.set_if_neq(if on { Visibility::Inherited } else { Visibility::Hidden });
+        if on {
+            sprite.color = EMPOWERED_COLOR.with_alpha(pulse);
+        }
     }
 }
 
@@ -684,11 +861,15 @@ pub fn roll_reinforcement(rng: &mut Rng, alarm_level: f32) -> EnemyKind {
     let r = rng.unit();
     let warden = 0.08 * alarm_level;
     let brute = 0.06 * alarm_level;
+    // Heralds come with the reinforcements, to rally them.
+    let herald = 0.05 + 0.03 * alarm_level;
     if r < warden {
         EnemyKind::Warden
     } else if r < warden + brute {
         EnemyKind::Brute
-    } else if r < warden + brute + 0.4 {
+    } else if r < warden + brute + herald {
+        EnemyKind::Herald
+    } else if r < warden + brute + herald + 0.4 {
         EnemyKind::Stalker
     } else {
         EnemyKind::SentryDrone

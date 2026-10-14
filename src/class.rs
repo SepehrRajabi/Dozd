@@ -16,7 +16,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::combat::{FxKind, Health, Hurtbox, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
-use crate::enemies::Enemy;
+use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::GunKind;
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
@@ -358,12 +358,17 @@ pub struct Boons {
     pub rallied: bool,
     /// For a Doctor or Bulwark: how many crewmates their passive reaches.
     pub aura: u8,
+    /// Heard a hacked Herald's war cry: hits `WAR_CRY_POWER` harder for the
+    /// rest of the run.
+    pub empowered: bool,
 }
 
 impl Boons {
     /// What their guns' damage is multiplied by.
     pub fn damage(self) -> f32 {
-        if self.rallied { 1.0 + RALLY_BOOST } else { 1.0 }
+        let rally = if self.rallied { 1.0 + RALLY_BOOST } else { 1.0 };
+        let cry = if self.empowered { WAR_CRY_POWER } else { 1.0 };
+        rally * cry
     }
 }
 
@@ -378,6 +383,9 @@ pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(Strin
     }
     if boons.rallied {
         effects.push((format!("+{:.0}% DMG", RALLY_BOOST * 100.0), RIOT_COLOR));
+    }
+    if boons.empowered {
+        effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
     }
     if boons.aura > 0 {
         effects.push((format!("AURA {}", boons.aura), class.color()));
@@ -657,7 +665,7 @@ fn support_crew(
         if healing {
             health.heal(HEAL_RATE * medics as f32 * dt);
         }
-        let current = Boons { healing, rallied, aura: boons.aura };
+        let current = Boons { healing, rallied, ..*boons };
         boons.set_if_neq(current);
     }
     for (player, _, _, mut boons) in &mut players {

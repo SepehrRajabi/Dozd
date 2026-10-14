@@ -524,6 +524,33 @@ ENEMIES = {
             "F": rgb(170, 175, 190),
         },
     ),
+    # Station herald: an officer who rallies the guards, or works itself into a frenzy.
+    "herald": (
+        [
+            "................",
+            "......kkkk......",
+            ".....kGGGGk.....",
+            "....kRRRRRRk....",
+            "....kkvvvvkk....",
+            ".....kMMMMk.....",
+            "...kkkGGGGkkk...",
+            "..kRRkRRRRkRRk..",
+            "..kRrkRGGRkrRk..",
+            "..kRrkRRRRkrRk..",
+            "..kMk.kRRk.kMk..",
+            "...k.krrrrk.k...",
+            ".....kRkkRk.....",
+            ".....kRk.kRk....",
+            "....kkkk.kkkk...",
+        ],
+        {
+            "R": rgb(150, 36, 70),
+            "r": rgb(96, 22, 48),
+            "G": rgb(240, 190, 70),
+            "v": rgb(255, 120, 60),
+            "M": rgb(160, 165, 180),
+        },
+    ),
 }
 
 
