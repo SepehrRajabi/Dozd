@@ -13,6 +13,17 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 > prototype. I want to figure out the game itself before starting to write it
 > myself.
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Main menu](docs/screenshots/menu.png) | ![Loadout](docs/screenshots/loadout.png) |
+| The main menu | Picking a class and guns |
+| ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
+| The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck |
+| ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
+| A Bulwark and a Doctor against a Herald's empowered guards, with each other's status in the crew panel | A crew that didn't make it out |
+
 ## Run
 
 ```sh
