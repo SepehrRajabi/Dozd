@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::abilities::{Active, Passive, RICOCHET_CHANCE};
 use crate::combat::{FxKind, Health, Hurtbox, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::GunKind;
@@ -182,19 +183,11 @@ impl PirateClass {
 
     pub fn perk(self) -> &'static str {
         match self {
-            Self::Gunner => "Supplies the crew\nCarries a 4th gun",
-            Self::Engineer => "Heavier armour\nQ: drop a sentry gun",
-            Self::Bulwark => "Rallies crew nearby\nQ: riot shield",
-            Self::Hacker => "Jams guards nearby\nQ: turn a guard",
-            Self::Doctor => "Heals crew nearby\nQ: ward the crew",
-        }
-    }
-
-    /// The shield a pirate of this class starts each run with.
-    pub fn shield(self) -> f32 {
-        match self {
-            Self::Engineer => MAX_SHIELD * (1.0 + ENGINEER_ARMOR),
-            _ => MAX_SHIELD,
+            Self::Gunner => "Carries a 4th gun\nNo Q ability",
+            Self::Engineer => "Builds, digs in",
+            Self::Bulwark => "Holds the line",
+            Self::Hacker => "Turns the station",
+            Self::Doctor => "Keeps the crew alive",
         }
     }
 
@@ -203,38 +196,6 @@ impl PirateClass {
             Self::Gunner => BASE_SLOTS + 1,
             Self::Engineer | Self::Bulwark | Self::Hacker | Self::Doctor => BASE_SLOTS,
         }
-    }
-
-    /// The Q ability, if the class has one.
-    pub fn ability(self) -> Option<AbilityStats> {
-        Some(match self {
-            Self::Gunner => return None,
-            Self::Engineer => AbilityStats {
-                label: "SNTRY",
-                cooldown: SENTRY_COOLDOWN,
-                life: SENTRY_LIFE,
-                color: SENTRY_COLOR,
-            },
-            Self::Bulwark => AbilityStats {
-                label: "SHIELD",
-                // Unused: the shield runs on `Ability::charge` instead.
-                cooldown: RIOT_RECHARGE,
-                life: RIOT_LIFE,
-                color: RIOT_COLOR,
-            },
-            Self::Hacker => AbilityStats {
-                label: "HACK",
-                cooldown: HACK_COOLDOWN,
-                life: HACK_LIFE,
-                color: HACK_COLOR,
-            },
-            Self::Doctor => AbilityStats {
-                label: "WARD",
-                cooldown: WARD_COOLDOWN,
-                life: WARD_LIFE,
-                color: MEDIC_COLOR,
-            },
-        })
     }
 
     pub fn sprite(self) -> &'static str {
@@ -258,10 +219,57 @@ impl PirateClass {
     }
 }
 
-/// A class and the guns it carries, in slot order.
+impl Passive {
+    /// The shield a pirate with this passive starts each run with.
+    pub fn shield(self) -> f32 {
+        match self {
+            Self::Armor => MAX_SHIELD * (1.0 + ENGINEER_ARMOR),
+            _ => MAX_SHIELD,
+        }
+    }
+}
+
+impl Active {
+    /// Its timings and look, for the HUD.
+    pub fn stats(self) -> AbilityStats {
+        match self {
+            Self::Sentry => AbilityStats {
+                label: "SNTRY",
+                cooldown: SENTRY_COOLDOWN,
+                life: SENTRY_LIFE,
+                color: SENTRY_COLOR,
+            },
+            Self::RiotShield => AbilityStats {
+                label: "SHIELD",
+                // Unused: the shield runs on `Ability::charge` instead.
+                cooldown: RIOT_RECHARGE,
+                life: RIOT_LIFE,
+                color: RIOT_COLOR,
+            },
+            Self::Hack => AbilityStats {
+                label: "HACK",
+                cooldown: HACK_COOLDOWN,
+                life: HACK_LIFE,
+                color: HACK_COLOR,
+            },
+            Self::Ward => AbilityStats {
+                label: "WARD",
+                cooldown: WARD_COOLDOWN,
+                life: WARD_LIFE,
+                color: MEDIC_COLOR,
+            },
+        }
+    }
+}
+
+/// A class, its picks of passive and active ability, and the guns it carries
+/// in slot order.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Loadout {
     pub class: PirateClass,
+    pub passive: Passive,
+    /// `None` only for a class with no active ability.
+    pub active: Option<Active>,
     pub guns: Vec<GunKind>,
 }
 
@@ -274,16 +282,30 @@ impl Loadout {
             GunKind::ScatterCannon,
             GunKind::RailLance,
         ];
-        Self { class, guns: DEFAULT[..class.slots()].to_vec() }
+        Self {
+            class,
+            passive: Self::default_passive(class),
+            active: class.actives().next(),
+            guns: DEFAULT[..class.slots()].to_vec(),
+        }
+    }
+
+    fn default_passive(class: PirateClass) -> Passive {
+        class.passives().next().expect("every class has a passive")
     }
 
     pub fn is_full(&self) -> bool {
         self.guns.len() >= self.class.slots()
     }
 
-    /// Switches class, dropping guns from the end that no longer fit.
+    /// Switches class, dropping guns from the end that no longer fit, and
+    /// taking the new class's default abilities.
     pub fn set_class(&mut self, class: PirateClass) {
-        self.class = class;
+        if class != self.class {
+            self.class = class;
+            self.passive = Self::default_passive(class);
+            self.active = class.actives().next();
+        }
         self.guns.truncate(class.slots());
     }
 
@@ -300,9 +322,15 @@ impl Loadout {
         true
     }
 
-    /// Makes a loadout from another machine legal: no repeats, no more guns
-    /// than slots, and at least one gun.
+    /// Makes a loadout from another machine legal: abilities of its own class,
+    /// no repeated guns, no more guns than slots, and at least one gun.
     pub fn sanitized(mut self) -> Self {
+        if self.passive.class() != self.class {
+            self.passive = Self::default_passive(self.class);
+        }
+        if self.active.map(Active::class) != self.class.actives().next().map(Active::class) {
+            self.active = self.class.actives().next();
+        }
         let mut seen = Vec::new();
         self.guns.retain(|g| {
             let fresh = !seen.contains(g);
@@ -333,14 +361,23 @@ impl Loadout {
             .split(',')
             .map(|name| GunKind::ALL.into_iter().find(|g| format!("{g:?}") == name.trim()))
             .collect::<Option<Vec<_>>>()?;
-        Some(Self { class, guns }.sanitized())
+        // Abilities came later; older files go without, and get the defaults.
+        let mut loadout = Self { guns, ..Self::new(class) };
+        if let Some(passive) = lines.next().and_then(Passive::parse) {
+            loadout.passive = passive;
+        }
+        if let Some(active) = lines.next().and_then(Active::parse) {
+            loadout.active = Some(active);
+        }
+        Some(loadout.sanitized())
     }
 
     /// Remembers this pick for the next launch. Failing to is harmless.
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
         let guns: Vec<String> = self.guns.iter().map(|g| format!("{g:?}")).collect();
-        let text = format!("{}\n{}\n", self.class.name(), guns.join(","));
+        let active = self.active.map_or("-".to_string(), |a| format!("{a:?}"));
+        let text = format!("{}\n{}\n{:?}\n{active}\n", self.class.name(), guns.join(","), self.passive);
         if let Err(error) = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(&path, text)) {
             warn!("couldn't save the loadout to {}: {error}", path.display());
         }
@@ -397,7 +434,7 @@ impl Boons {
 }
 
 /// The effects on a pirate, as short HUD labels in their colours.
-pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(String, Color)> {
+pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String, Color)> {
     let mut effects = Vec::new();
     if health.warded > 0.0 && !health.is_dead() {
         effects.push((format!("WARDED {:.0}s", health.warded.ceil()), MEDIC_COLOR));
@@ -414,14 +451,16 @@ pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(Strin
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
     }
-    if class == PirateClass::Engineer {
-        effects.push((format!("ARMOR +{:.0}%", ENGINEER_ARMOR * 100.0), SENTRY_COLOR));
+    match passive {
+        Passive::Armor => effects.push((format!("ARMOR +{:.0}%", ENGINEER_ARMOR * 100.0), SENTRY_COLOR)),
+        Passive::Ricochet => effects.push((format!("RICOCHET {:.0}%", RICOCHET_CHANCE * 100.0), GUNNER_COLOR)),
+        _ => {}
     }
     if boons.jamming > 0 {
         effects.push((format!("JAMMING {}", boons.jamming), HACK_COLOR));
     }
     if boons.aura > 0 {
-        effects.push((format!("AURA {}", boons.aura), class.color()));
+        effects.push((format!("AURA {}", boons.aura), passive.class().color()));
     }
     effects
 }
@@ -541,11 +580,12 @@ fn use_abilities(
         let health = &*health;
         ability.cooldown = (ability.cooldown - dt).max(0.0);
         ability.active = (ability.active - dt).max(0.0);
-        let Some(stats) = player.class.ability() else { continue };
+        let Some(active) = player.active else { continue };
+        let stats = active.stats();
         let pos = transform.translation.truncate();
 
         // The riot shield toggles, running on its charge rather than a cooldown.
-        if player.class == PirateClass::Bulwark {
+        if active == Active::RiotShield {
             let raised = riot_shields.iter().find(|(_, s)| s.owner == player.owner).map(|(e, _)| e);
             if raised.is_none() {
                 ability.charge = (ability.charge + dt * RIOT_LIFE / RIOT_RECHARGE).min(RIOT_LIFE);
@@ -571,7 +611,7 @@ fn use_abilities(
 
         // Standing by their own sentry, the Engineer packs it up instead, and
         // the time it had left comes back as a shorter cooldown.
-        if player.class == PirateClass::Engineer && controls.ability && can_act(player, health) {
+        if active == Active::Sentry && controls.ability && can_act(player, health) {
             let nearby = sentries.iter().find(|(_, s, t)| {
                 s.owner == player.owner && t.translation.truncate().distance(pos) <= SENTRY_PICKUP
             });
@@ -588,13 +628,14 @@ fn use_abilities(
         if !controls.ability || ability.cooldown > 0.0 || !can_act(player, health) {
             continue;
         }
-        match player.class {
-            PirateClass::Gunner | PirateClass::Bulwark => {}
-            PirateClass::Doctor => {
+        match active {
+            // Handled above.
+            Active::RiotShield => {}
+            Active::Ward => {
                 wards.push(pos);
                 fx(&mut commands, FxKind::Burst, pos, 0.0, MEDIC_COLOR);
             }
-            PirateClass::Engineer => {
+            Active::Sentry => {
                 // One sentry each: a new one replaces the old.
                 for (entity, sentry, _) in &sentries {
                     if sentry.owner == player.owner {
@@ -619,7 +660,7 @@ fn use_abilities(
                 ));
                 fx(&mut commands, FxKind::Burst, spot, 0.0, SENTRY_COLOR);
             }
-            PirateClass::Hacker => {
+            Active::Hack => {
                 // The guard nearest the crosshair that the Hacker can see.
                 let target = enemies
                     .iter_mut()
@@ -670,12 +711,10 @@ fn support_crew(
     grid: Res<RoomGrid>,
     mut players: Query<(&Player, &mut Health, &Transform, &mut Boons)>,
 ) {
-    let supporters: Vec<(u64, PirateClass, Vec2)> = players
+    let supporters: Vec<(u64, Passive, Vec2)> = players
         .iter()
-        .filter(|(p, h, ..)| {
-            matches!(p.class, PirateClass::Doctor | PirateClass::Bulwark | PirateClass::Gunner) && can_act(p, h)
-        })
-        .map(|(p, _, t, _)| (p.owner, p.class, t.translation.truncate()))
+        .filter(|(p, h, ..)| matches!(p.passive, Passive::Healing | Passive::Rally | Passive::Supply) && can_act(p, h))
+        .map(|(p, _, t, _)| (p.owner, p.passive, t.translation.truncate()))
         .collect();
     // Who each supporter reaches, by index into `supporters`.
     let mut reached = vec![0u8; supporters.len()];
@@ -686,16 +725,16 @@ fn support_crew(
         let mut rallied = false;
         let mut supplied = false;
         if can_act(player, &health) {
-            for (i, &(owner, class, at)) in supporters.iter().enumerate() {
+            for (i, &(owner, passive, at)) in supporters.iter().enumerate() {
                 let own = owner == player.owner;
-                // Only the Gunner's passive covers themselves too.
-                if own && class != PirateClass::Gunner {
+                // Only supply covers the Gunner themselves too.
+                if own && passive != Passive::Supply {
                     continue;
                 }
-                let radius = match class {
-                    PirateClass::Doctor => Some(HEAL_RADIUS),
-                    PirateClass::Bulwark => Some(RALLY_RADIUS),
-                    // The Gunner's reaches everyone.
+                let radius = match passive {
+                    Passive::Healing => Some(HEAL_RADIUS),
+                    Passive::Rally => Some(RALLY_RADIUS),
+                    // Supply reaches everyone.
                     _ => None,
                 };
                 if radius.is_some_and(|r| at.distance(pos) > r || !grid.line_of_sight(at, pos)) {
@@ -704,9 +743,9 @@ fn support_crew(
                 if !own {
                     reached[i] += 1;
                 }
-                match class {
-                    PirateClass::Doctor => medics += 1,
-                    PirateClass::Bulwark => rallied = true,
+                match passive {
+                    Passive::Healing => medics += 1,
+                    Passive::Rally => rallied = true,
                     _ => supplied = true,
                 }
             }
@@ -824,6 +863,7 @@ fn run_sentries(
                 pierce: false,
                 color: SENTRY_COLOR,
                 hits: Vec::new(),
+                ricochet: 0.0,
             },
             ProjectileLook::OrangePellet,
             muzzle,
@@ -956,9 +996,9 @@ fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<A
             Sprite { image: ring.clone(), color: MEDIC_COLOR, ..default() },
             Transform::from_xyz(0.0, 0.0, 0.5).with_scale(Vec3::splat(22.0 / RING_SIZE)),
         ));
-        let reach = match player.class {
-            PirateClass::Doctor => HEAL_RADIUS,
-            PirateClass::Hacker => JAM_RADIUS,
+        let reach = match player.passive {
+            Passive::Healing => HEAL_RADIUS,
+            Passive::Jamming => JAM_RADIUS,
             _ => return,
         };
         parent.spawn((
@@ -1075,7 +1115,7 @@ fn update_ability_hud(
     mut fill: Single<&mut Meter, With<AbilityFill>>,
     mut text: Single<(&mut Text, &mut TextColor), With<AbilityText>>,
 ) {
-    let stats = player.as_ref().and_then(|p| p.0.class.ability());
+    let stats = player.as_ref().and_then(|p| p.0.active).map(Active::stats);
     let display = if stats.is_some() { Display::Flex } else { Display::None };
     if panel.display != display {
         panel.display = display;
@@ -1088,8 +1128,8 @@ fn update_ability_hud(
 
     // A sentry can be destroyed early, so ask it rather than the timer.
     let sentry = sentries.iter().find(|(s, _)| s.owner == local.0);
-    let active = match player.class {
-        PirateClass::Engineer => sentry.map(|(s, _)| s.left),
+    let active = match player.active {
+        Some(Active::Sentry) => sentry.map(|(s, _)| s.left),
         _ => (ability.active > 0.0).then_some(ability.active),
     };
     let in_reach = sentry.is_some_and(|(_, t)| {
@@ -1097,7 +1137,7 @@ fn update_ability_hud(
     });
     let (text, text_color) = &mut *text;
     let dim = Color::srgba(1.0, 1.0, 1.0, 0.6);
-    let (frac, color, label, label_color) = if player.class == PirateClass::Bulwark {
+    let (frac, color, label, label_color) = if player.active == Some(Active::RiotShield) {
         // The bar is the shield's charge.
         let frac = ability.charge / RIOT_LIFE;
         if riot_shields.iter().any(|s| s.owner == local.0) {
@@ -1140,12 +1180,15 @@ mod tests {
         assert_eq!(loadout.guns.last(), Some(&GunKind::ArcCoil));
 
         let cheat = Loadout {
-            class: PirateClass::Engineer,
+            passive: Passive::Ricochet,
+            active: None,
             guns: vec![GunKind::RailLance; 3].into_iter().chain(GunKind::ALL).collect(),
+            ..Loadout::new(PirateClass::Engineer)
         };
         let fixed = cheat.sanitized();
         assert_eq!(fixed.guns, [GunKind::RailLance, GunKind::BlasterPistol, GunKind::ScatterCannon]);
-        let empty = Loadout { class: PirateClass::Gunner, guns: Vec::new() }.sanitized();
+        assert_eq!((fixed.passive, fixed.active), (Passive::Armor, Some(Active::Sentry)), "abilities must match the class");
+        let empty = Loadout { guns: Vec::new(), ..Loadout::new(PirateClass::Gunner) }.sanitized();
         assert_eq!(empty.guns, [GunKind::BlasterPistol]);
     }
 }

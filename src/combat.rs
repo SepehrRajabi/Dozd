@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::abilities::{RICOCHET_DAMAGE, RICOCHET_REACH, RICOCHET_TARGETS};
 use crate::class::{RIOT_POINTS, RIOT_THICKNESS, RiotShield};
 use crate::net::{LocalPlayer, authority};
 use crate::perks::PerkKind;
@@ -136,6 +137,8 @@ pub struct Projectile {
     pub pierce: bool,
     pub color: Color,
     pub hits: Vec<Entity>,
+    /// Odds that hitting a guard sends it bouncing on into others nearby.
+    pub ricochet: f32,
 }
 
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -429,7 +432,8 @@ fn move_projectiles(
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
-    mut projectiles: Query<(Entity, &mut Projectile, &mut Transform)>,
+    mut rng: ResMut<Rng>,
+    mut projectiles: Query<(Entity, &mut Projectile, &ProjectileLook, &mut Transform)>,
     targets: Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
     mut victims: Query<(&mut Health, Option<&mut Knockback>)>,
     riot_shields: Query<(&RiotShield, &Transform), Without<Projectile>>,
@@ -439,7 +443,7 @@ fn move_projectiles(
     let shields = shield_outlines(&riot_shields);
     let blocked = |pos: Vec2| hits_shield(&shields, pos);
 
-    'projectiles: for (entity, mut projectile, mut transform) in &mut projectiles {
+    'projectiles: for (entity, mut projectile, look, mut transform) in &mut projectiles {
         let travel = projectile.velocity * time.delta_secs();
         let steps = (travel.length() / MAX_STEP).ceil().max(1.0);
         for _ in 0..steps as u32 {
@@ -469,6 +473,9 @@ fn move_projectiles(
                 }
                 fx(&mut commands, FxKind::Spark, pos, 0.0, projectile.color);
                 projectile.hits.push(target);
+                if *team == Team::Enemy && projectile.ricochet > 0.0 && rng.unit() < projectile.ricochet {
+                    ricochet(&mut commands, &projectile, *look, target, pos, &targets, &victims, &grid);
+                }
                 if !projectile.pierce {
                     commands.entity(entity).despawn();
                     continue 'projectiles;
@@ -518,6 +525,50 @@ fn blast(
         {
             target_knockback.0 += offset.normalize_or(Vec2::X) * knockback * falloff;
         }
+    }
+}
+
+/// Sends a shot that just hit `struck` at `pos` bouncing on toward the guards
+/// nearest it, weaker, and without bouncing again.
+#[allow(clippy::too_many_arguments)]
+fn ricochet(
+    commands: &mut Commands,
+    shot: &Projectile,
+    look: ProjectileLook,
+    struck: Entity,
+    pos: Vec2,
+    targets: &Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
+    victims: &Query<(&mut Health, Option<&mut Knockback>)>,
+    grid: &RoomGrid,
+) {
+    let mut near: Vec<(f32, Vec2)> = targets
+        .iter()
+        .filter(|(e, team, ..)| *e != struck && **team == Team::Enemy && victims.get(*e).is_ok_and(|(h, _)| !h.is_dead()))
+        .map(|(_, _, _, t)| t.translation.truncate())
+        .filter(|at| at.distance(pos) <= RICOCHET_REACH && grid.line_of_sight(pos, *at))
+        .map(|at| (at.distance(pos), at))
+        .collect();
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for &(distance, at) in near.iter().take(RICOCHET_TARGETS) {
+        let dir = (at - pos).normalize_or(Vec2::X);
+        spawn_projectile(
+            commands,
+            Projectile {
+                velocity: dir * shot.velocity.length(),
+                remaining: distance + 12.0,
+                damage: shot.damage * RICOCHET_DAMAGE,
+                knockback: shot.knockback * RICOCHET_DAMAGE,
+                pierce: false,
+                hits: vec![struck],
+                ricochet: 0.0,
+                ..*shot
+            },
+            look,
+            pos,
+        );
+    }
+    if !near.is_empty() {
+        fx(commands, FxKind::Burst, pos, 0.0, shot.color);
     }
 }
 

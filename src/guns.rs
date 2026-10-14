@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::abilities::{Passive, RICOCHET_CHANCE};
 use crate::class::{Boons, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
     FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
@@ -560,6 +561,7 @@ fn fire(
 
         // A Bulwark nearby makes every shot count for more.
         let damage = stats.damage * boons.damage();
+        let ricochet = if player.passive == Passive::Ricochet { RICOCHET_CHANCE } else { 0.0 };
         let origin = transform.translation.truncate();
         let muzzle = origin + HAND + aim.dir * (HOLD_DISTANCE + BARREL);
         let aim_angle = aim.dir.to_angle();
@@ -590,6 +592,7 @@ fn fire(
                             pierce: stats.pierce,
                             color: stats.color,
                             hits: Vec::new(),
+                            ricochet,
                         },
                         stats.look,
                         muzzle,

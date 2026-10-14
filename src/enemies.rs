@@ -2,7 +2,8 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Boons, HACK_COLOR, JAM_MISS, JAM_RADIUS, PirateClass, Sentry};
+use crate::abilities::Passive;
+use crate::class::{Boons, HACK_COLOR, JAM_MISS, JAM_RADIUS, Sentry};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::drops::{EnemyDrop, spawn_drops};
 use crate::mission::Alarm;
@@ -432,6 +433,7 @@ fn enemy_shot(
             pierce: false,
             color,
             hits: Vec::new(),
+                ricochet: 0.0,
         },
         look,
         pos,
@@ -489,7 +491,7 @@ fn think(
     let jammers: Vec<(Entity, Vec2)> = victims
         .iter()
         .filter(|(_, _, health, player, ..)| {
-            !health.is_dead() && player.is_some_and(|p| p.class == PirateClass::Hacker && p.status == PirateStatus::Active)
+            !health.is_dead() && player.is_some_and(|p| p.passive == Passive::Jamming && p.status == PirateStatus::Active)
         })
         .map(|(e, t, ..)| (e, t.translation.truncate()))
         .collect();

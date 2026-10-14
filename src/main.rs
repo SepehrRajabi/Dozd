@@ -1,3 +1,4 @@
+mod abilities;
 mod class;
 mod combat;
 mod crew;

@@ -5,6 +5,7 @@ use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
+use crate::abilities::{Active, Passive};
 use crate::class::{Ability, Boons, LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
@@ -96,6 +97,9 @@ pub struct Player {
     /// `LocalId` of the machine controlling this pirate.
     pub owner: u64,
     pub class: PirateClass,
+    /// The abilities picked in their loadout.
+    pub passive: Passive,
+    pub active: Option<Active>,
     /// Join order, used for the name tag and spawn spot.
     pub slot: u8,
     /// This pirate's own haul.
@@ -191,6 +195,8 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
         Player {
             owner,
             class: loadout.class,
+            passive: loadout.passive,
+            active: loadout.active,
             slot,
             credits: 0,
             items: 0,
@@ -198,7 +204,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
             deck,
         },
         Team::Player,
-        Health::new(MAX_HEALTH, 0.5).with_shield(loadout.class.shield()),
+        Health::new(MAX_HEALTH, 0.5).with_shield(loadout.passive.shield()),
         Hurtbox(6.0),
         Walking::default(),
         Dash::default(),

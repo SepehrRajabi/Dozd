@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
+use crate::abilities::{Active, Passive};
 use crate::class::{Loadout, Loadouts, PirateClass};
 use crate::combat::{Health, Team};
 use crate::enemies::{AiState, Enemy, EnemyLook};
@@ -24,7 +25,7 @@ use crate::room::{DECKS, NextSeed};
 use crate::{GamePlugins, GameState, Rng};
 
 const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|doctor|mixed] \
-                      [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
+                      [--passive NAME] [--active NAME] [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_behind,dead,still_in,deck,decks,credits,kills,alarm,seconds";
 /// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
@@ -52,6 +53,9 @@ pub struct Config {
     pub crew: u8,
     /// Every bot's class; `None` alternates through them.
     pub class: Option<PirateClass>,
+    /// Abilities for the bots whose class has them; the rest keep their defaults.
+    pub passive: Option<Passive>,
+    pub active: Option<Active>,
     pub bot: BotKind,
     /// Game seconds before a run is called off.
     pub time_limit: f32,
@@ -75,6 +79,8 @@ impl Config {
             runs: 1,
             crew: 1,
             class: None,
+            passive: None,
+            active: None,
             bot: BotKind::Random,
             time_limit: 600.0,
             hz: 60.0,
@@ -106,6 +112,14 @@ impl Config {
                         _ => Some(PirateClass::parse(raw).ok_or_else(|| bad(raw))?),
                     };
                 }
+                "--passive" => {
+                    let raw = value()?;
+                    config.passive = Some(Passive::parse(raw).ok_or_else(|| bad(raw))?);
+                }
+                "--active" => {
+                    let raw = value()?;
+                    config.active = Some(Active::parse(raw).ok_or_else(|| bad(raw))?);
+                }
                 "--bot" => {
                     let raw = value()?;
                     config.bot = match raw.as_str() {
@@ -135,14 +149,21 @@ impl Config {
         self.seed.wrapping_add(run)
     }
 
-    /// Bot `i`'s class and guns (its class's default loadout).
+    /// Bot `i`'s class and guns (its class's default loadout), with the
+    /// abilities asked for where its class has them.
     fn loadouts(&self) -> Loadouts {
         let class = |i: usize| self.class.unwrap_or(PirateClass::ALL[i % PirateClass::ALL.len()]);
-        Loadouts(
-            (0..self.crew as usize)
-                .map(|i| (HOST_ID + i as u64, Loadout::new(class(i))))
-                .collect(),
-        )
+        let loadout = |i: usize| {
+            let mut loadout = Loadout::new(class(i));
+            if let Some(passive) = self.passive.filter(|p| p.class() == loadout.class) {
+                loadout.passive = passive;
+            }
+            if let Some(active) = self.active.filter(|a| a.class() == loadout.class) {
+                loadout.active = Some(active);
+            }
+            loadout
+        };
+        Loadouts((0..self.crew as usize).map(|i| (HOST_ID + i as u64, loadout(i))).collect())
     }
 }
 

@@ -41,24 +41,27 @@ can hand to friends.
 
 ## Pirates
 
-Pick a class and your guns under **LOADOUT** in the main menu before a raid.
-Every pirate carries 3 guns, in the order you pick them.
+Pick a class, its abilities and your guns under **LOADOUT** in the main menu
+before a raid. Each class picks one passive ability, always on, and one active
+ability on Q, from the ones it offers. Every pirate carries 3 guns, in the
+order you pick them.
 
-Class passives show as chips under your bars and on each crewmate's card,
-alongside a Doctor's ward.
+Passives show as chips under your bars and on each crewmate's card, alongside
+a Doctor's ward.
 
 Online, a crew holds at most one of each class, so up to 5 pirates. Host or
-join one under **MULTIPLAYER**. Hosting opens a lobby where everyone picks a free class and their guns, then the host
-starts the run; after each run the crew returns to the lobby. Someone joining
-mid-run picks from the classes still free.
+join one under **MULTIPLAYER**. Hosting opens a lobby where everyone picks a
+free class, their abilities and their guns, then the host starts the run;
+after each run the crew returns to the lobby. Someone joining mid-run picks
+from the classes still free.
 
-| Class | Ability |
-| --- | --- |
-| Gunner | They and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. Carries a 4th gun |
-| Engineer | Wears heavier armour: 80% more shield. Q drops a sentry gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
-| Bulwark | Crewmates within reach deal 25% more damage. Q raises or lowers a riot shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
-| Hacker | Guards within reach are jammed: 35% of their shots go wide and their blows whiff. Q turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
-| Doctor | Slowly heals crewmates within reach; Q wards them and the Doctor against all harm for 4 s (28 s cooldown) |
+| Class | Passives | Actives (Q) |
+| --- | --- | --- |
+| Gunner | **Supply:** they and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. **Ricochet:** a bullet that hits a guard has a 30% chance to bounce on into the 2 guards nearest it, for 60% of its damage | None: carries a 4th gun instead |
+| Engineer | **Armour:** 80% more shield | **Sentry gun:** drops a gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
+| Bulwark | **Rally:** crewmates within reach deal 25% more damage | **Riot shield:** raises or lowers a shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
+| Hacker | **Jamming:** guards within reach are jammed: 35% of their shots go wide and their blows whiff | **Hack:** turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |
+| Doctor | **Field medic:** slowly heals crewmates within reach | **Ward:** wards crewmates nearby and the Doctor against all harm for 4 s (28 s cooldown) |
 
 ## Controls
 
@@ -85,7 +88,8 @@ cargo run --release -- headless --seed 1 --runs 20
 ```
 
 Options: `--seed N`, `--runs N`, `--crew 1-8`,
-`--class gunner|engineer|bulwark|hacker|doctor|mixed` (bots' class; mixed rotates), `--bot random|idle`,
+`--class gunner|engineer|bulwark|hacker|doctor|mixed` (bots' class; mixed rotates),
+`--passive NAME` and `--active NAME` (e.g. `ricochet`, `riotshield`; for the bots whose class has it), `--bot random|idle`,
 `--time SECS` (per-run limit), `--hz N` (steps per game second).
 
 ## Development

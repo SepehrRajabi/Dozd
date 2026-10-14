@@ -5,6 +5,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
+use crate::abilities::{Active, Passive};
 use crate::class::{LocalLoadout, Loadout, PirateClass};
 use crate::guns::GunKind;
 use crate::crew::Roster;
@@ -75,7 +76,7 @@ impl Plugin for MenuPlugin {
                     button_styles,
                     button_actions,
                     update_status,
-                    (choice_actions, style_choices, update_slot_count).chain(),
+                    (choice_actions, style_choices, show_ability_choices, update_slot_count).chain(),
                 )
                     .run_if(in_state(GameState::Menu).or_else(in_state(GameState::Lobby))),
             )
@@ -192,8 +193,14 @@ struct Backdrop {
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum Choice {
     Class(PirateClass),
+    Passive(Passive),
+    Active(Active),
     Gun(GunKind),
 }
+
+/// Stands in for the active abilities when the class has none.
+#[derive(Component)]
+struct NoActive;
 
 /// Under a class card in the lobby: who has the class, if anyone.
 #[derive(Component)]
@@ -557,6 +564,40 @@ fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
         }
     });
 
+    // The picks of passive and active ability; only the chosen class's show.
+    parent
+        .spawn(Node {
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            let ability = |choice: Choice, name: &'static str, details: &'static str, color: Color| {
+                (
+                    Button,
+                    choice,
+                    Node {
+                        align_items: AlignItems::FlexStart,
+                        padding: UiRect::horizontal(Val::Px(10.0)),
+                        ..card(236.0, 50.0, FlexDirection::Column)
+                    },
+                    BackgroundColor(BUTTON),
+                    BorderColor::all(GOLD_FAINT),
+                    children![label(name, 15.0, color), label(details, 12.0, TEXT)],
+                )
+            };
+            row.spawn(label("PASSIVE", 13.0, DIM));
+            for passive in Passive::ALL {
+                row.spawn(ability(Choice::Passive(passive), passive.name(), passive.details(), passive.class().color()));
+            }
+            row.spawn(Node { width: Val::Px(14.0), ..default() });
+            row.spawn(label("ACTIVE", 13.0, DIM));
+            for active in Active::ALL {
+                row.spawn(ability(Choice::Active(active), active.name(), active.details(), active.class().color()));
+            }
+            row.spawn((NoActive, label("NONE: a 4th gun instead", 13.0, DIM)));
+        });
+
     parent.spawn((SlotCount, label("", 15.0, DIM)));
     // Four guns to a line.
     parent.spawn(Node { max_width: Val::Px(1160.0), ..row(10.0) }).with_children(|guns| {
@@ -876,6 +917,14 @@ fn choice_actions(
                 loadout.set_class(class);
                 None
             }
+            Choice::Passive(passive) => {
+                loadout.passive = passive;
+                None
+            }
+            Choice::Active(active) => {
+                loadout.active = Some(active);
+                None
+            }
             Choice::Gun(gun) if loadout.guns == [gun] => Some("Take at least one gun".into()),
             Choice::Gun(gun) if !loadout.toggle(gun) => Some(format!(
                 "All {} slots are full. Click an equipped gun to drop it first.",
@@ -920,6 +969,8 @@ fn style_choices(
     for (interaction, choice, mut background, mut border) in &mut cards {
         let chosen = match *choice {
             Choice::Class(class) => loadout.class == class && taken_by(class).is_none(),
+            Choice::Passive(passive) => loadout.passive == passive,
+            Choice::Active(active) => loadout.active == Some(active),
             Choice::Gun(gun) => loadout.guns.contains(&gun),
         };
         let taken = matches!(*choice, Choice::Class(class) if taken_by(class).is_some());
@@ -947,6 +998,32 @@ fn update_setting_values(settings: Res<Settings>, mut values: Query<(&SettingVal
         let content = value.0.value(&settings);
         if text.0 != content {
             text.0 = content;
+        }
+    }
+}
+
+/// Shows only the abilities the chosen class can pick from.
+fn show_ability_choices(
+    loadout: Res<LocalLoadout>,
+    mut choices: Query<(&Choice, &mut Node), Without<NoActive>>,
+    mut none: Query<&mut Node, With<NoActive>>,
+) {
+    let class = loadout.0.class;
+    for (choice, mut node) in &mut choices {
+        let shown = match *choice {
+            Choice::Passive(passive) => passive.class() == class,
+            Choice::Active(active) => active.class() == class,
+            _ => continue,
+        };
+        let display = if shown { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    let display = if class.actives().next().is_none() { Display::Flex } else { Display::None };
+    for mut node in &mut none {
+        if node.display != display {
+            node.display = display;
         }
     }
 }

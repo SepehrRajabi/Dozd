@@ -11,7 +11,7 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::GameState;
-use crate::class::{Boons, LocalLoadout, Loadout, Loadouts, PirateClass, effects};
+use crate::class::{Boons, LocalLoadout, Loadouts, PirateClass, effects};
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::MissionStatus;
@@ -326,7 +326,7 @@ fn update_crew_panel(
             meter.color = if frac < 0.35 { HULL_LOW } else { HULL_COLOR };
         }
         set_text(&mut chips.2, row.credits, &format!("{} cr", player.credits), hud::GOLD);
-        hud::show_chips(&mut chips, row.effects, &effects(player.class, health, boons));
+        hud::show_chips(&mut chips, row.effects, &effects(player.passive, health, boons));
     }
 }
 
@@ -343,7 +343,7 @@ fn update_local_effects(
     row: Single<Entity, With<LocalEffects>>,
     mut chips: hud::ChipParts,
 ) {
-    let list = player.map_or_else(Vec::new, |p| effects(p.0.class, p.1, p.2));
+    let list = player.map_or_else(Vec::new, |p| effects(p.0.passive, p.1, p.2));
     hud::show_chips(&mut chips, *row, &list);
 }
 
@@ -514,7 +514,8 @@ fn update_class_picker(
 
         if free && *interaction == Interaction::Pressed && picked.0 != Some(class) {
             picked.0 = Some(class);
-            let choice = Loadout { class, guns: loadout.0.guns.clone() }.sanitized();
+            let mut choice = loadout.0.clone();
+            choice.set_class(class);
             messages.write(ChooseLoadout(choice));
         }
     }
