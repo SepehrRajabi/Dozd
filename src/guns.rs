@@ -233,7 +233,7 @@ const GRENADE_LAUNCHER: GunStats = GunStats {
 
 const NOVA_CANNON: GunStats = GunStats {
     name: "Nova Cannon",
-    role: "hold to charge, burns cells",
+    role: "charged, burns cells",
     mode: FireMode::Charge {
         cell_time: 0.4,
         radius: 44.0,

@@ -21,9 +21,11 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | ![Main menu](docs/screenshots/menu.png) | ![Loadout](docs/screenshots/loadout.png) |
 | The main menu | Picking a class and guns |
 | ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
-| The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck |
+| The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
 | A Bulwark and a Doctor against a Herald's empowered guards, with each other's status in the crew panel | A crew that didn't make it out |
+| ![Enemies](docs/screenshots/enemies.png) | |
+| The station's guards, under **EXTRAS** in the main menu | |
 
 ## Run
 
@@ -45,8 +47,8 @@ Every pirate carries 3 guns, in the order you pick them.
 Class passives show as chips under your bars and on each crewmate's card,
 alongside a Doctor's ward.
 
-Online, a crew holds at most one of each class, so up to 5 pirates. Hosting
-opens a lobby where everyone picks a free class and their guns, then the host
+Online, a crew holds at most one of each class, so up to 5 pirates. Host or
+join one under **MULTIPLAYER**. Hosting opens a lobby where everyone picks a free class and their guns, then the host
 starts the run; after each run the crew returns to the lobby. Someone joining
 mid-run picks from the classes still free.
 

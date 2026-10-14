@@ -187,6 +187,52 @@ impl EnemyKind {
             Self::Herald => &HERALD,
         }
     }
+
+    pub const ALL: [EnemyKind; 5] = [Self::SentryDrone, Self::Stalker, Self::Warden, Self::Brute, Self::Herald];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SentryDrone => "SENTRY DRONE",
+            Self::Stalker => "STALKER",
+            Self::Warden => "WARDEN",
+            Self::Brute => "BRUTE",
+            Self::Herald => "HERALD",
+        }
+    }
+
+    /// How it fights, in a word, for the enemies screen.
+    pub fn role(self) -> &'static str {
+        match self {
+            Self::SentryDrone => "RANGED",
+            Self::Stalker | Self::Brute => "MELEE",
+            Self::Warden => "HEAVY",
+            Self::Herald => "SUPPORT",
+        }
+    }
+
+    /// What to expect from it, for the enemies screen.
+    pub fn details(self) -> &'static str {
+        match self {
+            Self::SentryDrone => "Hovers at mid range, strafing, and fires three-round bursts.",
+            Self::Stalker => "Fast alien. Winds up, then lunges: sidestep it.",
+            Self::Warden => "Slow armoured tank. Holds its ground and fires wide spreads.",
+            Self::Brute => "Hulking bruiser. Plods after you and punches hard up close.",
+            Self::Herald => "Rallies on sight: a war cry that empowers guards nearby for good, or alone, a frenzy. Stun it to stop it.",
+        }
+    }
+
+    pub fn sprite(self) -> &'static str {
+        self.stats().sprite
+    }
+
+    pub fn health(self) -> f32 {
+        self.stats().health
+    }
+
+    /// Its colour when it goes down, to tint its card.
+    pub fn color(self) -> Color {
+        self.stats().death_color
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]

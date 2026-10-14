@@ -8,6 +8,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use crate::class::{LocalLoadout, Loadout, PirateClass};
 use crate::guns::GunKind;
 use crate::crew::Roster;
+use crate::enemies::EnemyKind;
 use crate::net::{
     ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, local_ip, parse_port,
     resolve,
@@ -46,6 +47,9 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(GameState::Lobby), (lobby_screen, show_cursor))
             .add_systems(OnExit(GameState::Lobby), hide_cursor)
             .add_systems(OnEnter(MenuScreen::Main), main_screen)
+            .add_systems(OnEnter(MenuScreen::Multiplayer), multiplayer_screen)
+            .add_systems(OnEnter(MenuScreen::Extras), extras_screen)
+            .add_systems(OnEnter(MenuScreen::Enemies), enemies_screen)
             .add_systems(OnEnter(MenuScreen::Host), host_screen)
             .add_systems(OnEnter(MenuScreen::Join), join_screen)
             .add_systems(OnEnter(MenuScreen::Loadout), loadout_screen)
@@ -92,20 +96,39 @@ impl Plugin for MenuPlugin {
 enum MenuScreen {
     #[default]
     Main,
+    /// Host or join.
+    Multiplayer,
     Host,
     Join,
     Loadout,
+    /// Perks and enemies.
+    Extras,
     Perks,
+    Enemies,
     Settings,
+}
+
+impl MenuScreen {
+    /// Where BACK leads from here.
+    fn parent(self) -> Self {
+        match self {
+            Self::Host | Self::Join => Self::Multiplayer,
+            Self::Perks | Self::Enemies => Self::Extras,
+            _ => Self::Main,
+        }
+    }
 }
 
 #[derive(Component, Event, Clone, Copy, PartialEq, Eq, Debug)]
 enum MenuCommand {
     Solo,
+    OpenMultiplayer,
     OpenHost,
     OpenJoin,
     OpenLoadout,
+    OpenExtras,
     OpenPerks,
+    OpenEnemies,
     OpenSettings,
     Toggle(Setting),
     Quit,
@@ -351,10 +374,9 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
     let loadout_label = format!("LOADOUT: {}", loadout.0.class.name());
     commands.entity(root).with_children(|parent| {
         parent.spawn(button("SOLO RAID", MenuCommand::Solo));
-        parent.spawn(button("HOST A CREW", MenuCommand::OpenHost));
-        parent.spawn(button("JOIN A CREW", MenuCommand::OpenJoin));
+        parent.spawn(button("MULTIPLAYER", MenuCommand::OpenMultiplayer));
         parent.spawn(button(&loadout_label, MenuCommand::OpenLoadout));
-        parent.spawn(button("PERKS", MenuCommand::OpenPerks));
+        parent.spawn(button("EXTRAS", MenuCommand::OpenExtras));
         parent.spawn(button("SETTINGS", MenuCommand::OpenSettings));
         parent.spawn(button("QUIT", MenuCommand::Quit));
         parent.spawn(status_line());
@@ -373,6 +395,26 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
             ..default()
         },
     ));
+}
+
+fn multiplayer_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    let root = screen_root(&mut commands, &assets, MenuScreen::Multiplayer);
+    commands.entity(root).with_children(|parent| {
+        parent.spawn(label("MULTIPLAYER", 24.0, GOLD));
+        parent.spawn(button("HOST A CREW", MenuCommand::OpenHost));
+        parent.spawn(button("JOIN A CREW", MenuCommand::OpenJoin));
+        parent.spawn(button("BACK", MenuCommand::Back));
+    });
+}
+
+fn extras_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    let root = screen_root(&mut commands, &assets, MenuScreen::Extras);
+    commands.entity(root).with_children(|parent| {
+        parent.spawn(label("EXTRAS", 24.0, GOLD));
+        parent.spawn(button("PERKS", MenuCommand::OpenPerks));
+        parent.spawn(button("ENEMIES", MenuCommand::OpenEnemies));
+        parent.spawn(button("BACK", MenuCommand::Back));
+    });
 }
 
 fn settings_screen(mut commands: Commands, assets: Res<AssetServer>, settings: Res<Settings>) {
@@ -559,10 +601,68 @@ fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
 
 }
 
+/// One card on the perks or enemies screen.
+struct Entry {
+    sprite: &'static str,
+    name: &'static str,
+    /// A word on what kind of thing it is, beside the name.
+    tag: &'static str,
+    /// A figure worth knowing: how long a perk lasts, a guard's health.
+    note: String,
+    details: &'static str,
+    color: Color,
+}
+
 fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    let entries = PerkKind::ALL.map(|perk| Entry {
+        sprite: perk.sprite(),
+        name: perk.name(),
+        tag: perk.category(),
+        note: perk.duration().map_or("INSTANT".into(), |secs| format!("{secs:.0}s")),
+        details: perk.details(),
+        color: perk.color(),
+    });
+    codex_screen(
+        &mut commands,
+        &assets,
+        MenuScreen::Perks,
+        "PERKS",
+        "Found lying around each deck. Walk over one to use it.",
+        &entries,
+    );
+}
+
+fn enemies_screen(mut commands: Commands, assets: Res<AssetServer>) {
+    let entries = EnemyKind::ALL.map(|kind| Entry {
+        sprite: kind.sprite(),
+        name: kind.name(),
+        tag: kind.role(),
+        note: format!("{:.0} HP", kind.health()),
+        details: kind.details(),
+        color: kind.color(),
+    });
+    codex_screen(
+        &mut commands,
+        &assets,
+        MenuScreen::Enemies,
+        "ENEMIES",
+        "The station's security, and what it throws at you.",
+        &entries,
+    );
+}
+
+/// A full-screen grid of cards, each a picture beside its name and what it does.
+fn codex_screen(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    screen: MenuScreen,
+    title: &str,
+    subtitle: &str,
+    entries: &[Entry],
+) {
     commands
         .spawn((
-            DespawnOnExit(MenuScreen::Perks),
+            DespawnOnExit(screen),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -574,12 +674,8 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
             },
         ))
         .with_children(|parent| {
-            parent.spawn(label("PERKS", 28.0, GOLD));
-            parent.spawn(label(
-                "Found lying around each deck. Walk over one to use it.",
-                15.0,
-                DIM,
-            ));
+            parent.spawn(label(title, 28.0, GOLD));
+            parent.spawn(label(subtitle, 15.0, DIM));
             parent
                 .spawn(Node {
                     column_gap: Val::Px(16.0),
@@ -590,8 +686,7 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
                     ..default()
                 })
                 .with_children(|grid| {
-                    for perk in PerkKind::ALL {
-                        let duration = perk.duration().map_or("INSTANT".into(), |secs| format!("{secs:.0}s"));
+                    for entry in entries {
                         grid.spawn((
                             Node {
                                 width: Val::Px(420.0),
@@ -603,11 +698,11 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
                                 ..default()
                             },
                             BackgroundColor(BUTTON),
-                            BorderColor::all(perk.color().with_alpha(0.5)),
+                            BorderColor::all(entry.color.with_alpha(0.5)),
                         ))
                         .with_children(|card| {
                             card.spawn((
-                                ImageNode::new(assets.load(perk.sprite())),
+                                ImageNode::new(assets.load(entry.sprite)),
                                 Node {
                                     width: Val::Px(64.0),
                                     height: Val::Px(64.0),
@@ -627,12 +722,12 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
                                     align_items: AlignItems::Baseline,
                                     ..default()
                                 })
-                                .with_children(|title| {
-                                    title.spawn(label(perk.name(), 20.0, perk.color()));
-                                    title.spawn(label(perk.category(), 12.0, DIM));
-                                    title.spawn(label(duration, 14.0, TEXT));
+                                .with_children(|heading| {
+                                    heading.spawn(label(entry.name, 20.0, entry.color));
+                                    heading.spawn(label(entry.tag, 12.0, DIM));
+                                    heading.spawn(label(entry.note.clone(), 14.0, TEXT));
                                 });
-                                info.spawn(label(perk.details(), 14.0, TEXT));
+                                info.spawn(label(entry.details, 14.0, TEXT));
                             });
                         });
                     }
@@ -677,6 +772,7 @@ fn run_menu_command(
     mut memory: ResMut<MenuMemory>,
     mut notice: ResMut<Notice>,
     fields: Query<&TextField>,
+    current: Res<State<MenuScreen>>,
     mut screen: ResMut<NextState<MenuScreen>>,
     mut settings: ResMut<Settings>,
     mut exit: MessageWriter<AppExit>,
@@ -700,7 +796,10 @@ fn run_menu_command(
             notice.0 = None;
             screen.set(MenuScreen::Loadout);
         }
+        MenuCommand::OpenMultiplayer => screen.set(MenuScreen::Multiplayer),
+        MenuCommand::OpenExtras => screen.set(MenuScreen::Extras),
         MenuCommand::OpenPerks => screen.set(MenuScreen::Perks),
+        MenuCommand::OpenEnemies => screen.set(MenuScreen::Enemies),
         MenuCommand::OpenSettings => screen.set(MenuScreen::Settings),
         MenuCommand::Toggle(setting) => {
             match setting {
@@ -742,7 +841,7 @@ fn run_menu_command(
                 commands.trigger(EndSession(None));
             } else {
                 notice.0 = None;
-                screen.set(MenuScreen::Main);
+                screen.set(current.get().parent());
             }
         }
     }
@@ -1029,9 +1128,9 @@ fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>, loadout: Res
     commands.entity(gun).insert(BackdropPirate::Gun);
 }
 
-/// The loadout and perks screens fill the window, so the backdrop would only clutter them.
+/// The loadout, perks and enemies screens fill the window, so the backdrop would only clutter them.
 fn hide_backdrop(screen: Res<State<MenuScreen>>, mut sprites: Query<&mut Visibility, With<Backdrop>>) {
-    let full = matches!(screen.get(), MenuScreen::Loadout | MenuScreen::Perks);
+    let full = matches!(screen.get(), MenuScreen::Loadout | MenuScreen::Perks | MenuScreen::Enemies);
     let visibility = if full { Visibility::Hidden } else { Visibility::Inherited };
     for mut v in &mut sprites {
         v.set_if_neq(visibility);
