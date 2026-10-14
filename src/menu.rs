@@ -516,7 +516,8 @@ fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
     });
 
     parent.spawn((SlotCount, label("", 15.0, DIM)));
-    parent.spawn(row(10.0)).with_children(|guns| {
+    // Four guns to a line.
+    parent.spawn(Node { max_width: Val::Px(1160.0), ..row(10.0) }).with_children(|guns| {
         for gun in GunKind::ALL {
             let stats = gun.stats();
             guns.spawn((

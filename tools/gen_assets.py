@@ -409,6 +409,19 @@ GUNS = {
         ],
         {**GUN_METAL, "A": rgb(150, 190, 70)},
     ),
+    "nova_cannon": (
+        [
+            "..kkkkkkkk......",
+            ".kSSSSSSSSkkkkk.",
+            "kkSAAAAAASSSSSSk",
+            "ksSAwwwwAsssssAk",
+            "ksSAAAAAASSSSSSk",
+            "kSkkkkkkkkkkkkk.",
+            "kSk.kggk........",
+            "kkk.kkkk........",
+        ],
+        {**GUN_METAL, "A": rgb(110, 255, 90), "w": rgb(225, 255, 210)},
+    ),
 }
 
 
@@ -576,6 +589,7 @@ PROJECTILES = {
     "rail_purple": bolt(16, 3, rgb(190, 100, 255)),
     "enemy_bolt": bolt(5, 3, rgb(255, 70, 60)),
     "enemy_orb": bolt(4, 4, rgb(255, 130, 40)),
+    "nova_orb": bolt(9, 9, rgb(110, 255, 90)),
     "grenade": [
         [(0, 0, 0, 0), OUTLINE, OUTLINE, OUTLINE, (0, 0, 0, 0)],
         [OUTLINE, rgb(120, 150, 60), rgb(150, 190, 70), rgb(120, 150, 60), OUTLINE],

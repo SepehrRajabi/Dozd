@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::class::{Boons, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
-    FxKind, Grenade, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_grenade,
-    spawn_projectile,
+    FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
+    spawn_nova, spawn_projectile,
 };
 use crate::enemies::Enemy;
 use crate::hud::{self, HudSlot, Meter};
@@ -40,7 +40,7 @@ pub struct GunsViewPlugin;
 impl Plugin for GunsViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_crosshair, spawn_weapon_hud))
-            .add_systems(Update, ((equip_held_gun, aim_held_guns).chain(), update_weapon_hud));
+            .add_systems(Update, ((equip_held_gun, aim_held_guns, draw_charge_glows).chain(), update_weapon_hud));
     }
 }
 
@@ -52,6 +52,7 @@ pub enum GunKind {
     RailLance,
     ArcCoil,
     GrenadeLauncher,
+    NovaCannon,
 }
 
 /// How a gun turns a trigger pull into damage.
@@ -65,6 +66,11 @@ enum FireMode {
     /// A burst of grenades lobbed toward the aim point (at most `range` away),
     /// each landing within `scatter` of it and exploding in `radius`.
     Lob { burst: u32, gap: f32, radius: f32, scatter: f32 },
+    /// Held to charge, one cell of the magazine every `cell_time`, and loosed
+    /// on release as a slow orb. The orb's burst (`damage` at full charge,
+    /// within `radius`) and the arcs it lashes passing guards with, up to
+    /// `arc_reach` away, scale with the cells it burned.
+    Charge { cell_time: f32, radius: f32, arc_damage: f32, arc_reach: f32 },
 }
 
 pub struct GunStats {
@@ -225,14 +231,42 @@ const GRENADE_LAUNCHER: GunStats = GunStats {
     reload_time: 2.2,
 };
 
+const NOVA_CANNON: GunStats = GunStats {
+    name: "Nova Cannon",
+    role: "hold to charge, burns cells",
+    mode: FireMode::Charge {
+        cell_time: 0.4,
+        radius: 44.0,
+        arc_damage: 14.0,
+        arc_reach: 60.0,
+    },
+    sprite: "sprites/guns/nova_cannon.png",
+    look: ProjectileLook::NovaOrb,
+    color: Color::srgb(0.45, 1.0, 0.35),
+    cooldown: 0.8,
+    automatic: false,
+    pellets: 1,
+    spread: 0.0,
+    // The orb's crawl, in pixels per second.
+    speed: 120.0,
+    range: 260.0,
+    damage: 200.0,
+    knockback: 220.0,
+    pierce: false,
+    magazine: 4,
+    reserve: Some(8),
+    reload_time: 2.6,
+};
+
 impl GunKind {
-    pub const ALL: [GunKind; 6] = [
+    pub const ALL: [GunKind; 7] = [
         Self::BlasterPistol,
         Self::ScatterCannon,
         Self::PulseRifle,
         Self::RailLance,
         Self::ArcCoil,
         Self::GrenadeLauncher,
+        Self::NovaCannon,
     ];
 
     pub fn stats(self) -> &'static GunStats {
@@ -243,6 +277,7 @@ impl GunKind {
             Self::RailLance => &RAIL_LANCE,
             Self::ArcCoil => &ARC_COIL,
             Self::GrenadeLauncher => &GRENADE_LAUNCHER,
+            Self::NovaCannon => &NOVA_CANNON,
         }
     }
 
@@ -255,6 +290,7 @@ impl GunKind {
             Self::RailLance => 5.0,
             Self::ArcCoil => 1.0,
             Self::GrenadeLauncher => 3.5,
+            Self::NovaCannon => 6.0,
         }
     }
 }
@@ -280,6 +316,8 @@ pub struct Arsenal {
     /// Shots still to come from the current burst, and the time until the next.
     burst_left: u32,
     burst_timer: f32,
+    /// Seconds a charging gun's trigger has been held.
+    charge: f32,
 }
 
 impl Arsenal {
@@ -299,6 +337,7 @@ impl Arsenal {
             shots: 0,
             burst_left: 0,
             burst_timer: 0.0,
+            charge: 0.0,
         }
     }
 
@@ -336,8 +375,20 @@ impl Arsenal {
             self.current = index;
             self.reloading = None;
             self.burst_left = 0;
+            self.charge = 0.0;
             self.cooldown = 0.15;
         }
+    }
+
+    /// For a charging gun: how much of a full charge is built up, and the cells
+    /// it would burn if loosed now (at least one).
+    pub fn charged(&self) -> Option<(f32, u32)> {
+        let FireMode::Charge { cell_time, .. } = self.gun().kind.stats().mode else { return None };
+        let magazine = self.gun().kind.stats().magazine;
+        (self.charge > 0.0).then(|| {
+            let cells = ((self.charge / cell_time).ceil() as u32).clamp(1, magazine);
+            (self.charge / (cell_time * magazine as f32), cells)
+        })
     }
 
     fn start_reload(&mut self) {
@@ -357,6 +408,10 @@ struct HeldGun {
     /// `Arsenal::shots` last frame; a change triggers recoil for any pirate.
     last_shots: u32,
 }
+
+/// The orb swelling at the muzzle of a charging gun.
+#[derive(Component)]
+struct ChargeGlow;
 
 #[derive(Component)]
 struct Crosshair;
@@ -460,11 +515,32 @@ fn fire(
         let shielding = riot_shields.iter().any(|s| s.owner == player.owner);
         if !can_act(player, health) || shielding {
             arsenal.burst_left = 0;
+            arsenal.charge = 0.0;
             continue;
         }
 
         let stats = arsenal.gun().kind.stats();
-        if arsenal.burst_left > 0 {
+        let infinite = perks.has(PerkKind::Overdrive);
+        // Rounds the shot burns: one, or a charging gun's cells.
+        let mut cells = 1;
+        if let FireMode::Charge { cell_time, .. } = stats.mode {
+            // Can't charge past what's in the magazine.
+            let loaded = if infinite { stats.magazine } else { arsenal.gun().ammo };
+            if arsenal.reloading.is_some() || loaded == 0 {
+                arsenal.charge = 0.0;
+                if loaded == 0 && controls.fire_pressed {
+                    arsenal.start_reload();
+                }
+                continue;
+            }
+            if controls.fire && arsenal.cooldown <= 0.0 {
+                arsenal.charge = (arsenal.charge + dt).min(cell_time * loaded as f32);
+                continue;
+            }
+            let Some((_, charged)) = arsenal.charged() else { continue };
+            cells = charged.min(loaded);
+            arsenal.charge = 0.0;
+        } else if arsenal.burst_left > 0 {
             // The rest of a burst fires on its own.
             arsenal.burst_timer -= dt;
             if arsenal.burst_timer > 0.0 {
@@ -476,7 +552,6 @@ fn fire(
                 continue;
             }
         }
-        let infinite = perks.has(PerkKind::Overdrive);
         if arsenal.gun().ammo == 0 && !infinite {
             arsenal.burst_left = 0;
             arsenal.start_reload();
@@ -578,13 +653,37 @@ fn fire(
                 );
                 fx(&mut commands, FxKind::MuzzleFlash, muzzle, aim_angle, stats.color);
             }
+
+            FireMode::Charge { radius, arc_damage, arc_reach, .. } => {
+                // Everything scales with the share of the magazine it burns.
+                let power = cells as f32 / stats.magazine as f32;
+                spawn_nova(
+                    &mut commands,
+                    NovaOrb {
+                        velocity: aim.dir * stats.speed,
+                        remaining: stats.range,
+                        damage: damage * power,
+                        radius: radius * (0.5 + 0.5 * power),
+                        knockback: stats.knockback * power,
+                        arc_damage: arc_damage * boons.damage(),
+                        arc_reach: arc_reach * (0.5 + 0.5 * power),
+                        arc_timer: 0.0,
+                        color: stats.color,
+                    },
+                    muzzle,
+                    0.5 + 0.5 * power,
+                );
+                fx(&mut commands, FxKind::MuzzleFlash, muzzle, aim_angle, stats.color);
+            }
         }
 
         let current = arsenal.current;
-        // A Gunner in the crew sometimes spares the round.
-        let spared = boons.supplied && rng.unit() < SUPPLY_CHANCE;
-        if !infinite && !spared {
-            arsenal.guns[current].ammo -= 1;
+        // A Gunner in the crew sometimes spares a round.
+        let spent = (0..cells)
+            .filter(|_| !(boons.supplied && rng.unit() < SUPPLY_CHANCE))
+            .count() as u32;
+        if !infinite {
+            arsenal.guns[current].ammo -= spent;
         }
         arsenal.shots = arsenal.shots.wrapping_add(1);
         arsenal.cooldown = stats.cooldown;
@@ -615,13 +714,44 @@ fn landing_spot(grid: &RoomGrid, from: Vec2, to: Vec2) -> Vec2 {
     last
 }
 
-fn equip_held_gun(mut commands: Commands, new: Query<Entity, Added<Arsenal>>) {
+fn equip_held_gun(mut commands: Commands, assets: Res<AssetServer>, new: Query<Entity, Added<Arsenal>>) {
     for entity in &new {
         commands.entity(entity).with_child((
             HeldGun { kind: None, kick: 0.0, last_shots: 0 },
             Sprite::default(),
             Transform::default(),
+            children![(
+                ChargeGlow,
+                Sprite::from_image(assets.load(ProjectileLook::NovaOrb.sprite())),
+                Transform::from_xyz(BARREL, 0.0, 0.1),
+                Visibility::Hidden,
+            )],
         ));
+    }
+}
+
+/// Grows the orb at a charging gun's muzzle with the charge, throbbing once full.
+fn draw_charge_glows(
+    time: Res<Time>,
+    players: Query<&Arsenal>,
+    held: Query<&ChildOf, With<HeldGun>>,
+    mut glows: Query<(&ChildOf, &mut Visibility, &mut Transform, &mut Sprite), With<ChargeGlow>>,
+) {
+    let t = time.elapsed_secs();
+    for (parent, mut visibility, mut transform, mut sprite) in &mut glows {
+        let charged = held
+            .get(parent.parent())
+            .ok()
+            .and_then(|gun| players.get(gun.parent()).ok())
+            .and_then(Arsenal::charged);
+        let Some((frac, _)) = charged else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let throb = if frac >= 1.0 { 0.12 * (t * 14.0).sin() } else { 0.05 * (t * 9.0).sin() };
+        transform.scale = Vec3::splat(0.25 + 0.6 * frac + throb);
+        sprite.color = Color::WHITE.with_alpha(0.6 + 0.4 * frac);
     }
 }
 
@@ -782,23 +912,28 @@ fn update_weapon_hud(
 
     let (mut ammo_text, mut ammo_color) = ammo.into_inner();
     let red = Color::srgb(1.0, 0.35, 0.35);
-    let (big, small, color, frac, bar) = match arsenal.reloading {
-        _ if shielding => ("SHIELD UP".into(), String::new(), RIOT_COLOR, 1.0, RIOT_COLOR),
-        _ if perks.has(PerkKind::Overdrive) => {
-            let color = PerkKind::Overdrive.color();
-            ("INFINITE".into(), String::new(), color, 1.0, color)
-        }
-        Some(left) => {
-            let amber = Color::srgb(1.0, 0.8, 0.3);
-            ("RELOADING".into(), format!("{left:.1}s"), amber, 1.0 - left / stats.reload_time, amber)
-        }
-        None if gun.ammo == 0 && gun.spare == Some(0) => ("EMPTY".into(), "no spare ammo".into(), red, 0.0, red),
-        None => {
-            let spare = gun.spare.map_or("/ INF".to_string(), |s| format!("/ {s}"));
-            let frac = gun.ammo as f32 / stats.magazine as f32;
-            let color = if gun.ammo == 0 { red } else { Color::WHITE };
-            let bar = if frac <= 0.25 { red } else { Color::srgba(1.0, 1.0, 1.0, 0.85) };
-            (gun.ammo.to_string(), spare, color, frac, bar)
+    let (big, small, color, frac, bar) = if let (false, Some((frac, cells))) = (shielding, arsenal.charged()) {
+        let label = if frac >= 1.0 { "FULL CHARGE" } else { "CHARGING" };
+        (format!("{cells} / {}", stats.magazine), label.into(), stats.color, frac, stats.color)
+    } else {
+        match arsenal.reloading {
+            _ if shielding => ("SHIELD UP".into(), String::new(), RIOT_COLOR, 1.0, RIOT_COLOR),
+            _ if perks.has(PerkKind::Overdrive) => {
+                let color = PerkKind::Overdrive.color();
+                ("INFINITE".into(), String::new(), color, 1.0, color)
+            }
+            Some(left) => {
+                let amber = Color::srgb(1.0, 0.8, 0.3);
+                ("RELOADING".into(), format!("{left:.1}s"), amber, 1.0 - left / stats.reload_time, amber)
+            }
+            None if gun.ammo == 0 && gun.spare == Some(0) => ("EMPTY".into(), "no spare ammo".into(), red, 0.0, red),
+            None => {
+                let spare = gun.spare.map_or("/ INF".to_string(), |s| format!("/ {s}"));
+                let frac = gun.ammo as f32 / stats.magazine as f32;
+                let color = if gun.ammo == 0 { red } else { Color::WHITE };
+                let bar = if frac <= 0.25 { red } else { Color::srgba(1.0, 1.0, 1.0, 0.85) };
+                (gun.ammo.to_string(), spare, color, frac, bar)
+            }
         }
     };
     ammo_text.set_if_neq(Text(big));

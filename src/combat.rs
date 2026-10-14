@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{RIOT_THICKNESS, RiotShield};
+use crate::class::{RIOT_POINTS, RIOT_THICKNESS, RiotShield};
 use crate::net::{LocalPlayer, authority};
 use crate::perks::PerkKind;
 use crate::room::RoomGrid;
@@ -16,7 +16,7 @@ impl Plugin for CombatPlugin {
             .add_systems(OnEnter(GameState::Playing), reset_noise)
             .add_systems(
                 Update,
-                (tick_health, move_projectiles, move_grenades)
+                (tick_health, move_projectiles, move_grenades, move_novas)
                     .run_if(in_state(GameState::Playing))
                     .run_if(authority),
             );
@@ -147,10 +147,11 @@ pub enum ProjectileLook {
     EnemyBolt,
     EnemyOrb,
     Grenade,
+    NovaOrb,
 }
 
 impl ProjectileLook {
-    fn sprite(self) -> &'static str {
+    pub fn sprite(self) -> &'static str {
         match self {
             Self::CyanBolt => "sprites/fx/bolt_cyan.png",
             Self::OrangePellet => "sprites/fx/pellet_orange.png",
@@ -159,6 +160,7 @@ impl ProjectileLook {
             Self::EnemyBolt => "sprites/fx/enemy_bolt.png",
             Self::EnemyOrb => "sprites/fx/enemy_orb.png",
             Self::Grenade => "sprites/fx/grenade.png",
+            Self::NovaOrb => "sprites/fx/nova_orb.png",
         }
     }
 }
@@ -200,6 +202,39 @@ pub fn spawn_grenade(commands: &mut Commands, grenade: Grenade) {
         grenade,
         ProjectileLook::Grenade,
         Transform::from_translation(pos.extend(15.0)),
+    ));
+}
+
+/// Host-side Nova Cannon orb: drifts straight on, lashing out with arcs at
+/// guards it passes, and bursts on the first wall, guard or riot shield it meets.
+#[derive(Component)]
+pub struct NovaOrb {
+    pub velocity: Vec2,
+    pub remaining: f32,
+    /// Damage at the centre of the burst, halving toward the edge.
+    pub damage: f32,
+    pub radius: f32,
+    pub knockback: f32,
+    /// Damage of each arc to a guard it passes, and how far the arcs reach.
+    pub arc_damage: f32,
+    pub arc_reach: f32,
+    /// Seconds until it lashes out again.
+    pub arc_timer: f32,
+    pub color: Color,
+}
+
+/// Seconds between a nova orb's arcs, and how many guards each lashes.
+const NOVA_ARC_GAP: f32 = 0.2;
+const NOVA_ARC_TARGETS: usize = 2;
+
+/// Launches a nova orb, drawn at `scale` to show how charged it was.
+pub fn spawn_nova(commands: &mut Commands, orb: NovaOrb, pos: Vec2, scale: f32) {
+    commands.spawn((
+        Level,
+        Replicated,
+        orb,
+        ProjectileLook::NovaOrb,
+        Transform::from_translation(pos.extend(15.0)).with_scale(Vec3::splat(scale)),
     ));
 }
 
@@ -401,14 +436,8 @@ fn move_projectiles(
 ) {
     // Sub-step so fast shots can't tunnel through walls or targets in one frame.
     const MAX_STEP: f32 = 4.0;
-    let shields: Vec<_> = riot_shields.iter().map(|(s, t)| s.outline(t.translation.truncate())).collect();
-    let blocked = |pos: Vec2| {
-        shields.iter().flat_map(|outline| outline.windows(2)).any(|pair| {
-            let (a, b) = (pair[0], pair[1]);
-            let t = ((pos - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
-            pos.distance(a + (b - a) * t) <= RIOT_THICKNESS
-        })
-    };
+    let shields = shield_outlines(&riot_shields);
+    let blocked = |pos: Vec2| hits_shield(&shields, pos);
 
     'projectiles: for (entity, mut projectile, mut transform) in &mut projectiles {
         let travel = projectile.velocity * time.delta_secs();
@@ -454,6 +483,44 @@ fn move_projectiles(
     }
 }
 
+/// Every riot shield's curve, to test shots against.
+fn shield_outlines<F: bevy::ecs::query::QueryFilter>(riot_shields: &Query<(&RiotShield, &Transform), F>) -> Vec<[Vec2; RIOT_POINTS]> {
+    riot_shields.iter().map(|(s, t)| s.outline(t.translation.truncate())).collect()
+}
+
+/// Whether a shot at `pos` is touching any of the shields.
+fn hits_shield(shields: &[[Vec2; RIOT_POINTS]], pos: Vec2) -> bool {
+    shields.iter().flat_map(|outline| outline.windows(2)).any(|pair| {
+        let (a, b) = (pair[0], pair[1]);
+        let t = ((pos - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+        pos.distance(a + (b - a) * t) <= RIOT_THICKNESS
+    })
+}
+
+/// Hurts every guard within `radius` of `center`, `damage` at the middle
+/// halving toward the edge, and throws them outward.
+fn blast(
+    targets: &mut Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), impl bevy::ecs::query::QueryFilter>,
+    center: Vec2,
+    damage: f32,
+    radius: f32,
+    knockback: f32,
+) {
+    for (team, hurtbox, target_transform, mut health, target_knockback) in targets {
+        let offset = target_transform.translation.truncate() - center;
+        let reach = radius + hurtbox.0;
+        if *team != Team::Enemy || offset.length() > reach {
+            continue;
+        }
+        let falloff = 1.0 - 0.5 * offset.length() / reach;
+        if health.hurt(damage * falloff)
+            && let Some(mut target_knockback) = target_knockback
+        {
+            target_knockback.0 += offset.normalize_or(Vec2::X) * knockback * falloff;
+        }
+    }
+}
+
 fn move_grenades(
     mut commands: Commands,
     time: Res<Time>,
@@ -473,22 +540,70 @@ fn move_grenades(
         }
 
         let center = grenade.to;
-        for (team, hurtbox, target_transform, mut health, knockback) in &mut targets {
-            let offset = target_transform.translation.truncate() - center;
-            let reach = grenade.radius + hurtbox.0;
-            if *team != Team::Enemy || offset.length() > reach {
-                continue;
-            }
-            let falloff = 1.0 - 0.5 * offset.length() / reach;
-            if health.hurt(grenade.damage * falloff)
-                && let Some(mut knockback) = knockback
-            {
-                knockback.0 += offset.normalize_or(Vec2::X) * grenade.knockback * falloff;
-            }
-        }
+        blast(&mut targets, center, grenade.damage, grenade.radius, grenade.knockback);
         noise.0.push(center);
         fx(&mut commands, FxKind::Explosion, center, 0.0, grenade.color);
         commands.entity(entity).despawn();
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn move_novas(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut noise: ResMut<Noise>,
+    mut orbs: Query<(Entity, &mut NovaOrb, &mut Transform)>,
+    mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<NovaOrb>>,
+    riot_shields: Query<(&RiotShield, &Transform), (Without<NovaOrb>, Without<Hurtbox>)>,
+) {
+    const MAX_STEP: f32 = 3.0;
+    let dt = time.delta_secs();
+    let shields = shield_outlines(&riot_shields);
+    'orbs: for (entity, mut orb, mut transform) in &mut orbs {
+        transform.rotate_z(dt * 6.0);
+
+        // Lashes the nearest guards in reach that it can see.
+        orb.arc_timer -= dt;
+        if orb.arc_timer <= 0.0 {
+            orb.arc_timer = NOVA_ARC_GAP;
+            let pos = transform.translation.truncate();
+            let mut near: Vec<(f32, Vec2)> = targets
+                .iter()
+                .filter(|(team, _, t, health, _)| {
+                    let at = t.translation.truncate();
+                    **team == Team::Enemy && !health.is_dead() && at.distance(pos) <= orb.arc_reach && grid.line_of_sight(pos, at)
+                })
+                .map(|(_, _, t, ..)| (t.translation.truncate().distance(pos), t.translation.truncate()))
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (team, _, t, mut health, _) in &mut targets {
+                let at = t.translation.truncate();
+                if *team == Team::Enemy && near.iter().take(NOVA_ARC_TARGETS).any(|(_, n)| *n == at) && health.hurt(orb.arc_damage) {
+                    fx(&mut commands, FxKind::Zap(at), pos, 0.0, orb.color);
+                }
+            }
+        }
+
+        let travel = orb.velocity * dt;
+        let steps = (travel.length() / MAX_STEP).ceil().max(1.0);
+        for _ in 0..steps as u32 {
+            transform.translation += (travel / steps).extend(0.0);
+            let pos = transform.translation.truncate();
+            let touching = targets
+                .iter()
+                .any(|(team, hurtbox, t, health, _)| *team == Team::Enemy && !health.is_dead() && t.translation.truncate().distance(pos) <= hurtbox.0 + 3.0);
+            orb.remaining -= travel.length() / steps;
+            if grid.is_solid_at(pos) || hits_shield(&shields, pos) || touching || orb.remaining <= 0.0 {
+                // Bursts just short of a wall, not inside it.
+                let center = pos - orb.velocity.normalize_or_zero() * 2.0;
+                blast(&mut targets, center, orb.damage, orb.radius, orb.knockback);
+                noise.0.push(center);
+                fx(&mut commands, FxKind::Explosion, center, 0.0, orb.color);
+                commands.entity(entity).despawn();
+                continue 'orbs;
+            }
+        }
     }
 }
 

@@ -74,7 +74,7 @@ const RIOT_BULGE: f32 = 3.5;
 /// Where the Bulwark holds it from, relative to his origin.
 const RIOT_HAND: Vec2 = Vec2::new(0.0, -3.0);
 /// Points along the curve, edge to edge.
-const RIOT_POINTS: usize = 7;
+pub const RIOT_POINTS: usize = 7;
 /// Shots this close to the shield are stopped.
 pub const RIOT_THICKNESS: f32 = 3.0;
 pub const RIOT_COLOR: Color = Color::srgb(0.45, 0.85, 1.0);
