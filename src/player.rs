@@ -27,6 +27,7 @@ const HITBOX_HALF: Vec2 = Vec2::new(5.0, 3.0);
 const FEET_OFFSET: Vec2 = Vec2::new(0.0, -5.0);
 /// Where pirates who aren't on the current deck are parked, far off the map.
 pub const OFF_DECK: Vec2 = Vec2::new(-100_000.0, 0.0);
+/// Name-tag colours, by join order.
 const SLOT_COLORS: [Color; 4] = [
     Color::srgb(1.0, 0.6, 0.25),
     Color::srgb(0.4, 0.85, 1.0),
@@ -209,6 +210,11 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
     ));
 }
 
+/// The colour of a pirate's name tag, by join order.
+pub fn slot_color(slot: u8) -> Color {
+    SLOT_COLORS[slot as usize % SLOT_COLORS.len()]
+}
+
 /// Packs the crew around the arrival tile: first the 2x2 lift, then around it.
 pub fn crew_spot(spawn: Vec2, index: usize) -> Vec2 {
     const SPOTS: [(f32, f32); 9] = [
@@ -349,7 +355,7 @@ fn dress_player(
         entity.with_child((
             Text2d::new(format!("P{}", player.slot + 1)),
             TextFont::from_font_size(6.0 * PIXEL_SCALE),
-            TextColor(SLOT_COLORS[player.slot as usize % SLOT_COLORS.len()]),
+            TextColor(slot_color(player.slot)),
             Transform::from_xyz(0.0, 13.0, 1.0).with_scale(Vec3::splat(1.0 / PIXEL_SCALE)),
         ));
     }

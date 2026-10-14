@@ -1,5 +1,6 @@
 mod class;
 mod combat;
+mod crew;
 mod deckgen;
 mod drops;
 mod enemies;
@@ -150,6 +151,7 @@ impl Plugin for GamePlugins {
             perks::PerksPlugin,
             drops::DropsPlugin,
             class::ClassPlugin,
+            crew::CrewPlugin,
         ));
     }
 }
@@ -173,6 +175,7 @@ impl Plugin for ViewPlugins {
             menu::MenuPlugin,
             settings::DisplayPlugin,
             hud::HudPlugin,
+            crew::CrewViewPlugin,
         ));
     }
 }

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::class::{Ability, Loadout, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
+use crate::crew::Link;
 use crate::drops::EnemyDrop;
 use crate::enemies::EnemyLook;
 use crate::guns::Arsenal;
@@ -181,6 +182,7 @@ impl Plugin for NetPlugin {
             .replicate::<Ability>()
             .replicate::<Sentry>()
             .replicate::<RiotShield>()
+            .replicate::<Link>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)

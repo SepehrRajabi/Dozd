@@ -46,8 +46,9 @@ pub enum HudSlot {
     Status,
     Banner,
     Notice,
-    /// Top right.
+    /// Top right: the session, then the rest of the crew.
     Session,
+    Crew,
     /// Bottom left, above the controls hint.
     Perks,
     /// Bottom centre: the loot prompt over the extraction or lift progress.
@@ -252,7 +253,10 @@ fn spawn_layout(mut commands: Commands) {
         centred_slot(HudSlot::Banner),
         centred_slot(HudSlot::Notice),
     ]));
-    commands.spawn((Hud, corner(true, false, AlignItems::FlexEnd), children![slot(HudSlot::Session)]));
+    commands.spawn((Hud, corner(true, false, AlignItems::FlexEnd), children![
+        slot(HudSlot::Session),
+        slot(HudSlot::Crew),
+    ]));
     commands.spawn((Hud, corner(false, true, AlignItems::FlexStart), children![
         slot(HudSlot::Perks),
         (
