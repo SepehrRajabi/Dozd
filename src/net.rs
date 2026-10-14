@@ -10,7 +10,7 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Ability, Loadout, PirateClass, RiotShield, Sentry};
+use crate::class::{Ability, Boons, Loadout, PirateClass, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
 use crate::crew::{Link, Roster};
 use crate::drops::EnemyDrop;
@@ -185,6 +185,7 @@ impl Plugin for NetPlugin {
             .replicate::<RiotShield>()
             .replicate::<Link>()
             .replicate::<Roster>()
+            .replicate::<Boons>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)

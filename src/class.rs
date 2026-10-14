@@ -3,7 +3,8 @@
 //! others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns a guard against the
 //! station and the Doctor wards the crew nearby against all harm. The Doctor
-//! also slowly patches up any crewmate close by.
+//! also slowly patches up any crewmate close by, and the Bulwark's presence
+//! makes the crew around them hit harder.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,6 +46,11 @@ const SENTRY_PICKUP: f32 = 16.0;
 const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
+
+/// How close a crewmate must be to the Bulwark to be rallied.
+pub const RALLY_RADIUS: f32 = 64.0;
+/// Extra damage a rallied pirate deals, as a share of the gun's.
+pub const RALLY_BOOST: f32 = 0.25;
 
 /// Seconds of riot shield a full charge holds. Q raises and lowers it; it
 /// drains while up, recharges while down, and can't be shot down.
@@ -99,7 +105,7 @@ impl Plugin for ClassPlugin {
             .init_resource::<Loadouts>()
             .add_systems(
                 Update,
-                (use_abilities, run_sentries, carry_riot_shields, heal_crew)
+                (use_abilities, run_sentries, carry_riot_shields, support_crew)
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -166,7 +172,7 @@ impl PirateClass {
         match self {
             Self::Gunner => "Carries a 4th gun",
             Self::Engineer => "Q: drop a sentry gun",
-            Self::Bulwark => "Q: riot shield",
+            Self::Bulwark => "Rallies crew nearby\nQ: riot shield",
             Self::Hacker => "Q: turn a guard",
             Self::Doctor => "Heals crew nearby\nQ: ward the crew",
         }
@@ -340,6 +346,43 @@ impl Loadouts {
     pub fn get<'a>(&'a self, owner: u64, local: &'a LocalLoadout) -> &'a Loadout {
         self.0.get(&owner).unwrap_or(&local.0)
     }
+}
+
+/// What the crew's passives are doing for a pirate right now, worked out by
+/// the host and shared so every HUD can show it.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct Boons {
+    /// A Doctor is patching up their hull.
+    pub healing: bool,
+    /// A Bulwark is close: their shots hit `RALLY_BOOST` harder.
+    pub rallied: bool,
+    /// For a Doctor or Bulwark: how many crewmates their passive reaches.
+    pub aura: u8,
+}
+
+impl Boons {
+    /// What their guns' damage is multiplied by.
+    pub fn damage(self) -> f32 {
+        if self.rallied { 1.0 + RALLY_BOOST } else { 1.0 }
+    }
+}
+
+/// The effects on a pirate, as short HUD labels in their colours.
+pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(String, Color)> {
+    let mut effects = Vec::new();
+    if health.warded > 0.0 && !health.is_dead() {
+        effects.push((format!("WARDED {:.0}s", health.warded.ceil()), MEDIC_COLOR));
+    }
+    if boons.healing {
+        effects.push(("HEALING".into(), MEDIC_COLOR));
+    }
+    if boons.rallied {
+        effects.push((format!("+{:.0}% DMG", RALLY_BOOST * 100.0), RIOT_COLOR));
+    }
+    if boons.aura > 0 {
+        effects.push((format!("AURA {}", boons.aura), class.color()));
+    }
+    effects
 }
 
 /// A pirate's class ability, ready when `cooldown` reaches zero.
@@ -576,30 +619,54 @@ fn use_abilities(
     }
 }
 
-/// Each Doctor patches up the crewmates around them, a little at a time. Not
-/// themselves: a Doctor needs a crew.
-fn heal_crew(time: Res<Time>, grid: Res<RoomGrid>, mut players: Query<(&Player, &mut Health, &Transform)>) {
-    let doctors: Vec<(u64, Vec2)> = players
+/// Each Doctor patches up the crewmates around them, a little at a time, and
+/// each Bulwark rallies them to hit harder. Neither helps themselves: their
+/// passives need a crew. Records who's getting what in everyone's `Boons`.
+fn support_crew(
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut players: Query<(&Player, &mut Health, &Transform, &mut Boons)>,
+) {
+    let supporters: Vec<(u64, PirateClass, Vec2)> = players
         .iter()
-        .filter(|(p, h, _)| p.class == PirateClass::Doctor && can_act(p, h))
-        .map(|(p, _, t)| (p.owner, t.translation.truncate()))
+        .filter(|(p, h, ..)| matches!(p.class, PirateClass::Doctor | PirateClass::Bulwark) && can_act(p, h))
+        .map(|(p, _, t, _)| (p.owner, p.class, t.translation.truncate()))
         .collect();
-    if doctors.is_empty() {
-        return;
-    }
+    // Who each supporter reaches, by index into `supporters`.
+    let mut reached = vec![0u8; supporters.len()];
     let dt = time.delta_secs();
-    for (player, mut health, transform) in &mut players {
-        if !can_act(player, &health) || health.current >= health.max {
-            continue;
-        }
+    for (player, mut health, transform, mut boons) in &mut players {
         let pos = transform.translation.truncate();
+        let mut medics = 0;
+        let mut rallied = false;
+        if can_act(player, &health) {
+            for (i, &(owner, class, at)) in supporters.iter().enumerate() {
+                let radius = if class == PirateClass::Doctor { HEAL_RADIUS } else { RALLY_RADIUS };
+                if owner == player.owner || at.distance(pos) > radius || !grid.line_of_sight(at, pos) {
+                    continue;
+                }
+                reached[i] += 1;
+                match class {
+                    PirateClass::Doctor => medics += 1,
+                    _ => rallied = true,
+                }
+            }
+        }
         // Two Doctors heal twice as fast.
-        let medics = doctors
-            .iter()
-            .filter(|&&(owner, at)| owner != player.owner && at.distance(pos) <= HEAL_RADIUS && grid.line_of_sight(at, pos))
-            .count();
-        if medics > 0 {
+        let healing = medics > 0 && health.current < health.max;
+        if healing {
             health.heal(HEAL_RATE * medics as f32 * dt);
+        }
+        let current = Boons { healing, rallied, aura: boons.aura };
+        boons.set_if_neq(current);
+    }
+    for (player, _, _, mut boons) in &mut players {
+        let aura = supporters
+            .iter()
+            .position(|(owner, ..)| *owner == player.owner)
+            .map_or(0, |i| reached[i]);
+        if boons.aura != aura {
+            boons.aura = aura;
         }
     }
 }

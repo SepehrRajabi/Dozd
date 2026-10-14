@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{RIOT_COLOR, RiotShield};
+use crate::class::{Boons, RIOT_COLOR, RiotShield};
 use crate::combat::{
     FxKind, Grenade, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_grenade,
     spawn_projectile,
@@ -447,12 +447,12 @@ fn fire(
     mut rng: ResMut<Rng>,
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
-    mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks)>,
+    mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks, &Boons)>,
     mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
     riot_shields: Query<&RiotShield>,
 ) {
     let dt = time.delta_secs();
-    for (player, health, controls, transform, aim, mut arsenal, mut perks) in &mut players {
+    for (player, health, controls, transform, aim, mut arsenal, mut perks, boons) in &mut players {
         if arsenal.cooldown > 0.0 {
             arsenal.cooldown = (arsenal.cooldown - dt).max(0.0);
         }
@@ -483,6 +483,8 @@ fn fire(
             continue;
         }
 
+        // A Bulwark nearby makes every shot count for more.
+        let damage = stats.damage * boons.damage();
         let origin = transform.translation.truncate();
         let muzzle = origin + HAND + aim.dir * (HOLD_DISTANCE + BARREL);
         let aim_angle = aim.dir.to_angle();
@@ -508,7 +510,7 @@ fn fire(
                             team: Team::Player,
                             velocity: Vec2::from_angle(angle) * speed,
                             remaining: stats.range,
-                            damage: stats.damage,
+                            damage,
                             knockback: stats.knockback,
                             pierce: stats.pierce,
                             color: stats.color,
@@ -538,7 +540,7 @@ fn fire(
                 } else {
                     in_reach.sort_by(|a, b| a.0.total_cmp(&b.0));
                     in_reach.truncate(targets);
-                    let share = stats.damage / in_reach.len() as f32;
+                    let share = damage / in_reach.len() as f32;
                     for &(_, target) in &in_reach {
                         let Ok((_, t, mut h, _, mut knockback, _)) = enemies.get_mut(target) else { continue };
                         let pos = t.translation.truncate();
@@ -568,7 +570,7 @@ fn fire(
                         to,
                         age: 0.0,
                         flight,
-                        damage: stats.damage,
+                        damage,
                         radius,
                         knockback: stats.knockback,
                         color: stats.color,

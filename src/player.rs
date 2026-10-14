@@ -5,7 +5,7 @@ use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Ability, LocalLoadout, Loadout, Loadouts, PirateClass};
+use crate::class::{Ability, Boons, LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::Arsenal;
@@ -205,6 +205,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
         Aim { dir: Vec2::X, target: pos + Vec2::X * 32.0 },
         Arsenal::new(&loadout.guns),
         Ability::default(),
+        Boons::default(),
         Perks::default(),
         Controls::default(),
         Transform::from_translation(pos.extend(10.0)),

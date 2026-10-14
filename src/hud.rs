@@ -38,10 +38,12 @@ impl Plugin for HudPlugin {
 /// Where a piece of the HUD goes. Each module fills its slot at startup.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HudSlot {
-    /// Top left, in one panel: haul, then shield, hull and dash, then the class ability.
+    /// Top left, in one panel: haul, then shield, hull and dash, then the class
+    /// ability, then what the crew's passives are doing for you.
     Haul,
     Vitals,
     Ability,
+    Effects,
     /// Top centre: deck and alarm, the banner, then the leave prompt.
     Status,
     Banner,
@@ -111,6 +113,79 @@ pub fn key_hint(key: &str, action: &str) -> impl Bundle {
         },
         children![key_cap(key), text(action, 13.0, DIM)],
     )
+}
+
+/// The most effect chips a row shows at once.
+const MAX_CHIPS: usize = 4;
+
+/// A row of small labelled chips for the effects on a pirate, hidden while
+/// there are none. Fill it with `show_chips`.
+#[derive(Component)]
+pub struct ChipRow;
+
+#[derive(Component)]
+pub struct Chip;
+
+pub fn chip_row() -> impl Bundle {
+    let chip = || {
+        (
+            Chip,
+            Node {
+                padding: UiRect::axes(Val::Px(5.0), Val::Px(1.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(EDGE),
+            children![text("", 11.0, TEXT)],
+        )
+    };
+    (
+        ChipRow,
+        Node {
+            column_gap: Val::Px(4.0),
+            row_gap: Val::Px(4.0),
+            flex_wrap: FlexWrap::Wrap,
+            display: Display::None,
+            ..default()
+        },
+        children![chip(), chip(), chip(), chip()],
+    )
+}
+
+/// The parts of the HUD `show_chips` writes to.
+pub type ChipParts<'w, 's> = (
+    Query<'w, 's, (&'static mut Node, &'static Children), With<ChipRow>>,
+    Query<'w, 's, (&'static mut Node, &'static mut BackgroundColor, &'static mut BorderColor, &'static Children), (With<Chip>, Without<ChipRow>)>,
+    Query<'w, 's, (&'static mut Text, &'static mut TextColor)>,
+);
+
+/// Shows `effects` on the chip row `row`, each label tinted its colour.
+pub fn show_chips(parts: &mut ChipParts, row: Entity, effects: &[(String, Color)]) {
+    let (rows, chips, texts) = parts;
+    let Ok((mut node, children)) = rows.get_mut(row) else { return };
+    let display = if effects.is_empty() { Display::None } else { Display::Flex };
+    if node.display != display {
+        node.display = display;
+    }
+    for (i, chip) in children.iter().enumerate().take(MAX_CHIPS) {
+        let Ok((mut node, mut background, mut border, label)) = chips.get_mut(chip) else { continue };
+        let effect = effects.get(i);
+        let display = if effect.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let Some((content, color)) = effect else { continue };
+        background.set_if_neq(BackgroundColor(color.with_alpha(0.15)));
+        border.set_if_neq(BorderColor::all(color.with_alpha(0.6)));
+        if let Some(Ok((mut text, mut tint))) = label.first().map(|&l| texts.get_mut(l)) {
+            if text.0 != *content {
+                text.0.clone_from(content);
+            }
+            tint.set_if_neq(TextColor(*color));
+        }
+    }
 }
 
 /// A bar filled to `frac`. Whatever it just lost lingers as a pale trail that
@@ -246,7 +321,12 @@ fn spawn_layout(mut commands: Commands) {
             padding: UiRect::all(Val::Px(10.0)),
             ..default()
         }),
-        children![slot(HudSlot::Haul), slot(HudSlot::Vitals), slot(HudSlot::Ability)],
+        children![
+            slot(HudSlot::Haul),
+            slot(HudSlot::Vitals),
+            slot(HudSlot::Ability),
+            slot(HudSlot::Effects),
+        ],
     )]));
     commands.spawn((Hud, centred(true), children![
         centred_slot(HudSlot::Status),

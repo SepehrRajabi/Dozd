@@ -11,11 +11,11 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::GameState;
-use crate::class::{LocalLoadout, Loadout, Loadouts, PirateClass};
+use crate::class::{Boons, LocalLoadout, Loadout, Loadouts, PirateClass, effects};
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::MissionStatus;
-use crate::net::{ChooseLoadout, LocalId, NetMode, authority};
+use crate::net::{ChooseLoadout, LocalId, LocalPlayer, NetMode, authority};
 use crate::player::{PirateStatus, Player, slot_color};
 
 /// Seconds between link measurements; sooner just churns replication.
@@ -45,8 +45,8 @@ pub struct CrewViewPlugin;
 impl Plugin for CrewViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PickedClass>()
-            .add_systems(Startup, spawn_class_picker)
-            .add_systems(Update, (update_crew_panel, update_class_picker));
+            .add_systems(Startup, (spawn_class_picker, spawn_local_effects))
+            .add_systems(Update, (update_crew_panel, update_local_effects, update_class_picker));
     }
 }
 
@@ -169,6 +169,7 @@ struct CrewRow {
     shield: Entity,
     hull: Entity,
     credits: Entity,
+    effects: Entity,
 }
 
 fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> Entity {
@@ -178,6 +179,7 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
     let shield = commands.spawn(hud::meter(BAR_WIDTH, 4.0, SHIELD_COLOR)).id();
     let hull = commands.spawn(hud::meter(BAR_WIDTH, 6.0, HULL_COLOR)).id();
     let credits = commands.spawn(hud::text("", 12.0, hud::GOLD)).id();
+    let effects = commands.spawn(hud::chip_row()).id();
 
     let spacer = || Node { flex_grow: 1.0, ..default() };
     let top = commands
@@ -206,7 +208,7 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
             row_gap: Val::Px(3.0),
             ..default()
         })
-        .add_children(&[top, bottom])
+        .add_children(&[top, bottom, effects])
         .id();
 
     commands
@@ -227,7 +229,7 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
             )],
         ))
         .add_children(&[body])
-        .insert(CrewRow { owner: player.owner, slot: player.slot, gone: None, status, link, shield, hull, credits })
+        .insert(CrewRow { owner: player.owner, slot: player.slot, gone: None, status, link, shield, hull, credits, effects })
         .id()
 }
 
@@ -239,9 +241,9 @@ fn update_crew_panel(
     local: Res<LocalId>,
     slots: Query<(Entity, &HudSlot)>,
     mission: Option<Single<&MissionStatus>>,
-    players: Query<(&Player, &Health, Option<&Link>)>,
+    players: Query<(&Player, &Health, Option<&Link>, &Boons)>,
     mut rows: Query<(Entity, &mut CrewRow)>,
-    mut texts: Query<(&mut Text, &mut TextColor)>,
+    mut chips: hud::ChipParts,
     mut meters: Query<&mut Meter>,
     mut resort: Local<bool>,
 ) {
@@ -268,7 +270,8 @@ fn update_crew_panel(
 
     for (entity, mut row) in &mut rows {
         let player = players.iter().find(|(p, ..)| p.owner == row.owner);
-        let Some((player, health, link)) = player else {
+        let texts = &mut chips.2;
+        let Some((player, health, link, boons)) = player else {
             // The whole run is gone (back to the menu or a new run): no ghosts.
             if !anyone || !networked {
                 commands.entity(entity).despawn();
@@ -280,8 +283,9 @@ fn update_crew_panel(
                 commands.entity(entity).despawn();
                 continue;
             }
-            set_text(&mut texts, row.status, "DISCONNECTED", BAD);
-            set_text(&mut texts, row.link, "", hud::DIM);
+            set_text(texts, row.status, "DISCONNECTED", BAD);
+            set_text(texts, row.link, "", hud::DIM);
+            hud::show_chips(&mut chips, row.effects, &[]);
             continue;
         };
         row.gone = None;
@@ -297,7 +301,7 @@ fn update_crew_panel(
                 PirateStatus::Active => ("", hud::DIM),
             }
         };
-        set_text(&mut texts, row.status, status, color);
+        set_text(texts, row.status, status, color);
 
         let (link_text, link_color) = match (networked, link) {
             (false, _) => (String::new(), hud::DIM),
@@ -311,7 +315,7 @@ fn update_crew_panel(
                 (format!("{word} {}ms{loss}", link.ping_ms), color)
             }
         };
-        set_text(&mut texts, row.link, &link_text, link_color);
+        set_text(texts, row.link, &link_text, link_color);
 
         if let Ok(mut meter) = meters.get_mut(row.shield) {
             meter.frac = if health.max_shield > 0.0 { health.shield / health.max_shield } else { 0.0 };
@@ -321,8 +325,26 @@ fn update_crew_panel(
             meter.frac = frac;
             meter.color = if frac < 0.35 { HULL_LOW } else { HULL_COLOR };
         }
-        set_text(&mut texts, row.credits, &format!("{} cr", player.credits), hud::GOLD);
+        set_text(&mut chips.2, row.credits, &format!("{} cr", player.credits), hud::GOLD);
+        hud::show_chips(&mut chips, row.effects, &effects(player.class, health, boons));
     }
+}
+
+/// This machine's pirate's effects, under the ability in the top-left panel.
+#[derive(Component)]
+struct LocalEffects;
+
+fn spawn_local_effects(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    commands.entity(hud::slot(&slots, HudSlot::Effects)).with_child((LocalEffects, hud::chip_row()));
+}
+
+fn update_local_effects(
+    player: Option<Single<(&Player, &Health, &Boons), With<LocalPlayer>>>,
+    row: Single<Entity, With<LocalEffects>>,
+    mut chips: hud::ChipParts,
+) {
+    let list = player.map_or_else(Vec::new, |p| effects(p.0.class, p.1, p.2));
+    hud::show_chips(&mut chips, *row, &list);
 }
 
 fn set_text(texts: &mut Query<(&mut Text, &mut TextColor)>, entity: Entity, content: &str, color: Color) {
