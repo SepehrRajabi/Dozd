@@ -1,5 +1,6 @@
 //! Pirate classes and loadouts. Each pirate picks a class and their guns in the
-//! menu; the host spawns them with it. The Gunner carries an extra gun; the
+//! menu; the host spawns them with it. The Gunner carries an extra gun and
+//! keeps the whole crew supplied, so their shots sometimes cost no ammo; the
 //! others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns a guard against the
 //! station and the Doctor wards the crew nearby against all harm. The Doctor
@@ -47,6 +48,10 @@ const SENTRY_PICKUP: f32 = 16.0;
 const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
+
+/// Odds a shot by any crewmate of a Gunner, wherever they are, costs no ammo.
+pub const SUPPLY_CHANCE: f32 = 0.3;
+const GUNNER_COLOR: Color = Color::srgb(1.0, 0.82, 0.35);
 
 /// How close a crewmate must be to the Bulwark to be rallied.
 pub const RALLY_RADIUS: f32 = 64.0;
@@ -175,7 +180,7 @@ impl PirateClass {
 
     pub fn perk(self) -> &'static str {
         match self {
-            Self::Gunner => "Carries a 4th gun",
+            Self::Gunner => "Supplies the crew\nCarries a 4th gun",
             Self::Engineer => "Q: drop a sentry gun",
             Self::Bulwark => "Rallies crew nearby\nQ: riot shield",
             Self::Hacker => "Jams guards nearby\nQ: turn a guard",
@@ -234,7 +239,7 @@ impl PirateClass {
 
     pub fn color(self) -> Color {
         match self {
-            Self::Gunner => Color::srgb(1.0, 0.82, 0.35),
+            Self::Gunner => GUNNER_COLOR,
             Self::Engineer => SENTRY_COLOR,
             Self::Bulwark => RIOT_COLOR,
             Self::Hacker => HACK_COLOR,
@@ -361,7 +366,9 @@ pub struct Boons {
     pub healing: bool,
     /// A Bulwark is close: their shots hit `RALLY_BOOST` harder.
     pub rallied: bool,
-    /// For a Doctor or Bulwark: how many crewmates their passive reaches.
+    /// A Gunner is in the crew: their shots cost no ammo `SUPPLY_CHANCE` of the time.
+    pub supplied: bool,
+    /// For a Doctor, Bulwark or Gunner: how many crewmates their passive reaches.
     pub aura: u8,
     /// For a Hacker: how many guards they're jamming.
     pub jamming: u8,
@@ -390,6 +397,9 @@ pub fn effects(class: PirateClass, health: &Health, boons: &Boons) -> Vec<(Strin
     }
     if boons.rallied {
         effects.push((format!("+{:.0}% DMG", RALLY_BOOST * 100.0), RIOT_COLOR));
+    }
+    if boons.supplied {
+        effects.push((format!("SUPPLIED {:.0}%", SUPPLY_CHANCE * 100.0), GUNNER_COLOR));
     }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
@@ -638,8 +648,9 @@ fn use_abilities(
     }
 }
 
-/// Each Doctor patches up the crewmates around them, a little at a time, and
-/// each Bulwark rallies them to hit harder. Neither helps themselves: their
+/// Each Doctor patches up the crewmates around them, a little at a time, each
+/// Bulwark rallies them to hit harder, and a Gunner keeps the whole crew, near
+/// or far, supplied, so their shots sometimes cost no ammo. None helps themselves: their
 /// passives need a crew. Records who's getting what in everyone's `Boons`.
 fn support_crew(
     time: Res<Time>,
@@ -648,7 +659,9 @@ fn support_crew(
 ) {
     let supporters: Vec<(u64, PirateClass, Vec2)> = players
         .iter()
-        .filter(|(p, h, ..)| matches!(p.class, PirateClass::Doctor | PirateClass::Bulwark) && can_act(p, h))
+        .filter(|(p, h, ..)| {
+            matches!(p.class, PirateClass::Doctor | PirateClass::Bulwark | PirateClass::Gunner) && can_act(p, h)
+        })
         .map(|(p, _, t, _)| (p.owner, p.class, t.translation.truncate()))
         .collect();
     // Who each supporter reaches, by index into `supporters`.
@@ -658,16 +671,26 @@ fn support_crew(
         let pos = transform.translation.truncate();
         let mut medics = 0;
         let mut rallied = false;
+        let mut supplied = false;
         if can_act(player, &health) {
             for (i, &(owner, class, at)) in supporters.iter().enumerate() {
-                let radius = if class == PirateClass::Doctor { HEAL_RADIUS } else { RALLY_RADIUS };
-                if owner == player.owner || at.distance(pos) > radius || !grid.line_of_sight(at, pos) {
+                if owner == player.owner {
+                    continue;
+                }
+                let radius = match class {
+                    PirateClass::Doctor => Some(HEAL_RADIUS),
+                    PirateClass::Bulwark => Some(RALLY_RADIUS),
+                    // The Gunner's reaches everyone.
+                    _ => None,
+                };
+                if radius.is_some_and(|r| at.distance(pos) > r || !grid.line_of_sight(at, pos)) {
                     continue;
                 }
                 reached[i] += 1;
                 match class {
                     PirateClass::Doctor => medics += 1,
-                    _ => rallied = true,
+                    PirateClass::Bulwark => rallied = true,
+                    _ => supplied = true,
                 }
             }
         }
@@ -676,7 +699,7 @@ fn support_crew(
         if healing {
             health.heal(HEAL_RATE * medics as f32 * dt);
         }
-        let current = Boons { healing, rallied, ..*boons };
+        let current = Boons { healing, rallied, supplied, ..*boons };
         boons.set_if_neq(current);
     }
     for (player, _, _, mut boons) in &mut players {

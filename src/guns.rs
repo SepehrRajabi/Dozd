@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::{Boons, RIOT_COLOR, RiotShield};
+use crate::class::{Boons, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
     FxKind, Grenade, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_grenade,
     spawn_projectile,
@@ -581,7 +581,9 @@ fn fire(
         }
 
         let current = arsenal.current;
-        if !infinite {
+        // A Gunner in the crew sometimes spares the round.
+        let spared = boons.supplied && rng.unit() < SUPPLY_CHANCE;
+        if !infinite && !spared {
             arsenal.guns[current].ammo -= 1;
         }
         arsenal.shots = arsenal.shots.wrapping_add(1);
