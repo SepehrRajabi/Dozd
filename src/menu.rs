@@ -17,7 +17,7 @@ use crate::net::{
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
 use crate::player::Player;
-use crate::settings::Settings;
+use crate::settings::{Settings, read_config, write_config};
 use crate::hud::{self, HudSlot};
 use crate::{GameState, PIXEL_SCALE};
 
@@ -144,7 +144,8 @@ enum MenuCommand {
     Leave,
 }
 
-/// What the player typed last time, so rejoining after a disconnect is one click.
+/// What the player typed last time, so hosting or rejoining is one click,
+/// even after restarting the game.
 #[derive(Resource)]
 struct MenuMemory {
     port: String,
@@ -153,7 +154,23 @@ struct MenuMemory {
 
 impl Default for MenuMemory {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT.to_string(), address: String::new() }
+        let mut memory = Self { port: DEFAULT_PORT.to_string(), address: String::new() };
+        for (key, value) in read_config(Self::FILE) {
+            match key.as_str() {
+                "port" if parse_port(&value).is_ok() => memory.port = value,
+                "address" => memory.address = value,
+                _ => {}
+            }
+        }
+        memory
+    }
+}
+
+impl MenuMemory {
+    const FILE: &str = "multiplayer.txt";
+
+    fn save(&self) {
+        write_config(Self::FILE, &[("port", self.port.clone()), ("address", self.address.clone())]);
     }
 }
 
@@ -859,7 +876,10 @@ fn run_menu_command(
         MenuCommand::StartHost => {
             memory.port = field.clone();
             match parse_port(&field) {
-                Ok(port) => commands.trigger(StartSession(NetMode::Host { port })),
+                Ok(port) => {
+                    memory.save();
+                    commands.trigger(StartSession(NetMode::Host { port }));
+                }
                 Err(message) => notice.0 = Some(message),
             }
         }
@@ -867,7 +887,10 @@ fn run_menu_command(
         MenuCommand::Connect => {
             memory.address = field.clone();
             match resolve(&field) {
-                Ok(addr) => commands.trigger(StartSession(NetMode::Join { addr })),
+                Ok(addr) => {
+                    memory.save();
+                    commands.trigger(StartSession(NetMode::Join { addr }));
+                }
                 Err(message) => notice.0 = Some(message),
             }
         }

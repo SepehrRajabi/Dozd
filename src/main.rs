@@ -110,7 +110,7 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "DOZD".into(),
-                        resolution: (1280, 720).into(),
+                        resolution: settings::SavedWindow::load().size.into(),
                         ..default()
                     }),
                     // The in-world crosshair replaces the OS cursor.
