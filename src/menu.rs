@@ -19,7 +19,7 @@ use crate::perks::PerkKind;
 use crate::player::Player;
 use crate::settings::Settings;
 use crate::hud::{self, HudSlot};
-use crate::GameState;
+use crate::{GameState, PIXEL_SCALE};
 
 const GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
 const GOLD_FAINT: Color = Color::srgba(1.0, 0.82, 0.35, 0.3);
@@ -47,6 +47,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Menu), hide_cursor)
             .add_systems(OnEnter(GameState::Lobby), (lobby_screen, show_cursor))
             .add_systems(OnExit(GameState::Lobby), hide_cursor)
+            .add_systems(OnEnter(GameState::Playing), unzoom)
             .add_systems(OnEnter(MenuScreen::Main), main_screen)
             .add_systems(OnEnter(MenuScreen::Multiplayer), multiplayer_screen)
             .add_systems(OnEnter(MenuScreen::Extras), extras_screen)
@@ -76,6 +77,7 @@ impl Plugin for MenuPlugin {
                     button_styles,
                     button_actions,
                     update_status,
+                    fit_menus,
                     (choice_actions, style_choices, show_ability_choices, update_slot_count).chain(),
                 )
                     .run_if(in_state(GameState::Menu).or_else(in_state(GameState::Lobby))),
@@ -1145,6 +1147,44 @@ fn back_on_escape(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>, scree
 // Backdrop: the pirate, orbiting loot, and the station's guards
 // ---------------------------------------------------------------------------
 
+/// The window size the menus are laid out for.
+const MENU_SIZE: Vec2 = Vec2::new(1280.0, 720.0);
+
+/// How much larger the menus draw so they fill a big screen. It steps so each
+/// sprite pixel stays a whole number of screen pixels, keeping the art crisp.
+fn menu_zoom(window: &Window) -> f32 {
+    let fit = (window.width() / MENU_SIZE.x).min(window.height() / MENU_SIZE.y);
+    ((fit * PIXEL_SCALE).floor() / PIXEL_SCALE).max(1.0)
+}
+
+/// Grows the menus and their backdrop with the window.
+fn fit_menus(
+    window: Single<&Window, With<PrimaryWindow>>,
+    ui: ResMut<UiScale>,
+    projection: Single<&mut Projection, With<Camera2d>>,
+) {
+    zoom(menu_zoom(&window), ui, projection);
+}
+
+/// Raids are always drawn at 1×: a bigger view would let a pirate on a big
+/// screen see further than their crew.
+fn unzoom(ui: ResMut<UiScale>, projection: Single<&mut Projection, With<Camera2d>>) {
+    zoom(1.0, ui, projection);
+}
+
+fn zoom(zoom: f32, mut ui: ResMut<UiScale>, mut projection: Single<&mut Projection, With<Camera2d>>) {
+    // Only write on a change, so UI layout isn't redone every frame.
+    if ui.0 != zoom {
+        ui.0 = zoom;
+    }
+    let scale = 1.0 / (PIXEL_SCALE * zoom);
+    if matches!(&**projection, Projection::Orthographic(o) if o.scale != scale)
+        && let Projection::Orthographic(ortho) = &mut **projection
+    {
+        ortho.scale = scale;
+    }
+}
+
 fn reset_camera(mut camera: Single<&mut Transform, With<Camera2d>>) {
     camera.translation.x = 0.0;
     camera.translation.y = 0.0;
@@ -1229,8 +1269,15 @@ fn dress_backdrop_pirate(
     }
 }
 
-fn animate_backdrop(time: Res<Time>, mut sprites: Query<(&Backdrop, &mut Transform)>) {
+fn animate_backdrop(
+    time: Res<Time>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut sprites: Query<(&Backdrop, &mut Transform)>,
+) {
     let t = time.elapsed_secs();
+    // The menu hangs from the top of the window, so in a taller one the
+    // backdrop rises with it rather than staying in the middle.
+    let lift = Vec3::Y * ((window.height() / menu_zoom(&window) - MENU_SIZE.y) / 2.0 / PIXEL_SCALE).round();
     for (backdrop, mut transform) in &mut sprites {
         transform.translation = match backdrop.orbit {
             Some((center, radius)) => {
@@ -1238,9 +1285,9 @@ fn animate_backdrop(time: Res<Time>, mut sprites: Query<(&Backdrop, &mut Transfo
                 // Squashed ellipse reads as a ring around the pirate; items behind him sit lower in z.
                 let offset = Vec2::new(angle.cos() * radius, angle.sin() * radius * 0.45);
                 let z = if angle.sin() > 0.0 { 9.5 } else { 12.0 };
-                (center + offset + Vec2::new(0.0, (t * 2.0 + backdrop.phase).sin() * 2.0)).extend(z)
+                (center + offset + Vec2::new(0.0, (t * 2.0 + backdrop.phase).sin() * 2.0)).extend(z) + lift
             }
-            None => backdrop.base + Vec3::new(0.0, ((t * 1.6 + backdrop.phase).sin() * 2.0).round(), 0.0),
+            None => backdrop.base + lift + Vec3::new(0.0, ((t * 1.6 + backdrop.phase).sin() * 2.0).round(), 0.0),
         };
     }
 }
