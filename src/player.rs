@@ -6,7 +6,7 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, Passive};
-use crate::class::{Ability, Boons, LocalLoadout, Loadout, Loadouts, PirateClass};
+use crate::class::{Ability, Boons, LASER_SLOW, Laser, LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::Arsenal;
@@ -486,6 +486,7 @@ pub fn move_players(
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut players: Query<(&Player, &Controls, &mut Transform, &mut Walking, &mut Dash, &mut Health, &mut Aim)>,
+    lasers: Query<&Laser>,
 ) {
     let dt = time.delta_secs();
     for (player, controls, mut transform, mut walking, mut dash, mut health, mut aim) in &mut players {
@@ -520,7 +521,9 @@ pub fn move_players(
             dash.active = (dash.active - dt).max(0.0);
             dash.dir * DASH_SPEED * dt
         } else if moving {
-            controls.movement.normalize() * SPEED * dt
+            // Bracing against the laser's kick slows a Gunner down.
+            let lasing = lasers.iter().any(|l| l.owner == player.owner);
+            controls.movement.normalize() * SPEED * if lasing { LASER_SLOW } else { 1.0 } * dt
         } else {
             continue;
         };

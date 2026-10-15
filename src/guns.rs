@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Passive, RICOCHET_CHANCE};
-use crate::class::{Boons, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
+use crate::class::{Boons, Laser, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
     FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
     spawn_nova, spawn_projectile,
@@ -441,6 +441,11 @@ struct WeaponPanel;
 #[derive(Component)]
 struct WeaponSlot(usize);
 
+/// The end of the barrel of the gun held by a pirate at `pos` aiming along `dir`.
+pub fn muzzle(pos: Vec2, dir: Vec2) -> Vec2 {
+    pos + HAND + dir * (HOLD_DISTANCE + BARREL)
+}
+
 fn can_act(player: &Player, health: &Health) -> bool {
     player.status == PirateStatus::Active && !health.is_dead()
 }
@@ -506,15 +511,16 @@ fn fire(
     mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks, &Boons)>,
     mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
     riot_shields: Query<&RiotShield>,
+    lasers: Query<&Laser>,
 ) {
     let dt = time.delta_secs();
     for (player, health, controls, transform, aim, mut arsenal, mut perks, boons) in &mut players {
         if arsenal.cooldown > 0.0 {
             arsenal.cooldown = (arsenal.cooldown - dt).max(0.0);
         }
-        // A Bulwark needs both hands for the riot shield.
-        let shielding = riot_shields.iter().any(|s| s.owner == player.owner);
-        if !can_act(player, health) || shielding {
+        // A Bulwark needs both hands for the riot shield, and a Gunner for the laser.
+        let busy = riot_shields.iter().any(|s| s.owner == player.owner) || lasers.iter().any(|l| l.owner == player.owner);
+        if !can_act(player, health) || busy {
             arsenal.burst_left = 0;
             arsenal.charge = 0.0;
             continue;
@@ -563,7 +569,7 @@ fn fire(
         let damage = stats.damage * boons.damage();
         let ricochet = if player.passive == Passive::Ricochet { RICOCHET_CHANCE } else { 0.0 };
         let origin = transform.translation.truncate();
-        let muzzle = origin + HAND + aim.dir * (HOLD_DISTANCE + BARREL);
+        let muzzle = muzzle(origin, aim.dir);
         let aim_angle = aim.dir.to_angle();
 
         match stats.mode {

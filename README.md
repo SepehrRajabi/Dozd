@@ -19,11 +19,11 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | | |
 | --- | --- |
 | ![Main menu](docs/screenshots/menu.png) | ![Loadout](docs/screenshots/loadout.png) |
-| The main menu | Picking a class and guns |
+| The main menu | Picking a class, abilities and guns |
 | ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
 | The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
-| A Bulwark and a Doctor against a Herald's empowered guards, with each other's status in the crew panel | A crew that didn't make it out |
+| A Gunner's laser kicking off their aim beside a Bulwark, with each other's status in the crew panel | A crew that didn't make it out |
 | ![Enemies](docs/screenshots/enemies.png) | |
 | The station's guards, under **EXTRAS** in the main menu | |
 
@@ -57,7 +57,7 @@ from the classes still free.
 
 | Class | Passives | Actives (Q) |
 | --- | --- | --- |
-| Gunner | **Supply:** they and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. **Ricochet:** a bullet that hits a guard has a 30% chance to bounce on into the 2 guards nearest it, for 60% of its damage | None: carries a 4th gun instead |
+| Gunner | **Supply:** they and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. **Ricochet:** a bullet that hits a guard has a 30% chance to bounce on into the 2 guards nearest it, for 60% of its damage | **Spare gun:** no Q, but carries a 4th gun. **Laser:** fires a beam for 3 s that cuts through every guard in its path until it reaches a wall, killing even the toughest in under a second (25 s cooldown). It kicks, so the beam shakes off your aim, you walk at under half speed and can't fire your guns while it's on, and guards hear it |
 | Engineer | **Armour:** 80% more shield | **Sentry gun:** drops a gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
 | Bulwark | **Rally:** crewmates within reach deal 25% more damage | **Riot shield:** raises or lowers a shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
 | Hacker | **Jamming:** guards within reach are jammed: 35% of their shots go wide and their blows whiff | **Hack:** turns the guard nearest your crosshair to the crew's side for 20 s (30 s cooldown) |

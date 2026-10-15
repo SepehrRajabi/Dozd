@@ -159,7 +159,7 @@ impl Config {
                 loadout.passive = passive;
             }
             if let Some(active) = self.active.filter(|a| a.class() == loadout.class) {
-                loadout.active = Some(active);
+                loadout.set_active(active);
             }
             loadout
         };

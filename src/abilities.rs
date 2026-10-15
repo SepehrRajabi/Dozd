@@ -1,5 +1,5 @@
 //! The abilities a pirate picks between in their loadout: one passive, always
-//! on, and one active, on Q. Each class offers its own; the class rules in
+//! on, and one active, mostly on Q. Each class offers its own; the class rules in
 //! `class` look at the pick rather than the class.
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,10 @@ pub enum Passive {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Active {
+    /// Gunner: no Q, but a 4th gun.
+    SpareGun,
+    /// Gunner: fires a lethal, shaky laser beam for a few seconds.
+    Laser,
     /// Engineer: drops a sentry gun.
     Sentry,
     /// Bulwark: raises a bulletproof shield.
@@ -85,7 +89,7 @@ impl Passive {
 }
 
 impl Active {
-    pub const ALL: [Active; 4] = [Self::Sentry, Self::RiotShield, Self::Hack, Self::Ward];
+    pub const ALL: [Active; 6] = [Self::SpareGun, Self::Laser, Self::Sentry, Self::RiotShield, Self::Hack, Self::Ward];
 
     /// By its code name, e.g. `riotshield`, as saved and typed on the command line.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -94,6 +98,7 @@ impl Active {
 
     pub fn class(self) -> PirateClass {
         match self {
+            Self::SpareGun | Self::Laser => PirateClass::Gunner,
             Self::Sentry => PirateClass::Engineer,
             Self::RiotShield => PirateClass::Bulwark,
             Self::Hack => PirateClass::Hacker,
@@ -103,6 +108,8 @@ impl Active {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::SpareGun => "SPARE GUN",
+            Self::Laser => "LASER",
             Self::Sentry => "SENTRY GUN",
             Self::RiotShield => "RIOT SHIELD",
             Self::Hack => "HACK",
@@ -113,6 +120,8 @@ impl Active {
     /// What it does, in a line, for the loadout screen.
     pub fn details(self) -> &'static str {
         match self {
+            Self::SpareGun => "No Q: carry a 4th gun",
+            Self::Laser => "Q: a lethal beam, with kick",
             Self::Sentry => "Q: drop a gun that shoots guards",
             Self::RiotShield => "Q: raise a bulletproof shield",
             Self::Hack => "Q: turn a guard to your side",
@@ -127,8 +136,7 @@ impl PirateClass {
         Passive::ALL.into_iter().filter(move |p| p.class() == self)
     }
 
-    /// The actives this class can pick from; the first is the default. The
-    /// Gunner has none: they carry a 4th gun instead.
+    /// The actives this class can pick from; the first is the default.
     pub fn actives(self) -> impl Iterator<Item = Active> {
         Active::ALL.into_iter().filter(move |a| a.class() == self)
     }
@@ -139,10 +147,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_class_has_a_passive() {
+    fn every_class_has_abilities() {
         for class in PirateClass::ALL {
             assert!(class.passives().next().is_some(), "{class:?} has no passive");
         }
-        assert_eq!(PirateClass::Gunner.actives().count(), 0);
+        for class in PirateClass::ALL {
+            assert!(class.actives().next().is_some(), "{class:?} has no active");
+        }
     }
 }

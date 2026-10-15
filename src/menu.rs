@@ -217,10 +217,6 @@ enum Choice {
     Gun(GunKind),
 }
 
-/// Stands in for the active abilities when the class has none.
-#[derive(Component)]
-struct NoActive;
-
 /// Under a class card in the lobby: who has the class, if anyone.
 #[derive(Component)]
 struct ClassNote(PirateClass);
@@ -614,7 +610,6 @@ fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
             for active in Active::ALL {
                 row.spawn(ability(Choice::Active(active), active.name(), active.details(), active.class().color()));
             }
-            row.spawn((NoActive, label("NONE: a 4th gun instead", 13.0, DIM)));
         });
 
     parent.spawn((SlotCount, label("", 15.0, DIM)));
@@ -947,13 +942,13 @@ fn choice_actions(
                 None
             }
             Choice::Active(active) => {
-                loadout.active = Some(active);
+                loadout.set_active(active);
                 None
             }
             Choice::Gun(gun) if loadout.guns == [gun] => Some("Take at least one gun".into()),
             Choice::Gun(gun) if !loadout.toggle(gun) => Some(format!(
                 "All {} slots are full. Click an equipped gun to drop it first.",
-                loadout.class.slots()
+                loadout.slots()
             )),
             Choice::Gun(_) => None,
         };
@@ -1030,8 +1025,7 @@ fn update_setting_values(settings: Res<Settings>, mut values: Query<(&SettingVal
 /// Shows only the abilities the chosen class can pick from.
 fn show_ability_choices(
     loadout: Res<LocalLoadout>,
-    mut choices: Query<(&Choice, &mut Node), Without<NoActive>>,
-    mut none: Query<&mut Node, With<NoActive>>,
+    mut choices: Query<(&Choice, &mut Node)>,
 ) {
     let class = loadout.0.class;
     for (choice, mut node) in &mut choices {
@@ -1045,12 +1039,6 @@ fn show_ability_choices(
             node.display = display;
         }
     }
-    let display = if class.actives().next().is_none() { Display::Flex } else { Display::None };
-    for mut node in &mut none {
-        if node.display != display {
-            node.display = display;
-        }
-    }
 }
 
 fn update_slot_count(loadout: Res<LocalLoadout>, mut text: Query<&mut Text, With<SlotCount>>) {
@@ -1059,7 +1047,7 @@ fn update_slot_count(loadout: Res<LocalLoadout>, mut text: Query<&mut Text, With
     let content = format!(
         "Guns  {}/{}   -   click to equip in the next slot, again to drop",
         loadout.guns.len(),
-        loadout.class.slots()
+        loadout.slots()
     );
     if text.0 != content {
         text.0 = content;

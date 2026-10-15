@@ -1,7 +1,8 @@
 //! Pirate classes and loadouts. Each pirate picks a class and their guns in the
-//! menu; the host spawns them with it. The Gunner carries an extra gun and
-//! keeps the whole crew supplied, so their shots sometimes cost no ammo, and
-//! the Engineer wears heavier armour; the others have an ability on Q: the Engineer drops a sentry gun, the Bulwark
+//! menu; the host spawns them with it. The Gunner carries an extra gun or fires
+//! a lethal laser on Q, and keeps the whole crew supplied, so their shots
+//! sometimes cost no ammo, and the Engineer wears heavier armour; the others
+//! have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns a guard against the
 //! station and the Doctor wards the crew nearby against all harm. The Doctor
 //! also slowly patches up any crewmate close by, the Bulwark's presence makes
@@ -18,9 +19,9 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, Passive, RICOCHET_CHANCE};
-use crate::combat::{FxKind, Health, Hurtbox, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
+use crate::combat::{Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
-use crate::guns::GunKind;
+use crate::guns::{GunKind, muzzle};
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
@@ -29,7 +30,7 @@ use crate::player::{Aim, Controls, MAX_SHIELD, PirateStatus, Player, move_player
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
-/// Guns every pirate can carry; the Gunner gets one more.
+/// Guns every pirate can carry; a Gunner with a spare gun gets one more.
 pub const BASE_SLOTS: usize = 3;
 /// Extra shield an Engineer's armour carries, as a share of a pirate's usual.
 pub const ENGINEER_ARMOR: f32 = 0.8;
@@ -55,6 +56,22 @@ const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
 /// Odds a shot by a Gunner or any crewmate of theirs, wherever they are, costs no ammo.
 pub const SUPPLY_CHANCE: f32 = 0.3;
 const GUNNER_COLOR: Color = Color::srgb(1.0, 0.82, 0.35);
+
+/// Seconds the Gunner's laser fires for once started.
+pub const LASER_LIFE: f32 = 3.0;
+const LASER_COOLDOWN: f32 = 25.0;
+/// Damage a second to everything in the beam: lethal, the toughest guard
+/// lasts under a second in it.
+const LASER_DPS: f32 = 420.0;
+/// How far the beam reaches when no wall stops it.
+const LASER_RANGE: f32 = 230.0;
+/// Guards this close to the beam's line, past their hurtbox, are in it.
+const LASER_HALF_WIDTH: f32 = 2.5;
+/// How far the kick throws the beam off the aim, in radians, at most.
+const LASER_KICK: f32 = 0.11;
+/// The Gunner's walking speed while firing it, as a share of the usual.
+pub const LASER_SLOW: f32 = 0.45;
+pub const LASER_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
 
 /// How close a crewmate must be to the Bulwark to be rallied.
 pub const RALLY_RADIUS: f32 = 64.0;
@@ -118,7 +135,7 @@ impl Plugin for ClassPlugin {
             .init_resource::<Loadouts>()
             .add_systems(
                 Update,
-                (use_abilities, run_sentries, carry_riot_shields, support_crew)
+                (use_abilities, run_sentries, carry_riot_shields, fire_lasers, support_crew)
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -133,15 +150,16 @@ impl Plugin for ClassViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(dress_sentry)
             .add_observer(dress_riot_shield)
+            .add_observer(dress_laser)
             .add_observer(dress_medic_auras)
             .add_systems(Startup, spawn_ability_hud)
-            .add_systems(Update, (draw_sentries, draw_riot_shields, draw_medic_auras, heal_motes, update_ability_hud));
+            .add_systems(Update, (draw_sentries, draw_riot_shields, draw_lasers, draw_medic_auras, heal_motes, update_ability_hud));
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum PirateClass {
-    /// Carries a fourth gun.
+    /// Carries a fourth gun, or a laser.
     #[default]
     Gunner,
     /// Drops a sentry gun.
@@ -183,18 +201,11 @@ impl PirateClass {
 
     pub fn perk(self) -> &'static str {
         match self {
-            Self::Gunner => "Carries a 4th gun\nNo Q ability",
+            Self::Gunner => "Brings the firepower",
             Self::Engineer => "Builds, digs in",
             Self::Bulwark => "Holds the line",
             Self::Hacker => "Turns the station",
             Self::Doctor => "Keeps the crew alive",
-        }
-    }
-
-    pub fn slots(self) -> usize {
-        match self {
-            Self::Gunner => BASE_SLOTS + 1,
-            Self::Engineer | Self::Bulwark | Self::Hacker | Self::Doctor => BASE_SLOTS,
         }
     }
 
@@ -230,9 +241,16 @@ impl Passive {
 }
 
 impl Active {
-    /// Its timings and look, for the HUD.
-    pub fn stats(self) -> AbilityStats {
-        match self {
+    /// Its timings and look, for the HUD; `None` for one with nothing on Q.
+    pub fn stats(self) -> Option<AbilityStats> {
+        Some(match self {
+            Self::SpareGun => return None,
+            Self::Laser => AbilityStats {
+                label: "LASER",
+                cooldown: LASER_COOLDOWN,
+                life: LASER_LIFE,
+                color: LASER_COLOR,
+            },
             Self::Sentry => AbilityStats {
                 label: "SNTRY",
                 cooldown: SENTRY_COOLDOWN,
@@ -258,7 +276,7 @@ impl Active {
                 life: WARD_LIFE,
                 color: MEDIC_COLOR,
             },
-        }
+        })
     }
 }
 
@@ -268,7 +286,7 @@ impl Active {
 pub struct Loadout {
     pub class: PirateClass,
     pub passive: Passive,
-    /// `None` only for a class with no active ability.
+    /// Always set once sanitized; optional for loadouts from older versions.
     pub active: Option<Active>,
     pub guns: Vec<GunKind>,
 }
@@ -282,12 +300,19 @@ impl Loadout {
             GunKind::ScatterCannon,
             GunKind::RailLance,
         ];
-        Self {
+        let mut loadout = Self {
             class,
             passive: Self::default_passive(class),
             active: class.actives().next(),
-            guns: DEFAULT[..class.slots()].to_vec(),
-        }
+            guns: DEFAULT.to_vec(),
+        };
+        loadout.guns.truncate(loadout.slots());
+        loadout
+    }
+
+    /// How many guns it can carry.
+    pub fn slots(&self) -> usize {
+        if self.active == Some(Active::SpareGun) { BASE_SLOTS + 1 } else { BASE_SLOTS }
     }
 
     fn default_passive(class: PirateClass) -> Passive {
@@ -295,7 +320,7 @@ impl Loadout {
     }
 
     pub fn is_full(&self) -> bool {
-        self.guns.len() >= self.class.slots()
+        self.guns.len() >= self.slots()
     }
 
     /// Switches class, dropping guns from the end that no longer fit, and
@@ -306,7 +331,13 @@ impl Loadout {
             self.passive = Self::default_passive(class);
             self.active = class.actives().next();
         }
-        self.guns.truncate(class.slots());
+        self.guns.truncate(self.slots());
+    }
+
+    /// Picks the active ability, dropping guns from the end that no longer fit.
+    pub fn set_active(&mut self, active: Active) {
+        self.active = Some(active);
+        self.guns.truncate(self.slots());
     }
 
     /// Equips `gun` in the next free slot, or unequips it. Returns false if
@@ -328,7 +359,7 @@ impl Loadout {
         if self.passive.class() != self.class {
             self.passive = Self::default_passive(self.class);
         }
-        if self.active.map(Active::class) != self.class.actives().next().map(Active::class) {
+        if self.active.is_none_or(|a| a.class() != self.class) {
             self.active = self.class.actives().next();
         }
         let mut seen = Vec::new();
@@ -337,7 +368,7 @@ impl Loadout {
             seen.push(*g);
             fresh
         });
-        self.guns.truncate(self.class.slots());
+        self.guns.truncate(self.slots());
         if self.guns.is_empty() {
             self.guns.push(GunKind::BlasterPistol);
         }
@@ -506,6 +537,31 @@ fn riot_curve() -> [Vec2; RIOT_POINTS] {
     })
 }
 
+/// A Gunner's laser: a beam from their gun along their aim, thrown about by its
+/// kick, that burns through every guard in it until a wall stops it.
+#[derive(Component, Serialize, Deserialize, Clone)]
+pub struct Laser {
+    pub owner: u64,
+    /// Seconds left firing.
+    pub left: f32,
+    /// Where the beam points, kick and all.
+    pub dir: Vec2,
+    /// How far it reaches before a wall stops it.
+    pub length: f32,
+    /// Seconds it's been firing, to drive the kick.
+    age: f32,
+}
+
+/// The beam's bright core or its soft glow, stretched along the laser.
+#[derive(Component)]
+struct LaserPart {
+    glow: bool,
+}
+
+/// The flare where the beam hits.
+#[derive(Component)]
+struct LaserImpact;
+
 /// An Engineer's sentry gun. Shoots the closest enemy it can see until its time
 /// runs out or it's destroyed.
 #[derive(Component, Serialize, Deserialize, Clone)]
@@ -581,7 +637,7 @@ fn use_abilities(
         ability.cooldown = (ability.cooldown - dt).max(0.0);
         ability.active = (ability.active - dt).max(0.0);
         let Some(active) = player.active else { continue };
-        let stats = active.stats();
+        let Some(stats) = active.stats() else { continue };
         let pos = transform.translation.truncate();
 
         // The riot shield toggles, running on its charge rather than a cooldown.
@@ -629,8 +685,14 @@ fn use_abilities(
             continue;
         }
         match active {
-            // Handled above.
-            Active::RiotShield => {}
+            // Handled above, or nothing on Q.
+            Active::RiotShield | Active::SpareGun => {}
+            Active::Laser => {
+                let laser = Laser { owner: player.owner, left: LASER_LIFE, dir: aim.dir, length: 0.0, age: 0.0 };
+                let from = muzzle(pos, aim.dir);
+                fx(&mut commands, FxKind::Burst, from, 0.0, LASER_COLOR);
+                commands.spawn((Level, Replicated, laser, laser_transform(from, aim.dir)));
+            }
             Active::Ward => {
                 wards.push(pos);
                 fx(&mut commands, FxKind::Burst, pos, 0.0, MEDIC_COLOR);
@@ -810,6 +872,66 @@ fn carry_riot_shields(
     }
 }
 
+/// A laser fired from `from` along `dir`.
+fn laser_transform(from: Vec2, dir: Vec2) -> Transform {
+    Transform::from_translation(from.extend(12.0)).with_rotation(Quat::from_rotation_z(dir.to_angle()))
+}
+
+/// Swings each laser with its Gunner's aim, shaken by its kick, and burns every
+/// guard in the beam, until its time runs out or its Gunner falls or leaves.
+#[allow(clippy::too_many_arguments)]
+fn fire_lasers(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut rng: ResMut<Rng>,
+    mut noise: ResMut<Noise>,
+    mut alarm: ResMut<Alarm>,
+    players: Query<(&Player, &Health, &Transform, &Aim, &Boons)>,
+    mut lasers: Query<(Entity, &mut Laser, &mut Transform), Without<Player>>,
+    mut enemies: Query<(&Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>, Without<Laser>)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut laser, mut transform) in &mut lasers {
+        let holder = players.iter().find(|(p, h, ..)| p.owner == laser.owner && can_act(p, h));
+        laser.left -= dt;
+        laser.age += dt;
+        let Some((_, _, holder, aim, boons)) = holder.filter(|_| laser.left > 0.0) else {
+            fx(&mut commands, FxKind::Burst, transform.translation.truncate(), 0.0, LASER_COLOR);
+            commands.entity(entity).despawn();
+            continue;
+        };
+
+        // The kick: a shudder that never settles, and worsens as it heats up.
+        let t = laser.age;
+        let heat = 0.6 + 0.4 * t / LASER_LIFE;
+        let kick = LASER_KICK * heat * (0.55 * (t * 19.0).sin() + 0.3 * (t * 43.0 + 1.3).sin() + 0.15 * rng.signed());
+        let dir = Vec2::from_angle(aim.dir.to_angle() + kick);
+        let pos = holder.translation.truncate();
+        let from = muzzle(pos, aim.dir);
+        let mut length = 0.0;
+        while length < LASER_RANGE && !grid.is_solid_at(from + dir * (length + 2.0)) {
+            length += 2.0;
+        }
+        laser.dir = dir;
+        laser.length = length;
+        *transform = laser_transform(from, dir);
+
+        let damage = LASER_DPS * boons.damage() * dt;
+        for (t, mut health, hurtbox, mut knockback, team) in &mut enemies {
+            let at = t.translation.truncate();
+            let along = (at - from).dot(dir).clamp(0.0, length);
+            let in_beam = at.distance(from + dir * along) <= hurtbox.0 + LASER_HALF_WIDTH;
+            if *team == Team::Enemy && in_beam && health.hurt(damage) {
+                knockback.0 += dir * 400.0 * dt;
+            }
+        }
+        // As loud as any gun, the whole time it fires.
+        noise.0.push(pos);
+        alarm.alert();
+    }
+}
+
 fn run_sentries(
     mut commands: Commands,
     time: Res<Time>,
@@ -984,6 +1106,71 @@ fn draw_riot_shields(
     }
 }
 
+/// The beam is drawn along the laser's own `x`: a soft glow under a white-hot
+/// core, and a flare where it hits.
+fn dress_laser(add: On<Add, Laser>, mut commands: Commands, assets: Res<AssetServer>) {
+    commands.entity(add.entity).insert(Visibility::default()).with_children(|parent| {
+        for (glow, z) in [(true, 0.0), (false, 0.1)] {
+            parent.spawn((LaserPart { glow }, Sprite::from_color(LASER_COLOR, Vec2::ONE), Transform::from_xyz(0.0, 0.0, z)));
+        }
+        parent.spawn((
+            LaserImpact,
+            Sprite { image: assets.load("sprites/fx/spark.png"), color: LASER_COLOR, ..default() },
+            Transform::from_xyz(0.0, 0.0, 0.2),
+        ));
+    });
+}
+
+/// Stretches each beam to its length, flickering, throws sparks off where it
+/// hits, and rattles the camera of the Gunner firing it.
+#[allow(clippy::type_complexity)]
+fn draw_lasers(
+    mut commands: Commands,
+    time: Res<Time>,
+    local: Res<LocalId>,
+    mut shake: ResMut<Shake>,
+    mut rng: Local<Rng>,
+    lasers: Query<(&Laser, &Transform)>,
+    mut parts: Query<(&ChildOf, &LaserPart, &mut Sprite, &mut Transform), (Without<LaserImpact>, Without<Laser>)>,
+    mut impacts: Query<(&ChildOf, &mut Transform), (With<LaserImpact>, Without<Laser>)>,
+) {
+    let t = time.elapsed_secs();
+    let flicker = 0.8 + 0.2 * (t * 60.0).sin();
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Ok((laser, _)) = lasers.get(parent.parent()) else { continue };
+        // Thins out over its last half second.
+        let fading = (laser.left / 0.5).clamp(0.2, 1.0);
+        let (width, color) = if part.glow {
+            (6.0 * flicker * fading, LASER_COLOR.with_alpha(0.35))
+        } else {
+            (2.0 * fading, Srgba::from(LASER_COLOR).mix(&Srgba::WHITE, 0.6).into())
+        };
+        sprite.custom_size = Some(Vec2::new(laser.length, width));
+        sprite.color = color;
+        transform.translation.x = laser.length / 2.0;
+    }
+    for (parent, mut transform) in &mut impacts {
+        let Ok((laser, _)) = lasers.get(parent.parent()) else { continue };
+        transform.translation.x = laser.length;
+        transform.scale = Vec3::splat(1.2 + 0.4 * flicker);
+    }
+    for (laser, transform) in &lasers {
+        if laser.owner == local.0 {
+            shake.0 = shake.0.max(0.45);
+        }
+        let end = transform.translation.truncate() + laser.dir * laser.length;
+        if rng.unit() < 0.5 {
+            let spray = Vec2::new(rng.signed(), rng.signed()) * 3.0 - laser.dir * 2.0;
+            commands.spawn((
+                Level,
+                Fade { age: 0.0, life: 0.2 },
+                Sprite::from_color(LASER_COLOR, Vec2::ONE),
+                Transform::from_translation((end + spray).extend(16.0)),
+            ));
+        }
+    }
+}
+
 /// Gives every pirate a ward bubble, hidden until warded, and each Doctor and
 /// Hacker the ring that shows how far their passive reaches.
 fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<AssetServer>, players: Query<&Player>) {
@@ -1115,7 +1302,7 @@ fn update_ability_hud(
     mut fill: Single<&mut Meter, With<AbilityFill>>,
     mut text: Single<(&mut Text, &mut TextColor), With<AbilityText>>,
 ) {
-    let stats = player.as_ref().and_then(|p| p.0.active).map(Active::stats);
+    let stats = player.as_ref().and_then(|p| p.0.active).and_then(Active::stats);
     let display = if stats.is_some() { Display::Flex } else { Display::None };
     if panel.display != display {
         panel.display = display;
@@ -1173,6 +1360,10 @@ mod tests {
         let mut loadout = Loadout::new(PirateClass::Gunner);
         assert_eq!(loadout.guns.len(), 4);
         assert!(!loadout.toggle(GunKind::ArcCoil), "a full loadout takes no more");
+        loadout.set_active(Active::Laser);
+        assert_eq!(loadout.guns.len(), 3, "the laser takes the spare gun's slot");
+        loadout.set_active(Active::SpareGun);
+        assert!(loadout.toggle(GunKind::ArcCoil));
         loadout.set_class(PirateClass::Engineer);
         assert_eq!(loadout.guns.len(), 3);
         assert!(loadout.toggle(GunKind::PulseRifle));
@@ -1190,5 +1381,10 @@ mod tests {
         assert_eq!((fixed.passive, fixed.active), (Passive::Armor, Some(Active::Sentry)), "abilities must match the class");
         let empty = Loadout { guns: Vec::new(), ..Loadout::new(PirateClass::Gunner) }.sanitized();
         assert_eq!(empty.guns, [GunKind::BlasterPistol]);
+        // From before the Gunner had actives: no pick means the spare gun.
+        let old = Loadout { active: None, ..Loadout::new(PirateClass::Gunner) }.sanitized();
+        assert_eq!((old.active, old.guns.len()), (Some(Active::SpareGun), 4));
+        let laser = Loadout { active: Some(Active::Laser), ..Loadout::new(PirateClass::Gunner) }.sanitized();
+        assert_eq!(laser.guns.len(), 3, "a laser Gunner can't smuggle a 4th gun");
     }
 }
