@@ -51,14 +51,14 @@ When **Orchestration Mode** is triggered, you must divide sub-agents cleanly alo
 
 *   **Sub-Agent A (Logic/State):** Confined exclusively to core `GamePlugins`. Handles Components, Resources, Systems, and `bevy_replicon` network replication. **No asset loading or UI code.**
 *   **Sub-Agent B (Presentation):** Confined exclusively to `ViewPlugins`. Handles 2D sprites, UI/HUD, menus, sound triggers, and camera movements.
-*   **Sub-Agent C (Testing/Automation):** Confined to validation, `cargo test`, `cargo clippy`, and headless bot verification (`--headless`).
+*   **Sub-Agent C (Testing/Automation):** Confined to validation, `cargo test`, `cargo clippy`, and headless bot verification (`cargo run --release -- headless …`; see `tools/README.md`).
 
 ---
 
 ## 3. Strict Project Boundary Rules
 To prevent sub-agents from breaking the game compilation, enforce these absolute boundaries:
 *   **No Parallel File Commits:** Two sub-agents must never edit the exact same `.rs` system file simultaneously.
-*   **Headless Safety:** The logic track must never introduce visual types (`Handle<Image>`, `Color`, etc.) into pure game plugins, ensuring Headless mode remains intact.
+*   **Headless Safety:** The logic track must never load assets or render in pure game plugins: no `AssetServer`, `Handle<Image>`, sprites, UI nodes, cameras or input, ensuring Headless mode remains intact. Plain data that only describes a look is fine, e.g. the `Color` an `fx` effect or projectile carries to clients.
 *   **Multiplayer Invariance:** Any changes to game state must explicitly consider network replication (`bevy_replicon`). If an agent updates client-side logic, it must coordinate through you to ensure the server updates accordingly.
 
 ---
@@ -74,7 +74,7 @@ When spawning a sub-agent for Dozd, populate and inject this prompt into their s
       [Insert specific task, e.g., Implement the "Sentry Gun" active ability logic]
 
       === SCOPE & BOUNDARIES ===
-      - Target Plugins: [e.g., GamePlugins / src/game/abilities.rs]
+      - Target Plugins: [e.g., GamePlugins / src/class.rs]
       - Restrictions: Do NOT touch rendering, assets, or ViewPlugins. Keep logic compatible with Headless execution.
       - Never modify lines or files assigned to other active branches.
 
