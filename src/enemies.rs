@@ -426,6 +426,7 @@ fn enemy_shot(
         commands,
         Projectile {
             team,
+            owner: None,
             velocity: Vec2::from_angle(angle) * speed,
             remaining: 260.0,
             damage,

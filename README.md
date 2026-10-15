@@ -86,7 +86,7 @@ from the classes still free.
 | Engineer | **Armour:** 80% more shield | **Sentry gun:** drops a gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
 | Bulwark | **Rally:** crewmates within reach deal 25% more damage | **Riot shield:** raises or lowers a shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
 | Hacker | **Jamming:** guards within reach are jammed: 35% of their shots go wide and their blows whiff | **Hack:** turns every guard within a small circle around your crosshair, shown while it's ready, to the crew's side for 20 s (30 s cooldown). **Blackout:** freezes every guard on the deck for 4 s, even ones arriving during it, cutting off whatever attack they were winding up (40 s cooldown) |
-| Doctor | **Field medic:** slowly heals crewmates within reach | **Ward:** wards crewmates nearby and the Doctor against all harm for 4 s (28 s cooldown) |
+| Doctor | **Field medic:** slowly heals crewmates within reach. **Lifesteal:** they and every crewmate, wherever they are, have a 30% chance for a hit on a guard to heal them half the damage dealt (sentry shots don't count) | **Ward:** wards crewmates nearby and the Doctor against all harm for 4 s (28 s cooldown) |
 
 ## Controls
 

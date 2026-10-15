@@ -5,7 +5,8 @@
 //! have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns the guards around their
 //! crosshair against the station or freezes every guard on the deck, and the Doctor wards the crew nearby against all harm. The Doctor
-//! also slowly patches up any crewmate close by, the Bulwark's presence makes
+//! also slowly patches up any crewmate close by, or lets the whole crew's hits
+//! sometimes heal whoever landed them, the Bulwark's presence makes
 //! the crew around them hit harder, and the Hacker jams the guards around them
 //! so their attacks sometimes miss.
 
@@ -18,8 +19,8 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::abilities::{Active, Passive, RICOCHET_CHANCE};
-use crate::combat::{Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
+use crate::abilities::{Active, LIFESTEAL_CHANCE, LIFESTEAL_SHARE, Passive, RICOCHET_CHANCE};
+use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::{GunKind, muzzle};
 use crate::hud::{self, HudSlot, Meter};
@@ -141,7 +142,7 @@ impl Plugin for ClassPlugin {
             .add_systems(OnExit(GameState::Playing), |mut blackout: ResMut<Blackout>| blackout.0 = 0.0)
             .add_systems(
                 Update,
-                (use_abilities, run_blackout, run_sentries, carry_riot_shields, fire_lasers, support_crew)
+                (use_abilities, run_blackout, run_sentries, carry_riot_shields, fire_lasers, support_crew, steal_life)
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -459,6 +460,9 @@ pub struct Boons {
     pub rallied: bool,
     /// A Gunner is in the crew: their shots cost no ammo `SUPPLY_CHANCE` of the time.
     pub supplied: bool,
+    /// A Doctor with lifesteal is in the crew: their hits on guards heal them
+    /// `LIFESTEAL_SHARE` of the damage dealt `LIFESTEAL_CHANCE` of the time.
+    pub leeching: bool,
     /// For a Doctor, Bulwark or Gunner: how many crewmates their passive reaches.
     pub aura: u8,
     /// For a Hacker: how many guards they're jamming.
@@ -491,6 +495,9 @@ pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String,
     }
     if boons.supplied {
         effects.push((format!("SUPPLIED {:.0}%", SUPPLY_CHANCE * 100.0), GUNNER_COLOR));
+    }
+    if boons.leeching {
+        effects.push((format!("LIFESTEAL {:.0}%", LIFESTEAL_CHANCE * 100.0), MEDIC_COLOR));
     }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
@@ -800,7 +807,9 @@ fn use_abilities(
 /// Each Doctor patches up the crewmates around them, a little at a time, each
 /// Bulwark rallies them to hit harder, and a Gunner keeps the whole crew, near
 /// or far and themselves included, supplied, so their shots sometimes cost no
-/// ammo. The Doctor and Bulwark don't help themselves: their passives need a crew. Records who's getting what in everyone's `Boons`.
+/// ammo. A Doctor with lifesteal reaches the whole crew the same way, so their
+/// hits sometimes heal them (see `steal_life`). Otherwise the Doctor and Bulwark
+/// don't help themselves: their passives need a crew. Records who's getting what in everyone's `Boons`.
 fn support_crew(
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -808,7 +817,7 @@ fn support_crew(
 ) {
     let supporters: Vec<(u64, Passive, Vec2)> = players
         .iter()
-        .filter(|(p, h, ..)| matches!(p.passive, Passive::Healing | Passive::Rally | Passive::Supply) && can_act(p, h))
+        .filter(|(p, h, ..)| matches!(p.passive, Passive::Healing | Passive::Rally | Passive::Supply | Passive::Lifesteal) && can_act(p, h))
         .map(|(p, _, t, _)| (p.owner, p.passive, t.translation.truncate()))
         .collect();
     // Who each supporter reaches, by index into `supporters`.
@@ -819,17 +828,18 @@ fn support_crew(
         let mut medics = 0;
         let mut rallied = false;
         let mut supplied = false;
+        let mut leeching = false;
         if can_act(player, &health) {
             for (i, &(owner, passive, at)) in supporters.iter().enumerate() {
                 let own = owner == player.owner;
-                // Only supply covers the Gunner themselves too.
-                if own && passive != Passive::Supply {
+                // Only supply and lifesteal cover the Gunner or Doctor themselves too.
+                if own && !matches!(passive, Passive::Supply | Passive::Lifesteal) {
                     continue;
                 }
                 let radius = match passive {
                     Passive::Healing => Some(HEAL_RADIUS),
                     Passive::Rally => Some(RALLY_RADIUS),
-                    // Supply reaches everyone.
+                    // Supply and lifesteal reach everyone.
                     _ => None,
                 };
                 if radius.is_some_and(|r| at.distance(pos) > r || !grid.line_of_sight(at, pos)) {
@@ -841,6 +851,7 @@ fn support_crew(
                 match passive {
                     Passive::Healing => medics += 1,
                     Passive::Rally => rallied = true,
+                    Passive::Lifesteal => leeching = true,
                     _ => supplied = true,
                 }
             }
@@ -850,7 +861,7 @@ fn support_crew(
         if healing {
             health.heal(HEAL_RATE * medics as f32 * dt);
         }
-        let current = Boons { healing, rallied, supplied, ..*boons };
+        let current = Boons { healing, rallied, supplied, leeching, ..*boons };
         boons.set_if_neq(current);
     }
     for (player, _, _, mut boons) in &mut players {
@@ -860,6 +871,27 @@ fn support_crew(
             .map_or(0, |i| reached[i]);
         if boons.aura != aura {
             boons.aura = aura;
+        }
+    }
+}
+
+/// Each crew hit on a guard heals whoever landed it, if a Doctor with lifesteal
+/// is in the crew, `LIFESTEAL_SHARE` of the damage dealt `LIFESTEAL_CHANCE` of
+/// the time. Hull only.
+fn steal_life(
+    mut hits: MessageReader<CrewHit>,
+    mut rng: ResMut<Rng>,
+    mut players: Query<(&Player, &mut Health, &Boons)>,
+) {
+    for hit in hits.read() {
+        let Some((_, mut health, _)) = players
+            .iter_mut()
+            .find(|(p, h, b)| p.owner == hit.owner && b.leeching && can_act(p, h))
+        else {
+            continue;
+        };
+        if rng.unit() < LIFESTEAL_CHANCE {
+            health.heal(hit.dealt * LIFESTEAL_SHARE);
         }
     }
 }
@@ -934,6 +966,7 @@ fn fire_lasers(
     mut rng: ResMut<Rng>,
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
+    mut crew_hits: MessageWriter<CrewHit>,
     players: Query<(&Player, &Health, &Transform, &Aim, &Boons)>,
     mut lasers: Query<(Entity, &mut Laser, &mut Transform), Without<Player>>,
     mut enemies: Query<(&Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>, Without<Laser>)>,
@@ -969,8 +1002,12 @@ fn fire_lasers(
             let at = t.translation.truncate();
             let along = (at - from).dot(dir).clamp(0.0, length);
             let in_beam = at.distance(from + dir * along) <= hurtbox.0 + LASER_HALF_WIDTH;
-            if *team == Team::Enemy && in_beam && health.hurt(damage) {
+            if *team == Team::Enemy
+                && in_beam
+                && let Some(dealt) = health.hurt_for(damage)
+            {
                 knockback.0 += dir * 400.0 * dt;
+                crew_hits.write(CrewHit { owner: laser.owner, dealt });
             }
         }
         // As loud as any gun, the whole time it fires.
@@ -1025,6 +1062,8 @@ fn run_sentries(
             &mut commands,
             Projectile {
                 team: Team::Player,
+                // A sentry's shots aren't the Engineer's own.
+                owner: None,
                 velocity: Vec2::from_angle(angle) * SENTRY_SHOT_SPEED,
                 remaining: SENTRY_RANGE * 1.5,
                 damage: SENTRY_DAMAGE,

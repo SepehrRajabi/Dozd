@@ -13,6 +13,10 @@ pub const RICOCHET_CHANCE: f32 = 0.3;
 pub const RICOCHET_TARGETS: usize = 2;
 pub const RICOCHET_REACH: f32 = 70.0;
 pub const RICOCHET_DAMAGE: f32 = 0.6;
+/// Odds a hit on a guard by a Doctor's crewmate, or the Doctor, heals them.
+pub const LIFESTEAL_CHANCE: f32 = 0.3;
+/// The share of the damage dealt that such a hit gives back as hull.
+pub const LIFESTEAL_SHARE: f32 = 0.5;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Passive {
@@ -28,6 +32,8 @@ pub enum Passive {
     Jamming,
     /// Doctor: crewmates nearby slowly heal.
     Healing,
+    /// Doctor: hits by the whole crew sometimes heal the shooter.
+    Lifesteal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -49,7 +55,8 @@ pub enum Active {
 }
 
 impl Passive {
-    pub const ALL: [Passive; 6] = [Self::Supply, Self::Ricochet, Self::Armor, Self::Rally, Self::Jamming, Self::Healing];
+    pub const ALL: [Passive; 7] =
+        [Self::Supply, Self::Ricochet, Self::Armor, Self::Rally, Self::Jamming, Self::Healing, Self::Lifesteal];
 
     /// By its code name, e.g. `ricochet`, as saved and typed on the command line.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -62,7 +69,7 @@ impl Passive {
             Self::Armor => PirateClass::Engineer,
             Self::Rally => PirateClass::Bulwark,
             Self::Jamming => PirateClass::Hacker,
-            Self::Healing => PirateClass::Doctor,
+            Self::Healing | Self::Lifesteal => PirateClass::Doctor,
         }
     }
 
@@ -74,6 +81,7 @@ impl Passive {
             Self::Rally => "RALLY",
             Self::Jamming => "JAMMING",
             Self::Healing => "FIELD MEDIC",
+            Self::Lifesteal => "LIFESTEAL",
         }
     }
 
@@ -86,6 +94,7 @@ impl Passive {
             Self::Rally => "Crew nearby hit 25% harder",
             Self::Jamming => "Guards nearby may miss",
             Self::Healing => "Heals crew nearby",
+            Self::Lifesteal => "Crew hits may heal the shooter",
         }
     }
 }
@@ -159,5 +168,16 @@ mod tests {
         for class in PirateClass::ALL {
             assert!(class.actives().next().is_some(), "{class:?} has no active");
         }
+    }
+
+    #[test]
+    fn abilities_parse_by_code_name() {
+        for passive in Passive::ALL {
+            assert_eq!(Passive::parse(&format!("{passive:?}").to_lowercase()), Some(passive));
+        }
+        for active in Active::ALL {
+            assert_eq!(Active::parse(&format!("{active:?}").to_lowercase()), Some(active));
+        }
+        assert_eq!(PirateClass::Doctor.passives().next(), Some(Passive::Healing), "field medic stays the default");
     }
 }

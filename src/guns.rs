@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::abilities::{Passive, RICOCHET_CHANCE};
 use crate::class::{Boons, Laser, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
-    FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
+    CrewHit, FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
     spawn_nova, spawn_projectile,
 };
 use crate::enemies::Enemy;
@@ -512,6 +512,7 @@ fn fire(
     mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
     riot_shields: Query<&RiotShield>,
     lasers: Query<&Laser>,
+    mut crew_hits: MessageWriter<CrewHit>,
 ) {
     let dt = time.delta_secs();
     for (player, health, controls, transform, aim, mut arsenal, mut perks, boons) in &mut players {
@@ -591,6 +592,7 @@ fn fire(
                         &mut commands,
                         Projectile {
                             team: Team::Player,
+                            owner: Some(player.owner),
                             velocity: Vec2::from_angle(angle) * speed,
                             remaining: stats.range,
                             damage,
@@ -628,7 +630,8 @@ fn fire(
                     for &(_, target) in &in_reach {
                         let Ok((_, t, mut h, _, mut knockback, _)) = enemies.get_mut(target) else { continue };
                         let pos = t.translation.truncate();
-                        if h.hurt(share) {
+                        if let Some(dealt) = h.hurt_for(share) {
+                            crew_hits.write(CrewHit { owner: player.owner, dealt });
                             knockback.0 += (pos - origin).normalize_or_zero() * stats.knockback;
                             fx(&mut commands, FxKind::Zap(pos), muzzle, 0.0, stats.color);
                         }
@@ -650,6 +653,7 @@ fn fire(
                 spawn_grenade(
                     &mut commands,
                     Grenade {
+                        owner: Some(player.owner),
                         from: muzzle,
                         to,
                         age: 0.0,
@@ -669,6 +673,7 @@ fn fire(
                 spawn_nova(
                     &mut commands,
                     NovaOrb {
+                        owner: Some(player.owner),
                         velocity: aim.dir * stats.speed,
                         remaining: stats.range,
                         damage: damage * power,

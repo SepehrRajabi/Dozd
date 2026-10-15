@@ -14,6 +14,7 @@ pub struct CombatPlugin;
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Noise>()
+            .add_message::<CrewHit>()
             .add_systems(OnEnter(GameState::Playing), reset_noise)
             .add_systems(
                 Update,
@@ -103,9 +104,16 @@ impl Health {
 
     /// Returns false if the hit was ignored (dead, invulnerable or warded).
     pub fn hurt(&mut self, damage: f32) -> bool {
+        self.hurt_for(damage).is_some()
+    }
+
+    /// Like `hurt`, but says how much shield and hull the hit actually took:
+    /// never more than was left, so overkill doesn't count. `None` if ignored.
+    pub fn hurt_for(&mut self, damage: f32) -> Option<f32> {
         if self.invulnerable > 0.0 || self.warded > 0.0 || self.is_dead() {
-            return false;
+            return None;
         }
+        let dealt = damage.min(self.shield + self.current);
         let absorbed = damage.min(self.shield);
         self.shield -= absorbed;
         self.current -= damage - absorbed;
@@ -113,7 +121,7 @@ impl Health {
         self.since_hit = 0.0;
         self.flash = 0.12;
         self.invulnerable = self.grace;
-        true
+        Some(dealt)
     }
 }
 
@@ -125,10 +133,22 @@ pub struct Hurtbox(pub f32);
 #[derive(Component, Default)]
 pub struct Knockback(pub Vec2);
 
+/// Host-side: a pirate's own weapon hurt a guard, by `dealt` (see
+/// `Health::hurt_for`). Sent wherever pirates deal damage, for passives that
+/// feed on it.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct CrewHit {
+    /// `Player::owner` of the pirate whose weapon it was.
+    pub owner: u64,
+    pub dealt: f32,
+}
+
 /// Server-side projectile state; clients only see its [`ProjectileLook`] and transform.
 #[derive(Component)]
 pub struct Projectile {
     pub team: Team,
+    /// `Player::owner` of the pirate who fired it; `None` for guards and sentries.
+    pub owner: Option<u64>,
     pub velocity: Vec2,
     pub remaining: f32,
     pub damage: f32,
@@ -182,6 +202,8 @@ pub fn spawn_projectile(commands: &mut Commands, projectile: Projectile, look: P
 /// Host-side grenade in flight: follows an arc from `from` and explodes at `to`.
 #[derive(Component)]
 pub struct Grenade {
+    /// `Player::owner` of the pirate who threw it.
+    pub owner: Option<u64>,
     pub from: Vec2,
     pub to: Vec2,
     pub age: f32,
@@ -212,6 +234,8 @@ pub fn spawn_grenade(commands: &mut Commands, grenade: Grenade) {
 /// guards it passes, and bursts on the first wall, guard or riot shield it meets.
 #[derive(Component)]
 pub struct NovaOrb {
+    /// `Player::owner` of the pirate who loosed it.
+    pub owner: Option<u64>,
     pub velocity: Vec2,
     pub remaining: f32,
     /// Damage at the centre of the burst, halving toward the edge.
@@ -437,6 +461,7 @@ fn move_projectiles(
     targets: Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
     mut victims: Query<(&mut Health, Option<&mut Knockback>)>,
     riot_shields: Query<(&RiotShield, &Transform), Without<Projectile>>,
+    mut crew_hits: MessageWriter<CrewHit>,
 ) {
     // Sub-step so fast shots can't tunnel through walls or targets in one frame.
     const MAX_STEP: f32 = 4.0;
@@ -465,8 +490,11 @@ fn move_projectiles(
                     continue;
                 }
                 let Ok((mut health, knockback)) = victims.get_mut(target) else { continue };
-                if !health.hurt(projectile.damage) {
-                    continue;
+                let Some(dealt) = health.hurt_for(projectile.damage) else { continue };
+                if let Some(owner) = projectile.owner
+                    && *team == Team::Enemy
+                {
+                    crew_hits.write(CrewHit { owner, dealt });
                 }
                 if let Some(mut knockback) = knockback {
                     knockback.0 += projectile.velocity.normalize_or_zero() * projectile.knockback;
@@ -505,13 +533,16 @@ fn hits_shield(shields: &[[Vec2; RIOT_POINTS]], pos: Vec2) -> bool {
 }
 
 /// Hurts every guard within `radius` of `center`, `damage` at the middle
-/// halving toward the edge, and throws them outward.
+/// halving toward the edge, and throws them outward. Reports the hits as
+/// `owner`'s, if a pirate set it off.
 fn blast(
     targets: &mut Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), impl bevy::ecs::query::QueryFilter>,
     center: Vec2,
     damage: f32,
     radius: f32,
     knockback: f32,
+    owner: Option<u64>,
+    crew_hits: &mut MessageWriter<CrewHit>,
 ) {
     for (team, hurtbox, target_transform, mut health, target_knockback) in targets {
         let offset = target_transform.translation.truncate() - center;
@@ -520,9 +551,11 @@ fn blast(
             continue;
         }
         let falloff = 1.0 - 0.5 * offset.length() / reach;
-        if health.hurt(damage * falloff)
-            && let Some(mut target_knockback) = target_knockback
-        {
+        let Some(dealt) = health.hurt_for(damage * falloff) else { continue };
+        if let Some(owner) = owner {
+            crew_hits.write(CrewHit { owner, dealt });
+        }
+        if let Some(mut target_knockback) = target_knockback {
             target_knockback.0 += offset.normalize_or(Vec2::X) * knockback * falloff;
         }
     }
@@ -578,6 +611,7 @@ fn move_grenades(
     mut noise: ResMut<Noise>,
     mut grenades: Query<(Entity, &mut Grenade, &mut Transform)>,
     mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<Grenade>>,
+    mut crew_hits: MessageWriter<CrewHit>,
 ) {
     for (entity, mut grenade, mut transform) in &mut grenades {
         grenade.age += time.delta_secs();
@@ -591,7 +625,7 @@ fn move_grenades(
         }
 
         let center = grenade.to;
-        blast(&mut targets, center, grenade.damage, grenade.radius, grenade.knockback);
+        blast(&mut targets, center, grenade.damage, grenade.radius, grenade.knockback, grenade.owner, &mut crew_hits);
         noise.0.push(center);
         fx(&mut commands, FxKind::Explosion, center, 0.0, grenade.color);
         commands.entity(entity).despawn();
@@ -607,6 +641,7 @@ fn move_novas(
     mut orbs: Query<(Entity, &mut NovaOrb, &mut Transform)>,
     mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<NovaOrb>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<NovaOrb>, Without<Hurtbox>)>,
+    mut crew_hits: MessageWriter<CrewHit>,
 ) {
     const MAX_STEP: f32 = 3.0;
     let dt = time.delta_secs();
@@ -630,9 +665,14 @@ fn move_novas(
             near.sort_by(|a, b| a.0.total_cmp(&b.0));
             for (team, _, t, mut health, _) in &mut targets {
                 let at = t.translation.truncate();
-                if *team == Team::Enemy && near.iter().take(NOVA_ARC_TARGETS).any(|(_, n)| *n == at) && health.hurt(orb.arc_damage) {
-                    fx(&mut commands, FxKind::Zap(at), pos, 0.0, orb.color);
+                if *team != Team::Enemy || !near.iter().take(NOVA_ARC_TARGETS).any(|(_, n)| *n == at) {
+                    continue;
                 }
+                let Some(dealt) = health.hurt_for(orb.arc_damage) else { continue };
+                if let Some(owner) = orb.owner {
+                    crew_hits.write(CrewHit { owner, dealt });
+                }
+                fx(&mut commands, FxKind::Zap(at), pos, 0.0, orb.color);
             }
         }
 
@@ -648,7 +688,7 @@ fn move_novas(
             if grid.is_solid_at(pos) || hits_shield(&shields, pos) || touching || orb.remaining <= 0.0 {
                 // Bursts just short of a wall, not inside it.
                 let center = pos - orb.velocity.normalize_or_zero() * 2.0;
-                blast(&mut targets, center, orb.damage, orb.radius, orb.knockback);
+                blast(&mut targets, center, orb.damage, orb.radius, orb.knockback, orb.owner, &mut crew_hits);
                 noise.0.push(center);
                 fx(&mut commands, FxKind::Explosion, center, 0.0, orb.color);
                 commands.entity(entity).despawn();
