@@ -54,3 +54,6 @@ Temporary Items
 
 ## Ignore CSV files
 *.csv
+
+## Packaged builds from tools/package.sh
+dist/

@@ -39,6 +39,31 @@ cargo run --release -- join <address>  # join a host, e.g. 192.168.1.20 or host:
 Release builds embed all assets, so `target/release/dozd` is a single file you
 can hand to friends.
 
+## Builds
+
+`tools/package.sh windows|macos|linux` builds a release for that platform and
+packs it into `dist/`:
+
+| Platform | Package | Holds |
+| --- | --- | --- |
+| Windows | `dozd-<version>-windows-x86_64.zip` | `DOZD.exe` |
+| macOS | `dozd-<version>-macos.zip` | `DOZD.app`, one app for Apple Silicon and Intel, macOS 11+ |
+| Linux | `dozd-<version>-linux-x86_64.tar.gz` | `dozd` |
+
+The macOS app needs both Rust targets (`rustup target add aarch64-apple-darwin
+x86_64-apple-darwin`). From a Mac, Windows builds cross-compile with
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin):
+`CARGO_BUILD="cargo xwin build" tools/package.sh windows`.
+
+GitHub Actions builds all three: run **Release** from the Actions tab to get
+them as artifacts, or push a version tag (`git tag v0.2.0 && git push origin
+v0.2.0`) to also publish them as a GitHub release.
+
+The macOS app isn't notarized, so the first launch is blocked until it's
+allowed under System Settings > Privacy & Security > **Open Anyway**, and Windows may warn about an unknown publisher (**More info** >
+**Run anyway**). On Windows, the release build has no console, so
+`headless` prints nothing there; use a debug build for it.
+
 ## Pirates
 
 Pick a class, its abilities and your guns under **LOADOUT** in the main menu

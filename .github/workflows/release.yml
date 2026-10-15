@@ -1,0 +1,64 @@
+# Builds DOZD for Windows, macOS and Linux. Pushing a `v*` tag also publishes
+# the builds as a GitHub release; running it by hand from the Actions tab just
+# leaves them as downloadable artifacts on the run.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - platform: macos
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # The oldest supported Ubuntu, so the build runs on older distros too.
+          - platform: linux
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - name: Install Linux libraries
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - name: Build and package
+        shell: bash
+        run: tools/package.sh ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dozd-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "DOZD $GITHUB_REF_NAME" --generate-notes
