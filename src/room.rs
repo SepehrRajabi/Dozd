@@ -13,6 +13,7 @@ use crate::mission::MissionStatus;
 use crate::net::{NetMode, authority};
 use crate::perks::{PerkKind, spawn_pickup};
 use crate::player::{OFF_DECK, PirateStatus, Player, crew_spot, spawn_crew};
+use crate::vault::spawn_vault;
 use crate::{GameState, Level};
 
 pub const TILE: f32 = 16.0;
@@ -22,9 +23,9 @@ const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 
 // Layouts come from `deckgen`. Legend:
 // '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
-// 'L' lift down   'u' lift shaft the crew arrived by
+// 'L' lift down   'u' lift shaft the crew arrived by   'V' vault (2x2, last deck only)
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
-// guards: d sentry drone, s stalker, h warden
+// guards: d sentry drone, s stalker, h warden, b brute, g herald
 // perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak
 
 pub struct RoomPlugin;
@@ -88,6 +89,8 @@ pub struct RoomGrid {
     pub spawn_points: Vec<Vec2>,
     /// Where the crew starts.
     pub crew_spawn: Vec2,
+    /// Centre of the vault, on the last deck.
+    pub vault: Option<Vec2>,
 }
 
 impl RoomGrid {
@@ -209,6 +212,29 @@ impl FlowField {
             .min_by_key(|&(c, r, _)| self.dist[r][c])?;
         (grid.tile_center(c, r) - from).try_normalize()
     }
+
+    /// Paths to the nearest of `targets` (tiles), over the whole deck.
+    pub fn toward(grid: &RoomGrid, targets: Vec<(usize, usize)>) -> Self {
+        let mut dist = vec![vec![u16::MAX; grid.cols()]; grid.rows()];
+        let mut queue = BinaryHeap::new();
+        for &(col, row) in &targets {
+            dist[row][col] = 0;
+            queue.push(Reverse((0u16, col, row)));
+        }
+        while let Some(Reverse((d, col, row))) = queue.pop() {
+            if d > dist[row][col] {
+                continue;
+            }
+            for (c, r, cost) in grid.neighbors(col, row) {
+                let nd = d + cost;
+                if nd < dist[r][c] {
+                    dist[r][c] = nd;
+                    queue.push(Reverse((nd, c, r)));
+                }
+            }
+        }
+        Self { dist, targets }
+    }
 }
 
 fn update_flow_field(
@@ -223,31 +249,9 @@ fn update_flow_field(
         .collect();
     targets.sort_unstable();
     targets.dedup();
-    if field.targets == targets {
-        return;
+    if field.targets != targets {
+        *field = FlowField::toward(&grid, targets);
     }
-
-    let mut dist = vec![vec![u16::MAX; grid.cols()]; grid.rows()];
-    let mut queue = BinaryHeap::new();
-    for &(col, row) in &targets {
-        dist[row][col] = 0;
-        queue.push(Reverse((0u16, col, row)));
-    }
-    while let Some(Reverse((d, col, row))) = queue.pop() {
-        if d > dist[row][col] {
-            continue;
-        }
-        for (c, r, cost) in grid.neighbors(col, row) {
-            let nd = d + cost;
-            if nd < dist[r][c] {
-                dist[r][c] = nd;
-                queue.push(Reverse((nd, c, r)));
-            }
-        }
-    }
-
-    field.dist = dist;
-    field.targets = targets;
 }
 
 fn clear_level(mut commands: Commands, level: Query<Entity, With<Level>>, mut built: ResMut<BuiltDeck>) {
@@ -330,8 +334,13 @@ fn build_grid(layout: Layout) -> RoomGrid {
         origin: Vec2::new(-(cols as f32 - 1.0) * TILE / 2.0, (rows as f32 - 1.0) * TILE / 2.0),
         spawn_points: Vec::new(),
         crew_spawn: Vec2::ZERO,
+        vault: None,
     };
     grid.crew_spawn = grid.tile_center(layout.spawn.0, layout.spawn.1);
+    // The vault is 2x2 tiles from its top-left one.
+    grid.vault = layout
+        .vault
+        .map(|(col, row)| grid.tile_center(col, row) + Vec2::new(TILE, -TILE) / 2.0);
 
     for row in 0..rows {
         for col in 0..cols {
@@ -435,8 +444,12 @@ fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
     0
 }
 
-/// Places loot and guards. Host only; everyone else receives them by replication.
+/// Places loot, guards and the vault. Host only; everyone else receives them by
+/// replication.
 fn populate(commands: &mut Commands, grid: &RoomGrid) {
+    if let Some(pos) = grid.vault {
+        spawn_vault(commands, pos);
+    }
     for (row, line) in grid.tiles.iter().enumerate() {
         for (col, &ch) in line.iter().enumerate() {
             let pos = grid.tile_center(col, row);

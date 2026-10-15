@@ -19,6 +19,7 @@ mod perks;
 mod player;
 mod room;
 mod settings;
+mod vault;
 
 use bevy::prelude::*;
 use bevy::window::CursorOptions;
@@ -158,6 +159,7 @@ impl Plugin for GamePlugins {
             drops::DropsPlugin,
             class::ClassPlugin,
             crew::CrewPlugin,
+            vault::VaultPlugin,
         ));
     }
 }
@@ -182,6 +184,7 @@ impl Plugin for ViewPlugins {
             settings::DisplayPlugin,
             hud::HudPlugin,
             crew::CrewViewPlugin,
+            vault::VaultViewPlugin,
         ));
     }
 }

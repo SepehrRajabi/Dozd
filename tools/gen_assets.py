@@ -1167,6 +1167,46 @@ def lift_platform():
     ]
 
 
+def vault_floor():
+    """The strongroom floor the vault's gold sits on, 2x2 tiles: a heavy rim
+    striped like a hazard line around a dark, sunken bed."""
+    n = SIZE * 2
+    bed = rgb(30, 32, 42)
+    px = [[shade(bed, (noise(x, y, 51) - 0.5) * 6) for x in range(n)] for y in range(n)]
+    for y in range(n):
+        for x in range(n):
+            d = min(x, y, n - 1 - x, n - 1 - y)
+            if d < 4:
+                stripe = ((x + y) // 3) % 2 == 0
+                px[y][x] = rgb(214, 170, 40) if stripe else rgb(34, 32, 30)
+            elif (x - 4) % 6 == 0 or (y - 4) % 6 == 0:
+                px[y][x] = shade(bed, -8)
+    for d, c in [(0, rgb(12, 13, 18)), (1, rgb(96, 104, 126)), (4, rgb(14, 15, 21)), (5, rgb(22, 24, 32))]:
+        for i in range(d, n - d):
+            px[d][i] = px[i][d] = c
+            px[n - 1 - d][i] = px[i][n - 1 - d] = c if d != 1 else shade(c, -40)
+    for x, y in [(1, 1), (n - 3, 1), (1, n - 3), (n - 3, n - 3)]:
+        rivet(px, x, y)
+    return px
+
+
+# A small bar for the vault's pile; neighbours share their outlines.
+VAULT_BAR = (
+    [
+        "kkkkkk",
+        "kwYYYk",
+        "kYYYYk",
+        "kyyyok",
+        "kkkkkk",
+    ],
+    {
+        "Y": rgb(255, 214, 80),
+        "y": rgb(226, 168, 40),
+        "o": rgb(160, 104, 24),
+    },
+)
+
+
 def floor_shadows():
     """Soft shade a wall casts across the floor beside it: from the north, west
     and east."""
@@ -1308,6 +1348,8 @@ def main():
         write_png(os.path.join(ROOT, "tiles", f"{name}.png"), px)
 
     write_png(os.path.join(ROOT, "shadow.png"), shadow())
+    write_png(os.path.join(ROOT, "vault.png"), vault_floor())
+    write_png(os.path.join(ROOT, "vault_bar.png"), from_ascii("vault_bar", *VAULT_BAR, width=6, height=5))
 
     guns = {}
     for name, (rows, pal) in GUNS.items():

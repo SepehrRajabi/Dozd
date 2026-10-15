@@ -3,8 +3,22 @@
 ![DOZD](docs/preview/logo.png)
 
 A co-op space-pirate heist game. Loot a station three decks deep, ride the lift
-down to richer decks, and get out on a hazard pad before security overwhelms
-you. Only the pirates standing on the pad when it finishes get out.
+down to richer decks, crack the vault at the bottom, and get out on a hazard pad
+before security overwhelms you. Only the pirates standing on the pad when it
+finishes get out.
+
+## Decks
+
+Each deck down is harder than the last: more rooms, more guards in each, and
+nastier ones, and once the alarm is up, reinforcements come faster, in bigger
+waves, and with more of the heavy guards.
+
+The last deck's main room holds the vault: 40 gold bars worth 300 cr each.
+Stand at it and hold E to pull bars out one at a time, about one every 1.2 s.
+Every pirate at the vault pulls on their own, so a full crew empties it far
+faster than one pirate. Firing or stepping away starts the bar you're pulling
+over. The first bar out breaches the vault: the station goes into lockdown and
+sends a wave straight away, and every bar after raises the alarm a little.
 
 Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 [bevy_replicon](https://github.com/projectharmonia/bevy_replicon).
@@ -99,7 +113,7 @@ from the classes still free.
 | R | Reload |
 | 1-4 / wheel | Switch gun |
 | Q | Class ability |
-| E | Take loot |
+| E | Take loot; hold at the vault to pull gold bars |
 | Enter | Play again (results screen) |
 | Esc | Leave / back |
 

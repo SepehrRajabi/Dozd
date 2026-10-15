@@ -15,6 +15,8 @@ pub struct Layout {
     pub tiles: Vec<Vec<char>>,
     /// Tile where the crew arrives.
     pub spawn: (usize, usize),
+    /// Top-left tile of the 2x2 vault, on the last deck only.
+    pub vault: Option<(usize, usize)>,
 }
 
 /// xorshift; `Rng` in main uses floats, which we avoid here.
@@ -88,13 +90,22 @@ fn loot_table(deck: u8) -> &'static [(char, u32)] {
     }
 }
 
-fn guard_table(deck: u8) -> &'static [(char, u32)] {
-    match deck {
-        0 => &[('d', 5), ('s', 3), ('h', 1), ('b', 1), ('g', 1)],
-        1 => &[('d', 4), ('s', 4), ('h', 2), ('b', 2), ('g', 2)],
-        _ => &[('d', 3), ('s', 4), ('h', 3), ('b', 2), ('g', 2)],
-    }
+/// Drones thin out and wardens, brutes and heralds take over the deeper you go.
+fn guard_table(deck: u8) -> [(char, u32); 5] {
+    let deck = deck as u32;
+    [
+        ('d', 5u32.saturating_sub(deck).max(1)),
+        ('s', 3 + deck.min(1)),
+        ('h', 1 + 3 * deck / 2),
+        ('b', 1 + deck),
+        ('g', 1 + deck),
+    ]
 }
+
+/// The vault room on the last deck: big enough to fight in around the vault.
+const VAULT_ROOM: (usize, usize) = (15, 11);
+/// Who guards the vault.
+const VAULT_GUARDS: [char; 4] = ['h', 'h', 'b', 's'];
 
 /// Perk pickups: restores and ammo are common, the tactical ones rarer.
 const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2)];
@@ -104,24 +115,38 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
     let last = deck + 1 >= decks;
     let mut tiles = vec![vec!['#'; COLS]; ROWS];
 
-    let rooms = place_rooms(&mut rng, 7 + deck as usize);
+    // On the last deck the vault room goes in first, so it always gets its space.
+    let rooms = place_rooms(&mut rng, 7 + deck as usize, last.then_some(VAULT_ROOM));
     for room in &rooms {
         fill(&mut tiles, room.x, room.y, room.w, room.h, '.');
     }
     connect(&mut rng, &mut tiles, &rooms);
 
-    // Roles: arrive in one room; the lift (or vault) is the farthest walk away,
-    // and the escape pad is somewhere in the far half.
-    let start = rng.range(0, rooms.len() - 1);
+    // Roles: arrive in one room; the lift is the farthest walk away (on the last
+    // deck, the crew arrives as far from the vault as it gets), and the escape
+    // pad is somewhere in the far half.
+    let farthest_from = |from: (usize, usize), rooms_left: &mut Vec<usize>| {
+        let dist = walk_distances(&tiles, from);
+        rooms_left.sort_by_key(|&i| {
+            let (c, r) = rooms[i].center();
+            Reverse(dist[r][c])
+        });
+    };
+    let (start, goal, far) = if last {
+        let mut others: Vec<usize> = (1..rooms.len()).collect();
+        farthest_from(rooms[0].center(), &mut others);
+        let start = others[0];
+        let mut far: Vec<usize> = (1..rooms.len()).filter(|&i| i != start).collect();
+        farthest_from(rooms[start].center(), &mut far);
+        (start, 0, far)
+    } else {
+        let start = rng.range(0, rooms.len() - 1);
+        let mut far: Vec<usize> = (0..rooms.len()).filter(|&i| i != start).collect();
+        farthest_from(rooms[start].center(), &mut far);
+        (start, far.remove(0), far)
+    };
     let spawn = rooms[start].center();
-    let dist = walk_distances(&tiles, spawn);
-    let mut far: Vec<usize> = (0..rooms.len()).filter(|&i| i != start).collect();
-    far.sort_by_key(|&i| {
-        let (c, r) = rooms[i].center();
-        Reverse(dist[r][c])
-    });
-    let goal = far[0];
-    let pad = far[1 + rng.range(0, (far.len() - 1) / 2).min(far.len() - 2)];
+    let pad = far[rng.range(0, far.len() / 2).min(far.len() - 1)];
 
     for (i, room) in rooms.iter().enumerate() {
         if i != start && i != goal && i != pad {
@@ -137,9 +162,11 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
     let (px, py) = rooms[pad].center();
     fill(&mut tiles, px - 2, py - 1, 4, 3, '=');
     let (gx, gy) = rooms[goal].center();
+    let vault = last.then_some((gx, gy));
     if last {
-        let vault = rooms[goal];
-        fill(&mut tiles, vault.x, vault.y, vault.w, vault.h, ',');
+        let room = rooms[goal];
+        fill(&mut tiles, room.x, room.y, room.w, room.h, ',');
+        fill(&mut tiles, gx, gy, 2, 2, 'V');
     } else {
         fill(&mut tiles, gx, gy, 2, 2, 'L');
     }
@@ -152,25 +179,22 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
         place(&mut rng, &mut tiles, room, 'v', None);
 
         let (loot, guards): (Vec<char>, Vec<char>) = if last && i == goal {
-            (vec!['r', 'r', 'w'], vec!['h', 'h', 's'])
+            (Vec::new(), VAULT_GUARDS.to_vec())
         } else {
             let loot_count = if i == goal || i == pad {
                 rng.range(0, 1)
             } else {
                 rng.range(1, 2 + deck.min(1) as usize)
             };
-            let mut guard_count = match deck {
-                0 => rng.range(0, 2),
-                1 => rng.range(1, 2),
-                _ => rng.range(1, 3),
-            };
+            let depth = deck as usize;
+            let mut guard_count = rng.range(depth, 2 + depth);
             if i == pad {
                 // Nobody gets a free extraction.
-                guard_count = guard_count.max(1) + deck.min(1) as usize;
+                guard_count = guard_count.max(1) + depth;
             }
             (
                 (0..loot_count).map(|_| rng.pick(loot_table(deck))).collect(),
-                (0..guard_count).map(|_| rng.pick(guard_table(deck))).collect(),
+                (0..guard_count).map(|_| rng.pick(&guard_table(deck))).collect(),
             )
         };
         for item in loot {
@@ -194,7 +218,7 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
         place(&mut rng, &mut tiles, &room, perk, None);
     }
 
-    Layout { tiles, spawn }
+    Layout { tiles, spawn, vault }
 }
 
 fn fill(tiles: &mut [Vec<char>], x: usize, y: usize, w: usize, h: usize, ch: char) {
@@ -203,14 +227,17 @@ fn fill(tiles: &mut [Vec<char>], x: usize, y: usize, w: usize, h: usize, ch: cha
     }
 }
 
-fn place_rooms(rng: &mut Gen, want: usize) -> Vec<Rect> {
+/// Scatters `want` rooms; `first`, if given, is the size of the first one.
+fn place_rooms(rng: &mut Gen, want: usize, first: Option<(usize, usize)>) -> Vec<Rect> {
     let mut rooms: Vec<Rect> = Vec::new();
     for _ in 0..600 {
         if rooms.len() >= want {
             break;
         }
-        let w = rng.range(7, 13);
-        let h = rng.range(6, 10);
+        let (w, h) = match first {
+            Some(size) if rooms.is_empty() => size,
+            _ => (rng.range(7, 13), rng.range(6, 10)),
+        };
         let room = Rect {
             x: rng.range(2, COLS - w - 3),
             y: rng.range(2, ROWS - h - 3),
@@ -382,7 +409,12 @@ mod tests {
                 let count = |c: char| tiles.iter().flatten().filter(|&&t| t == c).count();
                 assert_eq!(count('='), 12, "seed {seed} deck {deck}: pad");
                 assert_eq!(count('L'), if deck < 2 { 4 } else { 0 }, "seed {seed} deck {deck}: lift");
-                assert!(count('r') >= if deck == 2 { 2 } else { 0 });
+                assert_eq!(count('V'), if deck == 2 { 4 } else { 0 }, "seed {seed} deck {deck}: vault");
+                assert_eq!(layout.vault.is_some(), deck == 2);
+                if let Some((x, y)) = layout.vault {
+                    assert_eq!(tiles[y][x], 'V');
+                    assert_eq!(tiles[y + 1][x + 1], 'V');
+                }
                 let perks = ['1', '2', '3', '4'].into_iter().map(count).sum::<usize>();
                 assert!((1..=3).contains(&perks), "seed {seed} deck {deck}: {perks} perks");
             }
@@ -393,5 +425,7 @@ mod tests {
     fn same_seed_same_deck() {
         assert_eq!(generate(42, 1, 3).tiles, generate(42, 1, 3).tiles);
         assert_ne!(generate(42, 1, 3).tiles, generate(43, 1, 3).tiles);
+        assert_eq!(generate(42, 2, 3).tiles, generate(42, 2, 3).tiles);
+        assert_eq!(generate(42, 2, 3).vault, generate(42, 2, 3).vault);
     }
 }

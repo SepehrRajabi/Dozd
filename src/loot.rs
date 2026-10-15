@@ -7,6 +7,7 @@ use crate::mission::Alarm;
 use crate::net::{LocalPlayer, authority};
 use crate::player::{Controls, PirateStatus, Player};
 use crate::hud::{self, HudSlot};
+use crate::vault::{VAULT_REACH, Vault};
 use crate::{GameState, Level};
 
 const PICKUP_RADIUS: f32 = 14.0;
@@ -212,6 +213,7 @@ fn spawn_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 fn update_hud(
     player: Option<Single<(&Player, &Transform), With<LocalPlayer>>>,
     loot: Query<(Entity, &LootKind, &Transform)>,
+    vaults: Query<(&Vault, &Transform)>,
     mut haul_text: Single<&mut Text, (With<HaulText>, Without<ItemsText>, Without<PromptText>)>,
     mut items_text: Single<&mut Text, (With<ItemsText>, Without<PromptText>)>,
     mut panel: Single<&mut Node, With<PromptPanel>>,
@@ -223,14 +225,26 @@ fn update_hud(
     let items = if player.items == 1 { "1 item".into() } else { format!("{} items", player.items) };
     items_text.set_if_neq(Text(items));
 
-    let nearest = nearest_loot(transform.translation.truncate(), loot.iter());
-    let display = if nearest.is_some() { Display::Flex } else { Display::None };
+    // Loose loot in reach comes first; the vault takes a while anyway.
+    let pos = transform.translation.truncate();
+    let shown = if let Some((_, kind, _)) = nearest_loot(pos, loot.iter()) {
+        Some((format!("Take {}  ({} cr)", kind.name(), kind.value()), kind.color()))
+    } else {
+        vaults
+            .iter()
+            .find(|(v, t)| v.bars > 0 && t.translation.truncate().distance(pos) <= VAULT_REACH)
+            .map(|(v, _)| {
+                let left = if v.bars == 1 { "1 bar left".into() } else { format!("{} bars left", v.bars) };
+                (format!("Hold to loot the vault  ({left})"), hud::GOLD)
+            })
+    };
+    let display = if shown.is_some() { Display::Flex } else { Display::None };
     if panel.display != display {
         panel.display = display;
     }
-    if let Some((_, kind, _)) = nearest {
+    if let Some((line, tint)) = shown {
         let (mut text, mut color) = prompt.into_inner();
-        text.set_if_neq(Text(format!("Take {}  ({} cr)", kind.name(), kind.value())));
-        color.0 = kind.color();
+        text.set_if_neq(Text(line));
+        color.set_if_neq(TextColor(tint));
     }
 }

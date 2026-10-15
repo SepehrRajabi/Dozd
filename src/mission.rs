@@ -21,7 +21,17 @@ const EXTRACT_TIME: f32 = 15.0;
 const LIFT_TIME: f32 = 6.0;
 /// Alarm levels shed on reaching a new deck: its security hasn't caught up yet.
 const DECK_ALARM_RELIEF: f32 = 1.0;
+/// Guards alive at once on the top deck, for a solo pirate.
 const MAX_ALIVE: usize = 14;
+/// Each deck down allows this many more guards alive at once, in step with the
+/// guards each deck starts with, so deep waves aren't swallowed by the cap.
+const DECK_ALIVE: usize = 10;
+/// Each deck down brings the waves this many seconds closer together.
+const DECK_WAVE_HASTE: f32 = 1.5;
+/// How much deeper decks weigh on what reinforcements are sent, in alarm levels.
+const DECK_THREAT: f32 = 0.75;
+/// Alarm raised by each gold bar pulled from the vault.
+const BAR_ALARM: f32 = 0.04;
 /// Reinforcements won't pop out of a spawn point closer than this to any pirate.
 const SPAWN_CLEARANCE: f32 = 70.0;
 
@@ -78,6 +88,8 @@ pub struct Alarm {
     /// Extra enemies added to the next wave.
     surge: usize,
     announced: u32,
+    /// The deck the crew is on; deeper decks answer harder.
+    deck: u8,
 }
 
 impl Alarm {
@@ -105,23 +117,47 @@ impl Alarm {
         self.level >= 2.0
     }
 
+    /// The first bar out of the vault: lockdown, and an immediate, bigger wave.
+    pub(crate) fn vault_breached(&mut self) {
+        self.raise((2.0 - self.level).max(0.5));
+        // The breach banner says it all; skip the alarm level's own.
+        self.announced = self.level.floor() as u32;
+        self.surge += 2;
+        self.wave_timer = 0.0;
+    }
+
+    pub(crate) fn bar_taken(&mut self) {
+        self.raise(BAR_ALARM);
+    }
+
     fn wave_interval(&self) -> f32 {
-        (18.0 - 2.5 * self.level).max(5.0)
+        (18.0 - 2.5 * self.level - DECK_WAVE_HASTE * self.deck as f32).max(5.0)
+    }
+
+    /// The alarm level reinforcements are picked for: deeper decks send worse.
+    fn threat(&self) -> f32 {
+        self.level + DECK_THREAT * self.deck as f32
+    }
+
+    /// Guards alive at once before waves hold back.
+    fn max_alive(&self, crew: usize) -> usize {
+        MAX_ALIVE + DECK_ALIVE * self.deck as usize + 4 * crew.saturating_sub(1)
     }
 
     /// Arriving on a fresh deck: the alarm carries over, minus a little relief.
-    fn new_deck(&mut self) {
+    fn new_deck(&mut self, deck: u8) {
         self.level = (self.level - DECK_ALARM_RELIEF).max(0.0);
         self.announced = self.level.floor() as u32;
         self.wave_timer = 8.0;
         self.surge = 0;
+        self.deck = deck;
     }
 
     /// Guards per wave, in proportion to the crew that set out: each pirate
-    /// brings a solo run's worth.
+    /// brings a solo run's worth, plus one more per deck down.
     fn wave_size(&self, crew: usize) -> usize {
         let base = 1 + (self.level * 0.8).floor() as usize;
-        base * crew.max(1)
+        base * crew.max(1) + self.deck as usize
     }
 }
 
@@ -139,14 +175,14 @@ struct Lift {
 }
 
 #[derive(Resource, Default)]
-struct Banner {
+pub(crate) struct Banner {
     text: String,
     color: Color,
     timer: f32,
 }
 
 impl Banner {
-    fn show(&mut self, text: impl Into<String>, color: Color, secs: f32) {
+    pub(crate) fn show(&mut self, text: impl Into<String>, color: Color, secs: f32) {
         self.text = text.into();
         self.color = color;
         self.timer = secs;
@@ -362,14 +398,15 @@ fn run_waves(
     // Everyone who set out from the lobby, fallen or gone: the station sizes
     // its response to the crew it saw come aboard.
     let aboard = players.iter().count();
-    let cap = MAX_ALIVE + 4 * aboard.saturating_sub(1);
-    let room = cap.saturating_sub(enemies.iter().count());
-    let count = (alarm.wave_size(aboard) + alarm.surge).min(room);
-    alarm.surge = 0;
+    let room = alarm.max_alive(aboard).saturating_sub(enemies.iter().count());
+    let wave = alarm.wave_size(aboard);
+    let count = (wave + alarm.surge).min(room);
+    // A surge with no room yet (a breach on a full deck) waits for the next wave.
+    alarm.surge -= alarm.surge.min(count.saturating_sub(wave));
     for i in 0..count {
         let point = points[(i + (rng.unit() * points.len() as f32) as usize) % points.len()];
         let pos = point + Vec2::new(rng.signed(), rng.signed()) * 3.0;
-        let kind = roll_reinforcement(&mut rng, alarm.level);
+        let kind = roll_reinforcement(&mut rng, alarm.threat());
         spawn_enemy(&mut commands, kind, pos, true);
         fx(&mut commands, FxKind::Burst, pos, 0.0, Color::srgb(1.0, 0.3, 0.2));
     }
@@ -429,9 +466,9 @@ fn ride_lift(
     }
     *lift = Lift::default();
     *extraction = Extraction::default();
-    alarm.new_deck();
+    alarm.new_deck(heist.deck);
     let text = if heist.deck + 1 == DECKS {
-        format!("DECK {DECKS}/{DECKS}  -  THE VAULT. Nothing deeper: grab it and find a pad")
+        format!("DECK {DECKS}/{DECKS}  -  THE VAULT. Crack it in the main room, then find a pad")
     } else {
         format!("DECK {}/{DECKS}  -  richer loot, tougher guards", heist.deck + 1)
     };
@@ -812,5 +849,17 @@ mod tests {
         assert_eq!(alarm.wave_size(3), 3 * solo);
         assert_eq!(alarm.wave_size(5), 5 * solo);
         assert_eq!(alarm.wave_size(0), solo, "an empty deck still gets a wave");
+    }
+
+    #[test]
+    fn deeper_decks_answer_harder() {
+        let top = Alarm { level: 2.0, ..default() };
+        let bottom = Alarm { level: 2.0, deck: 2, ..default() };
+        assert_eq!(bottom.wave_size(3), top.wave_size(3) + 2);
+        assert!(bottom.wave_interval() < top.wave_interval());
+        assert!(bottom.max_alive(1) > top.max_alive(1));
+        assert!(bottom.threat() > top.threat());
+        let purge = Alarm { level: MAX_ALARM, deck: 2, ..default() };
+        assert_eq!(purge.wave_interval(), 5.0, "waves bottom out");
     }
 }

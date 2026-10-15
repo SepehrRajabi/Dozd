@@ -14,6 +14,7 @@ use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, NetMode, PlayerIn
 use crate::mission::MissionStatus;
 use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
+use crate::vault::Looting;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
 const SPEED: f32 = 75.0;
@@ -159,6 +160,7 @@ pub struct Controls {
     pub slot: Option<u8>,
     pub cycle: i8,
     pub interact: bool,
+    pub interact_held: bool,
     pub ability: bool,
 }
 
@@ -175,6 +177,7 @@ impl Controls {
         self.slot = input.slot.or(self.slot);
         self.cycle = (self.cycle + input.cycle).clamp(-1, 1);
         self.interact |= input.interact;
+        self.interact_held = input.interact_held;
         self.ability |= input.ability;
     }
 }
@@ -223,7 +226,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
         Ability::default(),
         Boons::default(),
         Perks::default(),
-        Controls::default(),
+        (Controls::default(), Looting::default()),
         Transform::from_translation(pos.extend(10.0)),
     ));
 }
@@ -454,6 +457,7 @@ fn gather_input(
             0
         },
         interact: keys.just_pressed(KeyCode::KeyE),
+        interact_held: keys.pressed(KeyCode::KeyE),
         ability: keys.just_pressed(KeyCode::KeyQ),
         restart: keys.just_pressed(KeyCode::Enter),
     });

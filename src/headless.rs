@@ -21,7 +21,8 @@ use crate::enemies::{AiState, Enemy, EnemyLook};
 use crate::mission::Alarm;
 use crate::net::{HOST_ID, NetMode, PlayerInput, StartSession};
 use crate::player::{Controls, CrewSize, PirateStatus, Player};
-use crate::room::{DECKS, NextSeed};
+use crate::room::{DECKS, FlowField, NextSeed, RoomGrid};
+use crate::vault::{VAULT_REACH, Vault};
 use crate::{GamePlugins, GameState, Rng};
 
 const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|doctor|mixed] \
@@ -188,7 +189,13 @@ struct Bot {
     heading: Vec2,
     /// Seconds until picking a new heading.
     timer: f32,
+    /// Ignoring the vault for this heading, which also shakes loose a stuck bot.
+    wander: bool,
 }
+
+/// Paths to the vault on the deck being played, if it has one.
+#[derive(Default)]
+struct VaultPaths(Option<(Vec2, FlowField)>);
 
 pub fn run(config: Config) {
     let has_data_output = config.csv || config.trace;
@@ -290,6 +297,9 @@ fn drive_bots(
     mut rng: ResMut<BotRng>,
     mut pirates: Query<(Entity, &Transform, &Health, &mut Controls, Option<&mut Bot>), With<Player>>,
     enemies: Query<(Entity, &Transform, &Health, &Team, &EnemyLook), With<Enemy>>,
+    grid: Option<Res<RoomGrid>>,
+    vaults: Query<&Vault>,
+    mut paths: Local<VaultPaths>,
 ) {
     if config.trace {
         for (entity, transform, health, team, look) in &enemies {
@@ -311,11 +321,18 @@ fn drive_bots(
     if config.bot == BotKind::Idle {
         return;
     }
+    // On the last deck, bots head for the vault while it still holds gold.
+    let vault = grid.as_deref().and_then(|g| g.vault.map(|v| (g, v)));
+    if paths.0.as_ref().map(|(v, _)| *v) != vault.map(|(_, v)| v) {
+        paths.0 = vault.and_then(|(g, v)| g.tile_of(v).map(|tile| (v, FlowField::toward(g, vec![tile]))));
+    }
+    let full = vaults.iter().any(|v| v.bars > 0);
+
     let rng = &mut rng.0;
     let dt = time.delta_secs();
     for (entity, transform, health, mut controls, bot) in &mut pirates {
         let Some(mut bot) = bot else {
-            commands.entity(entity).insert(Bot { heading: Vec2::ZERO, timer: 0.0 });
+            commands.entity(entity).insert(Bot { heading: Vec2::ZERO, timer: 0.0, wander: false });
             continue;
         };
         bot.timer -= dt;
@@ -326,6 +343,7 @@ fn drive_bots(
             } else {
                 Vec2::from_angle(rng.unit() * std::f32::consts::TAU)
             };
+            bot.wander = rng.unit() < 0.25;
         }
 
         let pos = transform.translation.truncate();
@@ -335,9 +353,20 @@ fn drive_bots(
             .map(|(_, t, ..)| t.translation.truncate())
             .filter(|e| e.distance(pos) <= ENGAGE)
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
+        let to_vault = match (&paths.0, &grid) {
+            (Some((v, field)), Some(grid)) if full && target.is_none() && !bot.wander => Some(
+                if v.distance(pos) <= VAULT_REACH * 0.6 {
+                    Vec2::ZERO
+                } else {
+                    field.step(grid, pos).unwrap_or((*v - pos).normalize_or_zero())
+                },
+            ),
+            _ => None,
+        };
+        let movement = to_vault.unwrap_or(bot.heading);
         let aim = target.unwrap_or(pos + bot.heading * 40.0);
         let input = PlayerInput {
-            movement: bot.heading,
+            movement,
             aim,
             fire: target.is_some(),
             fire_pressed: target.is_some(),
@@ -346,6 +375,7 @@ fn drive_bots(
             slot: (rng.unit() < 0.004).then(|| (rng.unit() * 4.0) as u8 % 4),
             cycle: 0,
             interact: true,
+            interact_held: true,
             // Engineers drop a sentry now and then mid-fight.
             ability: target.is_some() && rng.unit() < 0.01,
             restart: false,

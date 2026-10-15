@@ -20,6 +20,7 @@ use crate::loot::LootKind;
 use crate::mission::MissionStatus;
 use crate::perks::{PerkPickup, Perks};
 use crate::player::{Aim, Dash, Player, Walking};
+use crate::vault::{Looting, Vault};
 use crate::{GameState, Level};
 
 pub const DEFAULT_PORT: u16 = 5000;
@@ -147,6 +148,8 @@ pub struct PlayerInput {
     pub slot: Option<u8>,
     pub cycle: i8,
     pub interact: bool,
+    /// E is held down (pulling bars from the vault).
+    pub interact_held: bool,
     /// Use the class ability (the Engineer's sentry).
     pub ability: bool,
     pub restart: bool,
@@ -187,6 +190,8 @@ impl Plugin for NetPlugin {
             .replicate::<Link>()
             .replicate::<Roster>()
             .replicate::<Boons>()
+            .replicate::<Vault>()
+            .replicate::<Looting>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)

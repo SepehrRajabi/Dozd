@@ -18,6 +18,7 @@ use crate::loot::LootKind;
 use crate::perks::PerkKind;
 use crate::player::Player;
 use crate::settings::{Settings, read_config, write_config};
+use crate::vault::Vault;
 use crate::hud::{self, HudSlot};
 use crate::{GameState, PIXEL_SCALE};
 
@@ -1337,6 +1338,7 @@ fn update_session_hud(
     prompt: Res<LeavePrompt>,
     players: Query<(), With<Player>>,
     loot: Query<(), With<LootKind>>,
+    vault: Option<Single<&Vault>>,
     mut session: Single<&mut Text, (With<SessionText>, Without<LeaveText>, Without<LootLeftText>)>,
     mut loot_left: Single<&mut Text, (With<LootLeftText>, Without<LeaveText>)>,
     mut leave: Single<&mut Text, With<LeaveText>>,
@@ -1355,7 +1357,10 @@ fn update_session_hud(
     if session.0 != content {
         session.0 = content;
     }
-    let remaining = format!("LOOT LEFT {}", loot.iter().count());
+    let mut remaining = format!("LOOT LEFT {}", loot.iter().count());
+    if let Some(vault) = vault {
+        remaining += &format!("    VAULT {}/{}", vault.bars, vault.total);
+    }
     if loot_left.0 != remaining {
         loot_left.0 = remaining;
     }
