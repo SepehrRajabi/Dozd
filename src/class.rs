@@ -3,8 +3,8 @@
 //! a lethal laser on Q, and keeps the whole crew supplied, so their shots
 //! sometimes cost no ammo, and the Engineer wears heavier armour; the others
 //! have an ability on Q: the Engineer drops a sentry gun, the Bulwark
-//! carries a bulletproof riot shield, the Hacker turns a guard against the
-//! station and the Doctor wards the crew nearby against all harm. The Doctor
+//! carries a bulletproof riot shield, the Hacker turns the guards around their
+//! crosshair against the station or freezes every guard on the deck, and the Doctor wards the crew nearby against all harm. The Doctor
 //! also slowly patches up any crewmate close by, the Bulwark's presence makes
 //! the crew around them hit harder, and the Hacker jams the guards around them
 //! so their attacks sometimes miss.
@@ -26,7 +26,7 @@ use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
-use crate::player::{Aim, Controls, MAX_SHIELD, PirateStatus, Player, move_players};
+use crate::player::{Aim, Controls, LocalAim, MAX_SHIELD, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
@@ -106,8 +106,12 @@ pub const HACK_LIFE: f32 = 20.0;
 const HACK_COOLDOWN: f32 = 30.0;
 /// How far away a Hacker can reach a guard.
 const HACK_RANGE: f32 = 140.0;
-/// How close to the crosshair the guard must be.
-const HACK_AIM_RADIUS: f32 = 36.0;
+/// Guards this close to the crosshair are all hacked.
+const HACK_RADIUS: f32 = 40.0;
+/// Seconds a blackout freezes every guard on the deck, reinforcements included.
+pub const BLACKOUT_LIFE: f32 = 4.0;
+const BLACKOUT_COOLDOWN: f32 = 40.0;
+const BLACKOUT_COLOR: Color = Color::srgb(0.55, 0.85, 1.0);
 pub const HACK_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
 /// How close guards must be to the Hacker to be jammed.
 pub const JAM_RADIUS: f32 = 72.0;
@@ -133,9 +137,11 @@ impl Plugin for ClassPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalLoadout>()
             .init_resource::<Loadouts>()
+            .init_resource::<Blackout>()
+            .add_systems(OnExit(GameState::Playing), |mut blackout: ResMut<Blackout>| blackout.0 = 0.0)
             .add_systems(
                 Update,
-                (use_abilities, run_sentries, carry_riot_shields, fire_lasers, support_crew)
+                (use_abilities, run_blackout, run_sentries, carry_riot_shields, fire_lasers, support_crew)
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -151,9 +157,10 @@ impl Plugin for ClassViewPlugin {
         app.add_observer(dress_sentry)
             .add_observer(dress_riot_shield)
             .add_observer(dress_laser)
+            .add_systems(Startup, spawn_hack_reticle)
             .add_observer(dress_medic_auras)
             .add_systems(Startup, spawn_ability_hud)
-            .add_systems(Update, (draw_sentries, draw_riot_shields, draw_lasers, draw_medic_auras, heal_motes, update_ability_hud));
+            .add_systems(Update, (draw_sentries, draw_riot_shields, draw_lasers, draw_hack_reticle, draw_medic_auras, heal_motes, update_ability_hud));
     }
 }
 
@@ -269,6 +276,12 @@ impl Active {
                 cooldown: HACK_COOLDOWN,
                 life: HACK_LIFE,
                 color: HACK_COLOR,
+            },
+            Self::Blackout => AbilityStats {
+                label: "BLKOUT",
+                cooldown: BLACKOUT_COOLDOWN,
+                life: BLACKOUT_LIFE,
+                color: BLACKOUT_COLOR,
             },
             Self::Ward => AbilityStats {
                 label: "WARD",
@@ -537,6 +550,15 @@ fn riot_curve() -> [Vec2; RIOT_POINTS] {
     })
 }
 
+/// Host-side: seconds left on a Hacker's blackout. Every guard on the deck,
+/// even those arriving after it started, stays frozen until it runs out.
+#[derive(Resource, Default)]
+struct Blackout(f32);
+
+/// The ring around a Hacker's crosshair: who Q would hack.
+#[derive(Component)]
+struct HackReticle;
+
 /// A Gunner's laser: a beam from their gun along their aim, thrown about by its
 /// kick, that burns through every guard in it until a wall stops it.
 #[derive(Component, Serialize, Deserialize, Clone)]
@@ -624,6 +646,7 @@ fn use_abilities(
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
+    mut blackout: ResMut<Blackout>,
     mut players: Query<(&Player, &mut Health, &Controls, &Transform, &Aim, &mut Ability)>,
     sentries: Query<(Entity, &Sentry, &Transform), Without<Player>>,
     riot_shields: Query<(Entity, &RiotShield)>,
@@ -723,26 +746,36 @@ fn use_abilities(
                 fx(&mut commands, FxKind::Burst, spot, 0.0, SENTRY_COLOR);
             }
             Active::Hack => {
-                // The guard nearest the crosshair that the Hacker can see.
-                let target = enemies
-                    .iter_mut()
-                    .map(|(enemy, t, h)| (enemy, t.translation.truncate(), h))
-                    .filter(|(enemy, at, h)| {
-                        !enemy.is_hacked()
-                            && !h.is_dead()
-                            && at.distance(pos) <= HACK_RANGE
-                            && at.distance(aim.target) <= HACK_AIM_RADIUS
-                            && grid.line_of_sight(pos, *at)
-                    })
-                    .min_by(|a, b| a.1.distance(aim.target).total_cmp(&b.1.distance(aim.target)));
-                let Some((mut enemy, at, _)) = target else {
+                // Every guard around the crosshair that the Hacker can reach and see.
+                let mut hacked = 0;
+                for (mut enemy, t, h) in &mut enemies {
+                    let at = t.translation.truncate();
+                    let reached = !enemy.is_hacked()
+                        && !h.is_dead()
+                        && at.distance(pos) <= HACK_RANGE
+                        && at.distance(aim.target) <= HACK_RADIUS
+                        && grid.line_of_sight(pos, at);
+                    if reached {
+                        enemy.hack(HACK_LIFE);
+                        fx(&mut commands, FxKind::Zap(at), pos, 0.0, HACK_COLOR);
+                        fx(&mut commands, FxKind::Burst, at, 0.0, HACK_COLOR);
+                        hacked += 1;
+                    }
+                }
+                if hacked == 0 {
                     // Nothing to hack: a fizzle, and the ability stays ready.
                     fx(&mut commands, FxKind::Spark, aim.target, 0.0, HACK_COLOR.with_alpha(0.5));
                     continue;
-                };
-                enemy.hack(HACK_LIFE);
-                fx(&mut commands, FxKind::Zap(at), pos, 0.0, HACK_COLOR);
-                fx(&mut commands, FxKind::Burst, at, 0.0, HACK_COLOR);
+                }
+            }
+            Active::Blackout => {
+                blackout.0 = BLACKOUT_LIFE;
+                fx(&mut commands, FxKind::Burst, pos, 0.0, BLACKOUT_COLOR);
+                for (_, t, h) in &enemies {
+                    if !h.is_dead() {
+                        fx(&mut commands, FxKind::Spark, t.translation.truncate(), 0.0, BLACKOUT_COLOR);
+                    }
+                }
             }
         }
         ability.cooldown = stats.cooldown;
@@ -870,6 +903,20 @@ fn carry_riot_shields(
             *transform = held;
         }
     }
+}
+
+/// Keeps every guard on the deck frozen while a blackout lasts, except those
+/// fighting for the crew.
+fn run_blackout(time: Res<Time>, mut blackout: ResMut<Blackout>, mut enemies: Query<&mut Enemy>) {
+    if blackout.0 <= 0.0 {
+        return;
+    }
+    for mut enemy in &mut enemies {
+        if !enemy.is_hacked() {
+            enemy.stun(blackout.0);
+        }
+    }
+    blackout.0 = (blackout.0 - time.delta_secs()).max(0.0);
 }
 
 /// A laser fired from `from` along `dir`.
@@ -1169,6 +1216,38 @@ fn draw_lasers(
             ));
         }
     }
+}
+
+fn spawn_hack_reticle(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.spawn((
+        HackReticle,
+        Visibility::Hidden,
+        Sprite { image: assets.load("sprites/fx/shock_ring.png"), color: HACK_COLOR, ..default() },
+        Transform::from_xyz(0.0, 0.0, 49.0).with_scale(Vec3::splat(2.0 * HACK_RADIUS / RING_SIZE)),
+    ));
+}
+
+/// Rings a Hacker's crosshair while a hack is ready, so they can see who it
+/// would reach; brighter when the crosshair is within reach.
+fn draw_hack_reticle(
+    time: Res<Time>,
+    state: Res<State<GameState>>,
+    local_aim: Res<LocalAim>,
+    player: Option<Single<(&Player, &Health, &Ability, &Transform), With<LocalPlayer>>>,
+    mut reticle: Single<(&mut Visibility, &mut Sprite, &mut Transform), (With<HackReticle>, Without<Player>)>,
+) {
+    let (visibility, sprite, transform) = &mut *reticle;
+    let ready = player.as_ref().is_some_and(|p| {
+        let (player, health, ability, _) = **p;
+        player.active == Some(Active::Hack) && ability.cooldown <= 0.0 && can_act(player, health)
+    });
+    let shown = ready && *state.get() == GameState::Playing;
+    visibility.set_if_neq(if shown { Visibility::Visible } else { Visibility::Hidden });
+    let Some(player) = player.filter(|_| shown) else { return };
+    let in_reach = player.3.translation.truncate().distance(local_aim.target) <= HACK_RANGE + HACK_RADIUS;
+    let pulse = 0.05 * (time.elapsed_secs() * 4.0).sin();
+    sprite.color = HACK_COLOR.with_alpha(if in_reach { 0.35 + pulse } else { 0.12 });
+    transform.translation = local_aim.target.extend(49.0);
 }
 
 /// Gives every pirate a ward bubble, hidden until warded, and each Doctor and

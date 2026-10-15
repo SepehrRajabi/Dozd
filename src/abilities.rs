@@ -40,8 +40,10 @@ pub enum Active {
     Sentry,
     /// Bulwark: raises a bulletproof shield.
     RiotShield,
-    /// Hacker: turns a guard against the station.
+    /// Hacker: turns the guards around the crosshair against the station.
     Hack,
+    /// Hacker: freezes every guard on the deck for a few seconds.
+    Blackout,
     /// Doctor: wards the crew nearby against all harm.
     Ward,
 }
@@ -89,7 +91,8 @@ impl Passive {
 }
 
 impl Active {
-    pub const ALL: [Active; 6] = [Self::SpareGun, Self::Laser, Self::Sentry, Self::RiotShield, Self::Hack, Self::Ward];
+    pub const ALL: [Active; 7] =
+        [Self::SpareGun, Self::Laser, Self::Sentry, Self::RiotShield, Self::Hack, Self::Blackout, Self::Ward];
 
     /// By its code name, e.g. `riotshield`, as saved and typed on the command line.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -101,7 +104,7 @@ impl Active {
             Self::SpareGun | Self::Laser => PirateClass::Gunner,
             Self::Sentry => PirateClass::Engineer,
             Self::RiotShield => PirateClass::Bulwark,
-            Self::Hack => PirateClass::Hacker,
+            Self::Hack | Self::Blackout => PirateClass::Hacker,
             Self::Ward => PirateClass::Doctor,
         }
     }
@@ -113,6 +116,7 @@ impl Active {
             Self::Sentry => "SENTRY GUN",
             Self::RiotShield => "RIOT SHIELD",
             Self::Hack => "HACK",
+            Self::Blackout => "BLACKOUT",
             Self::Ward => "WARD",
         }
     }
@@ -124,7 +128,8 @@ impl Active {
             Self::Laser => "Q: a lethal beam, with kick",
             Self::Sentry => "Q: drop a gun that shoots guards",
             Self::RiotShield => "Q: raise a bulletproof shield",
-            Self::Hack => "Q: turn a guard to your side",
+            Self::Hack => "Q: turn guards near the aim",
+            Self::Blackout => "Q: freeze every guard on deck",
             Self::Ward => "Q: shield the crew from harm",
         }
     }
