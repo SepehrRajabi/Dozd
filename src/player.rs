@@ -61,15 +61,20 @@ pub struct PlayerViewPlugin;
 
 impl Plugin for PlayerViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LocalAim>().add_observer(dress_player).add_systems(
-            Update,
-            (
-                gather_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
-                (animate_players, dash_trails, hide_other_decks, follow_camera)
-                    .chain()
-                    .after(move_players),
-            ),
-        );
+        app.init_resource::<LocalAim>()
+            .init_resource::<TriggerArmed>()
+            .add_observer(dress_player)
+            // The click that started the run is still held: it mustn't fire.
+            .add_systems(OnEnter(GameState::Playing), |mut armed: ResMut<TriggerArmed>| armed.0 = false)
+            .add_systems(
+                Update,
+                (
+                    gather_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
+                    (animate_players, dash_trails, hide_other_decks, follow_camera)
+                        .chain()
+                        .after(move_players),
+                ),
+            );
     }
 }
 
@@ -181,6 +186,11 @@ pub struct LocalAim {
     pub target: Vec2,
     pub dir: Vec2,
 }
+
+/// Whether the trigger answers the mouse yet. Off when a run starts, until the
+/// button is let go, so the menu click that started it doesn't fire a shot.
+#[derive(Resource, Default)]
+struct TriggerArmed(bool);
 
 impl Default for LocalAim {
     fn default() -> Self {
@@ -400,8 +410,12 @@ fn gather_input(
     camera: Single<(&Camera, &GlobalTransform)>,
     player: Option<Single<&Transform, With<LocalPlayer>>>,
     mut local_aim: ResMut<LocalAim>,
+    mut armed: ResMut<TriggerArmed>,
     mut inputs: MessageWriter<PlayerInput>,
 ) {
+    if !mouse.pressed(MouseButton::Left) {
+        armed.0 = true;
+    }
     let (camera, camera_transform) = *camera;
     if let Some(target) = window
         .cursor_position()
@@ -426,8 +440,8 @@ fn gather_input(
             axis([KeyCode::KeyS, KeyCode::ArrowDown], [KeyCode::KeyW, KeyCode::ArrowUp]),
         ),
         aim: local_aim.target,
-        fire: mouse.pressed(MouseButton::Left),
-        fire_pressed: mouse.just_pressed(MouseButton::Left),
+        fire: armed.0 && mouse.pressed(MouseButton::Left),
+        fire_pressed: armed.0 && mouse.just_pressed(MouseButton::Left),
         dash: keys.just_pressed(KeyCode::Space),
         reload: keys.just_pressed(KeyCode::KeyR),
         slot: SLOTS.iter().position(|&k| keys.just_pressed(k)).map(|i| i as u8),
