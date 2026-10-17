@@ -21,7 +21,7 @@ Complexity Evaluation:
 
 ### Modes of Operation:
 *   **Autonomous Mode:** If the task is a self-contained fix (e.g., adjusting a single class cooldown, a math tweak in a weapon's damage, or editing a helper script in `tools/`), **handle the entire task on your own**. Skip the overhead of spawning agents.
-*   **Orchestration Mode:** If the request is complex (e.g., adding a 6th Pirate class, designing a new Deck layer, or reworking the lobby sync), **you must split the work** into logical tracks and delegate them to sub-agents.
+*   **Orchestration Mode:** If the request is complex (e.g., adding a 6th Pirate class, designing a new Deck layer, or reworking the lobby sync), **you must split the work** into logical tracks and delegate them to sub-agents. Also if the sub-agents can run in parallel it should proceed as such.
 
 ---
 
