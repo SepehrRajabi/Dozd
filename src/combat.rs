@@ -134,13 +134,15 @@ pub struct Hurtbox(pub f32);
 pub struct Knockback(pub Vec2);
 
 /// Host-side: a pirate's own weapon hurt a guard, by `dealt` (see
-/// `Health::hurt_for`). Sent wherever pirates deal damage, for passives that
-/// feed on it.
+/// `Health::hurt_for`). Sent wherever pirates deal damage, for passives and
+/// challenges that feed on it.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct CrewHit {
     /// `Player::owner` of the pirate whose weapon it was.
     pub owner: u64,
     pub dealt: f32,
+    /// The hit took the guard from alive to dead: a kill to their name.
+    pub killed: bool,
 }
 
 /// Server-side projectile state; clients only see its [`ProjectileLook`] and transform.
@@ -494,7 +496,7 @@ fn move_projectiles(
                 if let Some(owner) = projectile.owner
                     && *team == Team::Enemy
                 {
-                    crew_hits.write(CrewHit { owner, dealt });
+                    crew_hits.write(CrewHit { owner, dealt, killed: health.is_dead() });
                 }
                 if let Some(mut knockback) = knockback {
                     knockback.0 += projectile.velocity.normalize_or_zero() * projectile.knockback;
@@ -553,7 +555,7 @@ fn blast(
         let falloff = 1.0 - 0.5 * offset.length() / reach;
         let Some(dealt) = health.hurt_for(damage * falloff) else { continue };
         if let Some(owner) = owner {
-            crew_hits.write(CrewHit { owner, dealt });
+            crew_hits.write(CrewHit { owner, dealt, killed: health.is_dead() });
         }
         if let Some(mut target_knockback) = target_knockback {
             target_knockback.0 += offset.normalize_or(Vec2::X) * knockback * falloff;
@@ -670,7 +672,7 @@ fn move_novas(
                 }
                 let Some(dealt) = health.hurt_for(orb.arc_damage) else { continue };
                 if let Some(owner) = orb.owner {
-                    crew_hits.write(CrewHit { owner, dealt });
+                    crew_hits.write(CrewHit { owner, dealt, killed: health.is_dead() });
                 }
                 fx(&mut commands, FxKind::Zap(at), pos, 0.0, orb.color);
             }

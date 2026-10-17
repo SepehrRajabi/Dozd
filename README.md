@@ -41,6 +41,20 @@ everyone else stays in and the heist goes on.
 - **The crew dying:** everyone still in loses everything. Pirates who left
   early keep theirs.
 
+## Challenges
+
+About 10 s after the crew reaches a deck, the station may set challenges. Each
+has a goal, lasts for the whole heist, one deck or a set time, and is for the
+whole crew or one class. Completing it earns a reward, for whoever completed
+it or for the whole crew. Open challenges and running rewards show under the
+top-left panel.
+
+| Challenge | For | Goal | Lasts | Reward |
+|---|---|---|---|---|
+| Killing Spree | Gunner | Kill 5 guards within 15 s | That deck | +30% damage for 45 s |
+
+New challenges go in `catalog` in `src/challenge.rs`.
+
 Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 [bevy_replicon](https://github.com/projectharmonia/bevy_replicon).
 

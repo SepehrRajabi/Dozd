@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod abilities;
+mod challenge;
+mod challenge_hud;
 mod class;
 mod combat;
 mod crew;
@@ -159,7 +161,7 @@ impl Plugin for GamePlugins {
             drops::DropsPlugin,
             class::ClassPlugin,
             crew::CrewPlugin,
-            vault::VaultPlugin,
+            (vault::VaultPlugin, challenge::ChallengePlugin),
         ));
     }
 }
@@ -184,7 +186,7 @@ impl Plugin for ViewPlugins {
             settings::DisplayPlugin,
             hud::HudPlugin,
             crew::CrewViewPlugin,
-            vault::VaultViewPlugin,
+            (vault::VaultViewPlugin, challenge_hud::ChallengeViewPlugin),
         ));
     }
 }

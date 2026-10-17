@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+use crate::challenge::Challenge;
 use crate::combat::{Health, Noise};
 use crate::deckgen::{self, Layout};
 use crate::enemies::{EnemyKind, spawn_enemy};
@@ -285,7 +286,7 @@ fn sync_deck(
     mut built: ResMut<BuiltDeck>,
     mut field: ResMut<FlowField>,
     mut noise: ResMut<Noise>,
-    stale: Query<Entity, (With<Level>, Without<Player>, Without<Remote>)>,
+    stale: Query<Entity, (With<Level>, Without<Player>, Without<Remote>, Without<Challenge>)>,
     mut crew: Query<(&Player, &Health, &mut Transform)>,
 ) {
     let target = if mode.is_authority() {
@@ -299,7 +300,8 @@ fn sync_deck(
     }
     built.0 = Some(target);
 
-    // The old deck's tiles, guards, loot and effects.
+    // The old deck's tiles, guards, loot and effects. Challenges outlive the
+    // deck: the host resolves deck-span ones itself.
     for entity in &stale {
         commands.entity(entity).despawn();
     }

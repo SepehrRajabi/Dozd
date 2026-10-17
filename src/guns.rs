@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Passive, RICOCHET_CHANCE};
+use crate::challenge::Rewards;
 use crate::class::{Boons, Laser, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
     CrewHit, FxKind, Grenade, Health, Hurtbox, Knockback, Noise, NovaOrb, Projectile, ProjectileLook, Team, fx, spawn_grenade,
@@ -508,14 +509,14 @@ fn fire(
     mut rng: ResMut<Rng>,
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
-    mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks, &Boons)>,
+    mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks, &Boons, &Rewards)>,
     mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
     riot_shields: Query<&RiotShield>,
     lasers: Query<&Laser>,
     mut crew_hits: MessageWriter<CrewHit>,
 ) {
     let dt = time.delta_secs();
-    for (player, health, controls, transform, aim, mut arsenal, mut perks, boons) in &mut players {
+    for (player, health, controls, transform, aim, mut arsenal, mut perks, boons, rewards) in &mut players {
         if arsenal.cooldown > 0.0 {
             arsenal.cooldown = (arsenal.cooldown - dt).max(0.0);
         }
@@ -566,8 +567,9 @@ fn fire(
             continue;
         }
 
-        // A Bulwark nearby makes every shot count for more.
-        let damage = stats.damage * boons.damage();
+        // A Bulwark nearby, or a challenge's reward, makes every shot count for more.
+        let boost = boons.damage() * rewards.damage();
+        let damage = stats.damage * boost;
         let ricochet = if player.passive == Passive::Ricochet { RICOCHET_CHANCE } else { 0.0 };
         let origin = transform.translation.truncate();
         let muzzle = muzzle(origin, aim.dir);
@@ -631,7 +633,7 @@ fn fire(
                         let Ok((_, t, mut h, _, mut knockback, _)) = enemies.get_mut(target) else { continue };
                         let pos = t.translation.truncate();
                         if let Some(dealt) = h.hurt_for(share) {
-                            crew_hits.write(CrewHit { owner: player.owner, dealt });
+                            crew_hits.write(CrewHit { owner: player.owner, dealt, killed: h.is_dead() });
                             knockback.0 += (pos - origin).normalize_or_zero() * stats.knockback;
                             fx(&mut commands, FxKind::Zap(pos), muzzle, 0.0, stats.color);
                         }
@@ -679,7 +681,7 @@ fn fire(
                         damage: damage * power,
                         radius: radius * (0.5 + 0.5 * power),
                         knockback: stats.knockback * power,
-                        arc_damage: arc_damage * boons.damage(),
+                        arc_damage: arc_damage * boost,
                         arc_reach: arc_reach * (0.5 + 0.5 * power),
                         arc_timer: 0.0,
                         color: stats.color,
@@ -955,4 +957,68 @@ fn update_weapon_hud(
     spare.set_if_neq(Text(small));
     magazine.frac = frac;
     magazine.color = bar;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+    use crate::challenge::Reward;
+    use crate::class::{Loadout, Loadouts, PirateClass};
+    use crate::net::{HOST_ID, NetMode, StartSession};
+    use crate::player::CrewSize;
+    use crate::room::NextSeed;
+    use crate::{GamePlugins, GameState};
+
+    /// A challenge's damage reward multiplies a pirate's shots on top of their
+    /// boons: two Gunners fire the same frame, one with +30% running.
+    #[test]
+    fn damage_reward_multiplies_shots() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(1.0 / 60.0)))
+            .add_plugins(GamePlugins)
+            .insert_resource(CrewSize(2))
+            .insert_resource(Loadouts(
+                (0..2).map(|i| (HOST_ID + i, Loadout::new(PirateClass::Gunner))).collect(),
+            ))
+            .insert_resource(NextSeed(7))
+            .insert_resource(Rng::new(7));
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+
+        let bonus = 0.3;
+        let mut pirates = app.world_mut().query::<(&Player, &mut Controls, &mut Rewards, &Arsenal, &Boons)>();
+        let mut expected = Vec::new();
+        for (player, mut controls, mut rewards, arsenal, boons) in pirates.iter_mut(app.world_mut()) {
+            let stats = arsenal.gun().kind.stats();
+            assert!(matches!(stats.mode, FireMode::Shots), "test expects a plain gun in hand");
+            let boosted = player.owner == HOST_ID;
+            if boosted {
+                rewards.grant(Reward::Damage { bonus, secs: 45.0 });
+            }
+            controls.fire = true;
+            controls.fire_pressed = true;
+            let reward = if boosted { 1.0 + bonus } else { 1.0 };
+            expected.push((player.owner, stats.damage * boons.damage() * reward));
+        }
+        assert_eq!(expected.len(), 2);
+        app.update();
+
+        let mut shots = app.world_mut().query::<&Projectile>();
+        for (owner, damage) in expected {
+            let fired: Vec<f32> = shots.iter(app.world()).filter(|p| p.owner == Some(owner)).map(|p| p.damage).collect();
+            assert!(!fired.is_empty(), "pirate {owner} didn't fire");
+            for d in fired {
+                assert!((d - damage).abs() < 1e-4, "pirate {owner}: shot for {d}, expected {damage}");
+            }
+        }
+    }
 }

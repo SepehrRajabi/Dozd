@@ -11,6 +11,8 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::GameState;
+use crate::challenge::Rewards;
+use crate::challenge_hud::reward_chips;
 use crate::class::{Boons, LocalLoadout, Loadouts, PirateClass, effects};
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter};
@@ -241,7 +243,7 @@ fn update_crew_panel(
     local: Res<LocalId>,
     slots: Query<(Entity, &HudSlot)>,
     mission: Option<Single<&MissionStatus>>,
-    players: Query<(&Player, &Health, Option<&Link>, &Boons)>,
+    players: Query<(&Player, &Health, Option<&Link>, &Boons, Option<&Rewards>)>,
     mut rows: Query<(Entity, &mut CrewRow)>,
     mut chips: hud::ChipParts,
     mut meters: Query<&mut Meter>,
@@ -271,7 +273,7 @@ fn update_crew_panel(
     for (entity, mut row) in &mut rows {
         let player = players.iter().find(|(p, ..)| p.owner == row.owner);
         let texts = &mut chips.2;
-        let Some((player, health, link, boons)) = player else {
+        let Some((player, health, link, boons, rewards)) = player else {
             // The whole run is gone (back to the menu or a new run): no ghosts.
             if !anyone || !networked {
                 commands.entity(entity).despawn();
@@ -327,7 +329,7 @@ fn update_crew_panel(
             meter.color = if frac < 0.35 { HULL_LOW } else { HULL_COLOR };
         }
         set_text(&mut chips.2, row.credits, &format!("{} cr", player.credits), hud::GOLD);
-        hud::show_chips(&mut chips, row.effects, &effects(player.passive, health, boons));
+        hud::show_chips(&mut chips, row.effects, &with_rewards(rewards, effects(player.passive, health, boons)));
     }
 }
 
@@ -340,12 +342,19 @@ fn spawn_local_effects(mut commands: Commands, slots: Query<(Entity, &HudSlot)>)
 }
 
 fn update_local_effects(
-    player: Option<Single<(&Player, &Health, &Boons), With<LocalPlayer>>>,
+    player: Option<Single<(&Player, &Health, &Boons, Option<&Rewards>), With<LocalPlayer>>>,
     row: Single<Entity, With<LocalEffects>>,
     mut chips: hud::ChipParts,
 ) {
-    let list = player.map_or_else(Vec::new, |p| effects(p.0.passive, p.1, p.2));
+    let list = player.map_or_else(Vec::new, |p| with_rewards(p.3, effects(p.0.passive, p.1, p.2)));
     hud::show_chips(&mut chips, *row, &list);
+}
+
+/// Challenge rewards first, since they run out, then the rest of the effects.
+fn with_rewards(rewards: Option<&Rewards>, effects: Vec<(String, Color)>) -> Vec<(String, Color)> {
+    let mut chips = reward_chips(rewards);
+    chips.extend(effects);
+    chips
 }
 
 fn set_text(texts: &mut Query<(&mut Text, &mut TextColor)>, entity: Entity, content: &str, color: Color) {

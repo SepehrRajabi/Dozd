@@ -33,6 +33,11 @@ are not generated from a single source of truth.
 | `alarm` | f32 | alarm meter level at run end (see `Alarm` in `src/mission.rs`) | `0.0..` |
 | `seconds` | f32 | in-game seconds the run lasted | `0.0..=time_limit` |
 | `pirates` | string | each pirate by slot, `;`-separated, as `<fate><deck>:<credits>:<payout>`. Fate: `F` finished (final group), `E` left early, `D` dead, `I` still in. Deck is 1-based. E.g. `F3:5022:8075;E2:662:662;D3:900:0` | |
+| `ch_offered` | u32 | mid-heist challenges offered this run (`ChallengeLog` in `src/challenge.rs`); each deck offers the catalog's challenges someone in the crew can complete, `OFFER_DELAY` after arrival. 0 for a crew with no Gunner while the catalog is Gunner-only | `0..` |
+| `ch_completed` | u32 | of those, completed | `0..=ch_offered` |
+| `ch_failed` | u32 | of those, failed: the crew left the deck, or nobody who could complete it was still in play (dead or out by a pad). `ch_offered - ch_completed - ch_failed` is how many were still open when the run stopped | `0..=ch_offered` |
+| `reward_secs` | f32 | pirate-seconds with a challenge's damage reward running, summed over the crew (one 45 s reward that runs out = `45.0`; it stops early if its holder dies or the run ends) | `0.0..` |
+| `pirate_kills` | string | guards each pirate killed with their own weapons (guns, laser, grenades, novas, arcs: the `CrewHit`s marked `killed` that challenges count), by slot, `;`-separated, e.g. `12;5;7`. Their sum can fall short of `kills`: sentries, hacked guards and perks don't count | |
 
 Settlement rules, for checking rows: early leavers' payout equals their own
 credits; the final group each get `round((pool + bonus) / finishers)`; dead

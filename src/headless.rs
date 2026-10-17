@@ -15,8 +15,9 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::abilities::{Active, Passive};
+use crate::challenge::{ChallengeLog, Rewards};
 use crate::class::{Loadout, Loadouts, PirateClass};
-use crate::combat::{Health, Team};
+use crate::combat::{CrewHit, Health, Team};
 use crate::deckgen::{COLS, ROWS};
 use crate::enemies::{AiState, Enemy, EnemyLook};
 use crate::mission::{Alarm, Fate, Settlement};
@@ -30,7 +31,8 @@ const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--
                       [--passive NAME] [--active NAME] [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_early,dead,still_in,deck,decks,credits,payout,\
-                          pool,bonus,bars_silver,bars_gold,bars_platinum,kills,alarm,seconds,pirates";
+                          pool,bonus,bars_silver,bars_gold,bars_platinum,kills,alarm,seconds,pirates,\
+                          ch_offered,ch_completed,ch_failed,reward_secs,pirate_kills";
 /// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
 /// you which columns apply — `ai_state` is enemy-only, `move_x..dash` are
 /// pirate-only, blank on the other kind.
@@ -198,6 +200,11 @@ struct Batch {
     extracted: u32,
     /// Bars pulled this run from each tier's vault (silver, gold, platinum).
     bars: [u32; 3],
+    /// Guards each pirate killed with their own weapons this run (`CrewHit`s
+    /// with `killed`), by `Player::owner`.
+    pirate_kills: Vec<(u64, u32)>,
+    /// Pirate-seconds this run with a challenge's damage reward running.
+    reward_secs: f32,
 }
 
 /// Drives the bots; reseeded every run so a seed replays exactly.
@@ -324,6 +331,7 @@ pub fn run(config: Config) {
     .add_observer(count_kills)
     .add_systems(Startup, start_batch)
     .add_systems(PreUpdate, drive_bots.run_if(in_state(GameState::Playing)))
+    .add_systems(Update, tally_challenges.run_if(in_state(GameState::Playing)))
     .add_systems(Last, next_run);
 
     // One small world gains nothing from spreading systems over threads; the
@@ -353,6 +361,19 @@ fn count_kills(remove: On<Remove, Enemy>, health: Query<&Health>, mut batch: Res
     if health.get(remove.entity).is_ok_and(Health::is_dead) {
         batch.kills += 1;
     }
+}
+
+/// Counts each pirate's own kills and the time damage rewards run, for the
+/// challenge columns.
+fn tally_challenges(time: Res<Time>, mut hits: MessageReader<CrewHit>, mut batch: ResMut<Batch>, players: Query<&Rewards>) {
+    for hit in hits.read().filter(|h| h.killed) {
+        match batch.pirate_kills.iter_mut().find(|(owner, _)| *owner == hit.owner) {
+            Some((_, kills)) => *kills += 1,
+            None => batch.pirate_kills.push((hit.owner, 1)),
+        }
+    }
+    let boosted = players.iter().filter(|r| r.damage() > 1.0).count();
+    batch.reward_secs += boosted as f32 * time.delta_secs();
 }
 
 fn drive_bots(
@@ -572,6 +593,7 @@ fn next_run(
     mut next_state: ResMut<NextState<GameState>>,
     alarm: Res<Alarm>,
     settlement: Res<Settlement>,
+    challenges: Res<ChallengeLog>,
     players: Query<(&Player, &Health)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -593,6 +615,7 @@ fn next_run(
     let mut crew: Vec<_> = players.iter().collect();
     crew.sort_by_key(|(p, _)| p.slot);
     let mut pirates = Vec::new();
+    let mut pirate_kills = Vec::new();
     for (player, health) in crew {
         // Settlement (`Fate`) doesn't tell the dead from those still in when time ran out.
         let fate = match Fate::of(player) {
@@ -608,11 +631,16 @@ fn next_run(
             _ => active += 1,
         }
         pirates.push(format!("{fate}{}:{}:{}", player.deck + 1, player.credits, player.payout));
+        let own = batch.pirate_kills.iter().find(|(o, _)| *o == player.owner).map_or(0, |(_, k)| *k);
+        pirate_kills.push(own.to_string());
         haul += player.credits;
         paid += player.payout;
         deck = deck.max(player.deck);
     }
     let pirates = pirates.join(";");
+    let pirate_kills = pirate_kills.join(";");
+    let (ch_offered, ch_completed, ch_failed) = (challenges.offered, challenges.completed, challenges.failed);
+    let reward_secs = batch.reward_secs;
     let mut outcome = Vec::new();
     for (count, label) in [(extracted, "extracted"), (left, "left early"), (dead, "dead"), (active, "still in")] {
         if count > 0 {
@@ -625,7 +653,8 @@ fn next_run(
     if config.csv {
         println!(
             "{},{},{},{ending},{extracted},{left},{dead},{active},{},{DECKS},{haul},{paid},{},{},\
-             {silver},{gold},{platinum},{},{:.1},{seconds:.1},{pirates}",
+             {silver},{gold},{platinum},{},{:.1},{seconds:.1},{pirates},\
+             {ch_offered},{ch_completed},{ch_failed},{reward_secs:.1},{pirate_kills}",
             config.class.map_or("mixed", PirateClass::name),
             batch.run + 1,
             config.run_seed(batch.run),
@@ -638,7 +667,8 @@ fn next_run(
     } else if !config.quiet {
         let line = format!(
             "run {:>3}  seed {:>10}  {ending:<7}  {:<34}  deck {}/{DECKS}  bars {silver}/{gold}/{platinum}  \
-             carried {haul:>5} cr  paid {paid:>5} cr  kills {:>2}  alarm {:.1}  {seconds:>6.1}s",
+             carried {haul:>5} cr  paid {paid:>5} cr  kills {:>2} ({pirate_kills})  alarm {:.1}  \
+             challenges {ch_completed}/{ch_offered} done, {ch_failed} failed, boost {reward_secs:.0}s  {seconds:>6.1}s",
             batch.run + 1,
             config.run_seed(batch.run),
             outcome.join(", "),
@@ -657,6 +687,8 @@ fn next_run(
     batch.total_ticks += batch.ticks as u64;
     batch.extracted += (extracted > 0) as u32;
     batch.bars = [0; 3];
+    batch.pirate_kills.clear();
+    batch.reward_secs = 0.0;
     batch.run += 1;
     batch.ticks = 0;
     batch.kills = 0;

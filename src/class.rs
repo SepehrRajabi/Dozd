@@ -20,6 +20,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, LIFESTEAL_CHANCE, LIFESTEAL_SHARE, Passive, RICOCHET_CHANCE};
+use crate::challenge::Rewards;
 use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::{GunKind, muzzle};
@@ -967,7 +968,7 @@ fn fire_lasers(
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
     mut crew_hits: MessageWriter<CrewHit>,
-    players: Query<(&Player, &Health, &Transform, &Aim, &Boons)>,
+    players: Query<(&Player, &Health, &Transform, &Aim, &Boons, &Rewards)>,
     mut lasers: Query<(Entity, &mut Laser, &mut Transform), Without<Player>>,
     mut enemies: Query<(&Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>, Without<Laser>)>,
 ) {
@@ -976,7 +977,7 @@ fn fire_lasers(
         let holder = players.iter().find(|(p, h, ..)| p.owner == laser.owner && can_act(p, h));
         laser.left -= dt;
         laser.age += dt;
-        let Some((_, _, holder, aim, boons)) = holder.filter(|_| laser.left > 0.0) else {
+        let Some((_, _, holder, aim, boons, rewards)) = holder.filter(|_| laser.left > 0.0) else {
             fx(&mut commands, FxKind::Burst, transform.translation.truncate(), 0.0, LASER_COLOR);
             commands.entity(entity).despawn();
             continue;
@@ -997,7 +998,7 @@ fn fire_lasers(
         laser.length = length;
         *transform = laser_transform(from, dir);
 
-        let damage = LASER_DPS * boons.damage() * dt;
+        let damage = LASER_DPS * boons.damage() * rewards.damage() * dt;
         for (t, mut health, hurtbox, mut knockback, team) in &mut enemies {
             let at = t.translation.truncate();
             let along = (at - from).dot(dir).clamp(0.0, length);
@@ -1007,7 +1008,7 @@ fn fire_lasers(
                 && let Some(dealt) = health.hurt_for(damage)
             {
                 knockback.0 += dir * 400.0 * dt;
-                crew_hits.write(CrewHit { owner: laser.owner, dealt });
+                crew_hits.write(CrewHit { owner: laser.owner, dealt, killed: health.is_dead() });
             }
         }
         // As loud as any gun, the whole time it fires.

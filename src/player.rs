@@ -6,6 +6,7 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, Passive};
+use crate::challenge::Rewards;
 use crate::class::{Ability, Boons, LASER_SLOW, Laser, LocalLoadout, Loadout, Loadouts, PirateClass};
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
@@ -232,7 +233,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
         Ability::default(),
         Boons::default(),
         Perks::default(),
-        (Controls::default(), Looting::default()),
+        (Controls::default(), Looting::default(), Rewards::default()),
         Transform::from_translation(pos.extend(10.0)),
     ));
 }

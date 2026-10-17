@@ -44,6 +44,8 @@ pub enum HudSlot {
     Vitals,
     Ability,
     Effects,
+    /// Top left, under that panel: the challenges in play.
+    Challenges,
     /// Top centre: deck and alarm, the banner, then the leave prompt.
     Status,
     Banner,
@@ -340,7 +342,7 @@ fn spawn_layout(mut commands: Commands) {
             slot(HudSlot::Ability),
             slot(HudSlot::Effects),
         ],
-    )]));
+    ), slot(HudSlot::Challenges)]));
     commands.spawn((Hud, centred(true), children![
         centred_slot(HudSlot::Status),
         centred_slot(HudSlot::Banner),
