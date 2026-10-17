@@ -54,11 +54,11 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | | |
 | --- | --- |
 | ![Main menu](docs/screenshots/menu.png) | ![Loadout](docs/screenshots/loadout.png) |
-| The main menu | Picking a class, abilities and guns |
+| The main menu | Picking a class, abilities and guns: here the Hacker with Blackout |
 | ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
 | The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
-| A Gunner's laser kicking off their aim beside a Bulwark, with each other's status in the crew panel | A crew that didn't make it out |
+| Two pirates pulling bars out of deck 2's gold vault in lockdown, with guards closing in | The last pirate out takes the crew's pool, plus a bonus for the crewmate who left early |
 | ![Enemies](docs/screenshots/enemies.png) | |
 | The station's guards, under **EXTRAS** in the main menu | |
 
