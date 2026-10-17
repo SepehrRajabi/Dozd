@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.19.1", features = ["serialize"] }
+# Only the 2D and UI parts of Bevy: no 3D, glTF or audio to compile.
+bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui", "serialize"] }
 bevy_replicon = "0.44.3"
 bevy_replicon_renet = "0.20"
 serde = { version = "1.0.229", features = ["derive"] }
+
+# `cargo run --features dev` links Bevy dynamically for fast rebuilds.
+# Never for release: the binary would need Bevy's library beside it.
+[features]
+dev = ["bevy/dynamic_linking"]
 
 # Optimize dependencies in dev builds; keep our own crate fast to compile.
 [profile.dev]
@@ -15,6 +21,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+# Less for the linker to chew through; our own crate keeps its debug info.
+debug = false
 
 # Bevy systems routinely take many params and filtered queries.
 [lints.clippy]

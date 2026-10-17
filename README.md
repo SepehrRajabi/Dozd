@@ -74,6 +74,9 @@ them as artifacts, or push a version tag (`git tag v0.2.0 && git push origin
 v0.2.0`) to also publish them as a GitHub release.
 
 The macOS app isn't notarized, so the first launch is blocked until it's
+While developing, `cargo run --features dev` links Bevy dynamically so rebuilds
+after an edit are much faster. Leave it off for builds you share.
+
 allowed under System Settings > Privacy & Security > **Open Anyway**, and Windows may warn about an unknown publisher (**More info** >
 **Run anyway**). On Windows, the release build has no console, so
 `headless` prints nothing there; use a debug build for it.
