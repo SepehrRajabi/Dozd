@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::{Laser, RiotShield};
 use crate::combat::{FxKind, Health, fx};
 use crate::mission::{Alarm, Banner};
 use crate::net::authority;
@@ -119,8 +120,9 @@ pub fn spawn_vault(commands: &mut Commands, pos: Vec2, deck: u8) {
     ));
 }
 
-/// Pirates holding E at the vault, not shooting, fill their progress; each full
-/// bar goes to whoever pulled it. Letting go or stepping away starts it over.
+/// Pirates holding E at the vault, hands free, fill their progress; each full
+/// bar goes to whoever pulled it. Letting go, stepping away, firing or using
+/// their ability starts it over. A sentry already down keeps shooting for them.
 fn pull_bars(
     mut commands: Commands,
     time: Res<Time>,
@@ -129,6 +131,8 @@ fn pull_bars(
     mut banner: ResMut<Banner>,
     mut vaults: Query<(&mut Vault, &Transform)>,
     mut players: Query<(Entity, &mut Player, &Health, &Controls, &Transform, &mut Looting)>,
+    lasers: Query<&Laser>,
+    riot_shields: Query<&RiotShield>,
     // Exact seconds pulled so far; `Looting` only carries a rounded copy.
     mut pulled: Local<HashMap<Entity, f32>>,
 ) {
@@ -139,9 +143,14 @@ fn pull_bars(
         let at_vault = vault.as_ref().is_some_and(|(v, t)| {
             v.bars > 0 && t.translation.truncate().distance(pos) <= VAULT_REACH
         });
+        // A laser firing or a riot shield held out takes their hands too.
+        let busy = controls.fire
+            || controls.ability
+            || lasers.iter().any(|l| l.owner == player.owner)
+            || riot_shields.iter().any(|s| s.owner == player.owner);
         let pulling = at_vault
             && controls.interact_held
-            && !controls.fire
+            && !busy
             && !health.is_dead()
             && player.status == PirateStatus::Active;
         let Some((vault, _)) = vault.as_mut().filter(|_| pulling) else {

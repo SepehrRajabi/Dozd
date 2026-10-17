@@ -22,8 +22,9 @@ Every deck's main room holds a vault, and the deeper it is, the richer:
 
 Stand at it and hold E to pull bars out one at a time, about one every 1.2 s.
 Every pirate at the vault pulls on their own, so a full crew empties it far
-faster than one pirate. Firing or stepping away starts the bar you're pulling
-over. The first bar out breaches the vault: the station goes into lockdown and
+faster than one pirate. Firing, using your ability (a laser or riot shield
+held out included) or stepping away starts the bar you're pulling over; a
+sentry you dropped first keeps shooting for you. The first bar out breaches the vault: the station goes into lockdown and
 sends a wave straight away, and every bar after raises the alarm a little.
 
 The lift down only goes once the whole crew still in the heist is aboard.
