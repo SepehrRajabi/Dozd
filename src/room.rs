@@ -26,7 +26,7 @@ const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 // 'L' lift down   'u' lift shaft the crew arrived by   'V' vault (2x2, last deck only)
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden, b brute, g herald
-// perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak
+// perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak, 5 recharge
 
 pub struct RoomPlugin;
 

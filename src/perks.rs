@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::{Ability, RIOT_LIFE};
 use crate::combat::{FxKind, Health, fx};
 use crate::enemies::Enemy;
 use crate::guns::Arsenal;
@@ -56,10 +57,12 @@ pub enum PerkKind {
     ShockField,
     /// Enemies can't see you; firing breaks it.
     Cloak,
+    /// The class ability is ready again at once.
+    Recharge,
 }
 
 impl PerkKind {
-    pub const ALL: [PerkKind; 4] = [Self::Overdrive, Self::NanoPatch, Self::ShockField, Self::Cloak];
+    pub const ALL: [PerkKind; 5] = [Self::Overdrive, Self::NanoPatch, Self::ShockField, Self::Cloak, Self::Recharge];
 
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
@@ -67,6 +70,7 @@ impl PerkKind {
             '2' => Self::NanoPatch,
             '3' => Self::ShockField,
             '4' => Self::Cloak,
+            '5' => Self::Recharge,
             _ => return None,
         })
     }
@@ -77,6 +81,7 @@ impl PerkKind {
             Self::NanoPatch => "NANO PATCH",
             Self::ShockField => "SHOCK FIELD",
             Self::Cloak => "CLOAK",
+            Self::Recharge => "RECHARGE",
         }
     }
 
@@ -87,6 +92,7 @@ impl PerkKind {
             Self::NanoPatch => "REPAIR",
             Self::ShockField => "CONTROL",
             Self::Cloak => "STEALTH",
+            Self::Recharge => "ABILITY",
         }
     }
 
@@ -96,6 +102,7 @@ impl PerkKind {
             Self::NanoPatch => "hull, shield & dash restored",
             Self::ShockField => "stuns enemies near you",
             Self::Cloak => "unseen until you fire",
+            Self::Recharge => "ability ready again",
         }
     }
 
@@ -106,6 +113,7 @@ impl PerkKind {
             Self::NanoPatch => "Repairs your hull and shield to full and readies your dash.",
             Self::ShockField => "Guards that come close are stunned and lose whatever attack they were winding up.",
             Self::Cloak => "Guards can't see you, so you can slip past or line up a shot. Firing breaks it.",
+            Self::Recharge => "Your class ability comes off cooldown at once, and a riot shield recharges to full.",
         }
     }
 
@@ -116,6 +124,7 @@ impl PerkKind {
             Self::NanoPatch => None,
             Self::ShockField => Some(8.0),
             Self::Cloak => Some(12.0),
+            Self::Recharge => None,
         }
     }
 
@@ -125,6 +134,7 @@ impl PerkKind {
             Self::NanoPatch => Color::srgb(0.35, 0.92, 0.47),
             Self::ShockField => Color::srgb(0.35, 0.82, 1.0),
             Self::Cloak => Color::srgb(0.75, 0.47, 1.0),
+            Self::Recharge => Color::srgb(1.0, 0.86, 0.25),
         }
     }
 
@@ -134,6 +144,7 @@ impl PerkKind {
             Self::NanoPatch => "sprites/perks/nano_patch.png",
             Self::ShockField => "sprites/perks/shock_field.png",
             Self::Cloak => "sprites/perks/cloak.png",
+            Self::Recharge => "sprites/perks/recharge.png",
         }
     }
 }
@@ -241,12 +252,12 @@ fn bob_pickups(time: Res<Time>, mut sprites: Query<(&PickupSprite, &mut Transfor
 
 fn pick_up_perks(
     mut commands: Commands,
-    mut players: Query<(&Player, &Transform, &mut Perks, &mut Health, &mut Dash, &mut Arsenal)>,
+    mut players: Query<(&Player, &Transform, &mut Perks, &mut Health, &mut Dash, &mut Arsenal, &mut Ability)>,
     pickups: Query<(Entity, &PerkPickup, &Transform), Without<Player>>,
 ) {
     for (entity, pickup, transform) in &pickups {
         let pos = transform.translation.truncate();
-        let Some((_, _, mut perks, mut health, mut dash, mut arsenal)) = players
+        let Some((_, _, mut perks, mut health, mut dash, mut arsenal, mut ability)) = players
             .iter_mut()
             .filter(|(player, t, _, health, ..)| {
                 player.status == PirateStatus::Active
@@ -267,6 +278,10 @@ fn pick_up_perks(
                 health.current = health.max;
                 health.shield = health.max_shield;
                 dash.cooldown = 0.0;
+            }
+            PerkKind::Recharge => {
+                ability.cooldown = 0.0;
+                ability.charge = RIOT_LIFE;
             }
             PerkKind::ShockField | PerkKind::Cloak => {}
         }

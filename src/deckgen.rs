@@ -108,7 +108,7 @@ const VAULT_ROOM: (usize, usize) = (15, 11);
 const VAULT_GUARDS: [char; 4] = ['h', 'h', 'b', 's'];
 
 /// Perk pickups: restores and ammo are common, the tactical ones rarer.
-const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2)];
+const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2), ('5', 2)];
 
 pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
     let mut rng = Gen::new(seed, deck);
@@ -415,7 +415,7 @@ mod tests {
                     assert_eq!(tiles[y][x], 'V');
                     assert_eq!(tiles[y + 1][x + 1], 'V');
                 }
-                let perks = ['1', '2', '3', '4'].into_iter().map(count).sum::<usize>();
+                let perks = ['1', '2', '3', '4', '5'].into_iter().map(count).sum::<usize>();
                 assert!((1..=3).contains(&perks), "seed {seed} deck {deck}: {perks} perks");
             }
         }

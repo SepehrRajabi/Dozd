@@ -827,6 +827,17 @@ PERK_SYMBOLS = {
         "........",
         "........",
     ],
+    # Ability ready: a fully charged battery.
+    "recharge": [
+        "...ww...",
+        ".wwwwww.",
+        ".wSSSSw.",
+        ".w....w.",
+        ".wSSSSw.",
+        ".w....w.",
+        ".wSSSSw.",
+        ".wwwwww.",
+    ],
 }
 
 PERK_COLORS = {
@@ -834,6 +845,7 @@ PERK_COLORS = {
     "nano_patch": (rgb(90, 235, 120), rgb(20, 90, 45)),
     "shock_field": (rgb(90, 210, 255), rgb(20, 70, 120)),
     "cloak": (rgb(190, 120, 255), rgb(70, 35, 120)),
+    "recharge": (rgb(255, 220, 65), rgb(115, 85, 15)),
 }
 
 
