@@ -17,13 +17,13 @@ use crate::vault::spawn_vault;
 use crate::{GameState, Level};
 
 pub const TILE: f32 = 16.0;
-/// Decks per heist; the last one holds the vault.
+/// Decks per heist; each holds a vault, and only the last has no lift down.
 pub const DECKS: u8 = 3;
 const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 
 // Layouts come from `deckgen`. Legend:
 // '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
-// 'L' lift down   'u' lift shaft the crew arrived by   'V' vault (2x2, last deck only)
+// 'L' lift down   'u' lift shaft the crew arrived by   'V' vault (2x2, one per deck)
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden, b brute, g herald
 // perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak, 5 recharge
@@ -89,7 +89,7 @@ pub struct RoomGrid {
     pub spawn_points: Vec<Vec2>,
     /// Where the crew starts.
     pub crew_spawn: Vec2,
-    /// Centre of the vault, on the last deck.
+    /// Centre of the deck's vault.
     pub vault: Option<Vec2>,
 }
 
@@ -240,12 +240,12 @@ impl FlowField {
 fn update_flow_field(
     grid: Res<RoomGrid>,
     mut field: ResMut<FlowField>,
-    players: Query<(&Transform, &Health), With<Player>>,
+    players: Query<(&Transform, &Health, &Player)>,
 ) {
     let mut targets: Vec<(usize, usize)> = players
         .iter()
-        .filter(|(_, health)| !health.is_dead())
-        .filter_map(|(t, _)| grid.tile_of(t.translation.truncate()))
+        .filter(|(_, health, player)| !health.is_dead() && player.status == PirateStatus::Active)
+        .filter_map(|(t, ..)| grid.tile_of(t.translation.truncate()))
         .collect();
     targets.sort_unstable();
     targets.dedup();
@@ -308,7 +308,7 @@ fn sync_deck(
 
     let grid = build_grid(deckgen::generate(target.0, target.1, DECKS));
     if mode.is_authority() {
-        populate(&mut commands, &grid);
+        populate(&mut commands, &grid, target.1);
         let mut spot = 0;
         for (player, health, mut transform) in &mut crew {
             let pos = if player.deck == target.1 && player.status == PirateStatus::Active && !health.is_dead() {
@@ -446,9 +446,9 @@ fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
 
 /// Places loot, guards and the vault. Host only; everyone else receives them by
 /// replication.
-fn populate(commands: &mut Commands, grid: &RoomGrid) {
+fn populate(commands: &mut Commands, grid: &RoomGrid, deck: u8) {
     if let Some(pos) = grid.vault {
-        spawn_vault(commands, pos);
+        spawn_vault(commands, pos, deck);
     }
     for (row, line) in grid.tiles.iter().enumerate() {
         for (col, &ch) in line.iter().enumerate() {

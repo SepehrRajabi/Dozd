@@ -17,17 +17,26 @@ are not generated from a single source of truth.
 | `class` | string | `--class` this run used | `GUNNER`, `ENGINEER`, `BULWARK`, `HACKER`, `DOCTOR`, or `mixed` (bots rotate through all five by crew index when `--class` isn't given) |
 | `run` | u32 | 1-based run number within this process's batch | `1..=runs` |
 | `seed` | u32 | this run's world seed (`--seed + (run - 1)`); rerun a single result with `--seed <this> --runs 1` | any u32 |
-| `ending` | string | why the run stopped | `OVER` (the mission resolved — crew wiped or all pirates left the deck one way or another), `TIMEOUT` (hit `--time` first) |
-| `extracted` | u32 | pirates who rode the lift out | `0..=crew` |
-| `left_behind` | u32 | pirates stranded when the lift left without them | `0..=crew` |
-| `dead` | u32 | pirates killed and still on the deck (not extracted/left behind) | `0..=crew` |
+| `ending` | string | why the run stopped | `OVER` (the mission resolved — the crew got out by a pad or was wiped), `TIMEOUT` (hit `--time` first) |
+| `extracted` | u32 | pirates who got out by the pad that ended the run (the final group) | `0..=crew` |
+| `left_early` | u32 | pirates who took a pad out while the rest of the crew stayed in | `0..=crew` |
+| `dead` | u32 | pirates killed (not extracted/left early) | `0..=crew` |
 | `still_in` | u32 | pirates alive and active when the run ended (only >0 on `TIMEOUT`) | `0..=crew` |
 | `deck` | u8 | deepest deck reached, 1-based | `1..=decks` |
 | `decks` | u8 | total decks in the mission (currently fixed, `DECKS` in `src/room.rs`) | `3` |
-| `credits` | u32 | total credits carried by the crew at run end | `0..` |
+| `credits` | u32 | total credits carried by the crew at run end (each pirate's own haul, before the split) | `0..` |
+| `payout` | u32 | total credits the crew takes home after settlement (`mission::settle`) | `0..` |
+| `pool` | u32 | the final group's pooled credits (0 if nobody finished) | `0..` |
+| `bonus` | u32 | added to `pool` for the early leavers: 25% of it per leaver (0 if nobody finished) | `0..` |
+| `bars_silver`, `bars_gold`, `bars_platinum` | u32 | bars pulled from each deck's vault (decks 1, 2 and 3; full vaults hold 24, 32 and 40) | `0..=40` |
 | `kills` | u32 | enemies killed during the run | `0..` |
 | `alarm` | f32 | alarm meter level at run end (see `Alarm` in `src/mission.rs`) | `0.0..` |
 | `seconds` | f32 | in-game seconds the run lasted | `0.0..=time_limit` |
+| `pirates` | string | each pirate by slot, `;`-separated, as `<fate><deck>:<credits>:<payout>`. Fate: `F` finished (final group), `E` left early, `D` dead, `I` still in. Deck is 1-based. E.g. `F3:5022:8075;E2:662:662;D3:900:0` | |
+
+Settlement rules, for checking rows: early leavers' payout equals their own
+credits; the final group each get `round((pool + bonus) / finishers)`; dead
+and still-in pirates get 0, and on a wipe `pool` and `bonus` are 0.
 
 Every row also implicitly reflects whatever else was passed to `headless`
 that run (`--crew`, `--bot`, `--hz`, `--time`) — those aren't repeated per

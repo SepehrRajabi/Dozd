@@ -295,10 +295,11 @@ fn update_crew_panel(
             ("DOWN", BAD)
         } else {
             match player.status {
-                PirateStatus::Extracted => ("EXTRACTED", hud::GOLD),
-                PirateStatus::LeftBehind => ("LEFT BEHIND", BAD),
+                // Their own credits, shown at the end of the row, are theirs to keep.
+                PirateStatus::Extracted if player.left_early => ("LEFT EARLY", hud::GOLD),
                 PirateStatus::Active if other_deck => ("OTHER DECK", hud::DIM),
                 PirateStatus::Active => ("", hud::DIM),
+                PirateStatus::Extracted => ("EXTRACTED", hud::GOLD),
             }
         };
         set_text(texts, row.status, status, color);

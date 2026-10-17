@@ -1359,7 +1359,7 @@ fn update_session_hud(
     }
     let mut remaining = format!("LOOT LEFT {}", loot.iter().count());
     if let Some(vault) = vault {
-        remaining += &format!("    VAULT {}/{}", vault.bars, vault.total);
+        remaining += &format!("    {} VAULT {}/{}", vault.tier.name(), vault.bars, vault.total);
     }
     if loot_left.0 != remaining {
         loot_left.0 = remaining;

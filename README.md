@@ -2,10 +2,9 @@
 
 ![DOZD](docs/preview/logo.png)
 
-A co-op space-pirate heist game. Loot a station three decks deep, ride the lift
-down to richer decks, crack the vault at the bottom, and get out on a hazard pad
-before security overwhelms you. Only the pirates standing on the pad when it
-finishes get out.
+A co-op space-pirate heist game. Loot a station three decks deep, crack each
+deck's vault, ride the lift down to richer ones, and get out on a hazard pad
+before security overwhelms you.
 
 ## Decks
 
@@ -13,12 +12,34 @@ Each deck down is harder than the last: more rooms, more guards in each, and
 nastier ones, and once the alarm is up, reinforcements come faster, in bigger
 waves, and with more of the heavy guards.
 
-The last deck's main room holds the vault: 40 gold bars worth 300 cr each.
+Every deck's main room holds a vault, and the deeper it is, the richer:
+
+| Deck | Vault | Bars | Each | Total |
+|---|---|---|---|---|
+| 1 | Silver | 24 | 150 cr | 3,600 cr |
+| 2 | Gold | 32 | 310 cr | 9,920 cr |
+| 3 | Platinum | 40 | 560 cr | 22,400 cr |
+
 Stand at it and hold E to pull bars out one at a time, about one every 1.2 s.
 Every pirate at the vault pulls on their own, so a full crew empties it far
 faster than one pirate. Firing or stepping away starts the bar you're pulling
 over. The first bar out breaches the vault: the station goes into lockdown and
 sends a wave straight away, and every bar after raises the alarm a little.
+
+The lift down only goes once the whole crew still in the heist is aboard.
+
+## Getting out
+
+Every deck has a pad. Hold it for 15 s and the pirates standing on it get out;
+everyone else stays in and the heist goes on.
+
+- **Leaving early** while crewmates stay in: you keep exactly what you looted,
+  whatever happens to the crew.
+- **The crew getting out** (the last pirates still in leave together): they pool
+  what they carry, add a bonus of 25% of the pool for every pirate who left
+  early, and split it evenly.
+- **The crew dying:** everyone still in loses everything. Pirates who left
+  early keep theirs.
 
 Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 [bevy_replicon](https://github.com/projectharmonia/bevy_replicon).
@@ -53,6 +74,9 @@ cargo run --release -- join <address>  # join a host, e.g. 192.168.1.20 or host:
 Release builds embed all assets, so `target/release/dozd` is a single file you
 can hand to friends.
 
+While developing, `cargo run --features dev` links Bevy dynamically so rebuilds
+after an edit are much faster. Leave it off for builds you share.
+
 ## Builds
 
 `tools/package.sh windows|macos|linux` builds a release for that platform and
@@ -74,9 +98,6 @@ them as artifacts, or push a version tag (`git tag v0.2.0 && git push origin
 v0.2.0`) to also publish them as a GitHub release.
 
 The macOS app isn't notarized, so the first launch is blocked until it's
-While developing, `cargo run --features dev` links Bevy dynamically so rebuilds
-after an edit are much faster. Leave it off for builds you share.
-
 allowed under System Settings > Privacy & Security > **Open Anyway**, and Windows may warn about an unknown publisher (**More info** >
 **Run anyway**). On Windows, the release build has no console, so
 `headless` prints nothing there; use a debug build for it.
@@ -116,7 +137,7 @@ from the classes still free.
 | R | Reload |
 | 1-4 / wheel | Switch gun |
 | Q | Class ability |
-| E | Take loot; hold at the vault to pull gold bars |
+| E | Take loot; hold at the vault to pull bars |
 | Enter | Play again (results screen) |
 | Esc | Leave / back |
 

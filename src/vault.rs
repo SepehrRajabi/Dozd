@@ -1,6 +1,6 @@
-//! The vault on the last deck: a stack of gold bars the crew pulls out one at a
-//! time by holding E beside it. Every pirate at it pulls on their own, so a
-//! bigger crew empties it faster.
+//! Every deck's vault: a stack of bars the crew pulls out one at a time by
+//! holding E beside it. Every pirate at it pulls on their own, so a bigger crew
+//! empties it faster. The deeper the deck, the more precious the bars.
 
 use std::collections::HashMap;
 
@@ -12,13 +12,11 @@ use crate::combat::{FxKind, Health, fx};
 use crate::mission::{Alarm, Banner};
 use crate::net::authority;
 use crate::player::{Controls, PirateStatus, Player};
+use crate::room::{DECKS, Heist};
 use crate::{GameState, Level};
 
-/// Gold bars in a full vault.
-pub const VAULT_BARS: u32 = 40;
 /// Seconds of holding E for one pirate to pull one bar.
 pub const BAR_TIME: f32 = 1.2;
-pub const BAR_VALUE: u32 = 300;
 /// Pirates within this distance of the vault's centre can pull bars.
 pub const VAULT_REACH: f32 = 30.0;
 const GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
@@ -34,23 +32,89 @@ impl Plugin for VaultPlugin {
     }
 }
 
-/// The vault, at the centre of the last deck's main room. Stays put once empty.
+/// What a vault holds, by how deep it is.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VaultTier {
+    Silver,
+    Gold,
+    Platinum,
+}
+
+impl VaultTier {
+    /// The vault on `deck` (0 = top); anything deeper than the third is platinum.
+    pub fn for_deck(deck: u8) -> Self {
+        match deck {
+            0 => Self::Silver,
+            1 => Self::Gold,
+            _ => Self::Platinum,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Silver => "SILVER",
+            Self::Gold => "GOLD",
+            Self::Platinum => "PLATINUM",
+        }
+    }
+
+    /// Bars in a full vault.
+    pub fn bars(self) -> u32 {
+        match self {
+            Self::Silver => 24,
+            Self::Gold => 32,
+            Self::Platinum => 40,
+        }
+    }
+
+    /// Credits per bar.
+    pub fn bar_value(self) -> u32 {
+        match self {
+            Self::Silver => 150,
+            Self::Gold => 310,
+            Self::Platinum => 560,
+        }
+    }
+
+    /// Tint for credit popups and banners.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Silver => Color::srgb(0.82, 0.86, 0.92),
+            Self::Gold => GOLD,
+            Self::Platinum => Color::srgb(0.75, 0.95, 1.0),
+        }
+    }
+}
+
+/// The vault, at the centre of each deck's vault room. Stays put once empty.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub struct Vault {
+    pub tier: VaultTier,
     pub bars: u32,
     pub total: u32,
+}
+
+impl Vault {
+    pub fn full(tier: VaultTier) -> Self {
+        Self { tier, bars: tier.bars(), total: tier.bars() }
+    }
+
+    /// Credits per bar.
+    pub fn bar_value(&self) -> u32 {
+        self.tier.bar_value()
+    }
 }
 
 /// How far a pirate is through pulling their next bar, 0..1 in steps of 0.05.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
 pub struct Looting(pub f32);
 
-/// Host only: puts a full vault at `pos`.
-pub fn spawn_vault(commands: &mut Commands, pos: Vec2) {
+/// Host only: puts a full vault for `deck` at `pos`.
+pub fn spawn_vault(commands: &mut Commands, pos: Vec2, deck: u8) {
     commands.spawn((
         Level,
         Replicated,
-        Vault { bars: VAULT_BARS, total: VAULT_BARS },
+        Vault::full(VaultTier::for_deck(deck)),
         Transform::from_translation(pos.extend(1.0)),
     ));
 }
@@ -60,6 +124,7 @@ pub fn spawn_vault(commands: &mut Commands, pos: Vec2) {
 fn pull_bars(
     mut commands: Commands,
     time: Res<Time>,
+    heist: Res<Heist>,
     mut alarm: ResMut<Alarm>,
     mut banner: ResMut<Banner>,
     mut vaults: Query<(&mut Vault, &Transform)>,
@@ -89,17 +154,24 @@ fn pull_bars(
         *seconds += dt;
         if *seconds >= BAR_TIME {
             *seconds = 0.0;
+            let tier = vault.tier;
             if vault.bars == vault.total {
                 alarm.vault_breached();
-                banner.show("VAULT BREACHED  -  security is on its way", Color::srgb(1.0, 0.45, 0.3), 4.0);
+                let text = format!("{} VAULT BREACHED  -  security is on its way", tier.name());
+                banner.show(text, Color::srgb(1.0, 0.45, 0.3), 4.0);
             }
             vault.bars -= 1;
-            player.credits += BAR_VALUE;
+            player.credits += vault.bar_value();
             player.items += 1;
             alarm.bar_taken();
-            fx(&mut commands, FxKind::Popup(BAR_VALUE), pos, 0.0, GOLD);
+            fx(&mut commands, FxKind::Popup(vault.bar_value()), pos, 0.0, tier.color());
             if vault.bars == 0 {
-                banner.show("VAULT EMPTIED  -  get to a pad", GOLD, 4.0);
+                let text = if heist.deck + 1 >= DECKS {
+                    "VAULT EMPTIED  -  get to a pad"
+                } else {
+                    "VAULT EMPTIED  -  ride the lift down together, or leave by a pad"
+                };
+                banner.show(text, tier.color(), 4.0);
             }
         }
         looting.set_if_neq(Looting((*seconds / BAR_TIME * 20.0).round() / 20.0));
@@ -130,9 +202,12 @@ struct VaultPile {
 #[derive(Component)]
 struct PileBar(u32);
 
-/// A bar just pulled out, rising and fading away.
+/// A bar just pulled out, rising and fading away in its tier's tint.
 #[derive(Component)]
-struct LiftedBar(f32);
+struct LiftedBar {
+    age: f32,
+    tint: Color,
+}
 
 /// A pirate's pull bar under their feet, shown while `Looting` is filling.
 #[derive(Component)]
@@ -158,6 +233,23 @@ fn pile_spots() -> Vec<Vec3> {
     spots
 }
 
+/// The pile's bar sprite and tint: gold as drawn, the others from plain steel.
+fn bar_look(tier: VaultTier) -> (&'static str, Color) {
+    match tier {
+        VaultTier::Gold => ("sprites/vault_bar.png", Color::WHITE),
+        _ => ("sprites/vault_bar_plain.png", tier.color()),
+    }
+}
+
+/// A light wash over the strongroom floor, so the tier reads at a glance.
+fn floor_tint(tier: VaultTier) -> Color {
+    match tier {
+        VaultTier::Silver => Color::srgb(0.88, 0.9, 0.96),
+        VaultTier::Gold => Color::WHITE,
+        VaultTier::Platinum => Color::srgb(0.84, 0.95, 1.0),
+    }
+}
+
 /// Bars of the pile still drawn for `bars` left out of `total`.
 fn bars_shown(vault: &Vault, spots: u32) -> u32 {
     if vault.total == 0 {
@@ -166,14 +258,15 @@ fn bars_shown(vault: &Vault, spots: u32) -> u32 {
     (vault.bars * spots).div_ceil(vault.total)
 }
 
-/// Dresses a vault as a strongroom floor with its gold piled up on it.
+/// Dresses a vault as a strongroom floor with its bars piled up on it.
 fn dress_vault(add: On<Add, Vault>, mut commands: Commands, assets: Res<AssetServer>, vaults: Query<&Vault>) {
     let Ok(vault) = vaults.get(add.entity) else { return };
     let spots = pile_spots();
     let shown = bars_shown(vault, spots.len() as u32);
-    let bar = assets.load("sprites/vault_bar.png");
+    let (bar_sprite, tint) = bar_look(vault.tier);
+    let bar = Sprite { color: tint, ..Sprite::from_image(assets.load(bar_sprite)) };
     commands.entity(add.entity).insert(Visibility::default()).with_children(|parent| {
-        parent.spawn(Sprite::from_image(assets.load("sprites/vault.png")));
+        parent.spawn(Sprite { color: floor_tint(vault.tier), ..Sprite::from_image(assets.load("sprites/vault.png")) });
         parent
             .spawn((VaultPile { shown, shake: 0.0 }, Transform::default(), Visibility::default()))
             .with_children(|pile| {
@@ -184,7 +277,7 @@ fn dress_vault(add: On<Add, Vault>, mut commands: Commands, assets: Res<AssetSer
                 ));
                 for (i, &spot) in spots.iter().enumerate() {
                     let visibility = if (i as u32) < shown { Visibility::Inherited } else { Visibility::Hidden };
-                    pile.spawn((PileBar(i as u32), visibility, Sprite::from_image(bar.clone()), Transform::from_translation(spot)));
+                    pile.spawn((PileBar(i as u32), visibility, bar.clone(), Transform::from_translation(spot)));
                 }
             });
     });
@@ -205,10 +298,11 @@ fn draw_vault(
         let shown = bars_shown(vault, spots.len() as u32);
         if shown < pile.shown {
             pile.shake = 0.3;
+            let (bar_sprite, tint) = bar_look(vault.tier);
             for &spot in &spots[shown as usize..pile.shown as usize] {
                 commands.entity(parent.parent()).with_child((
-                    LiftedBar(0.0),
-                    Sprite::from_image(assets.load("sprites/vault_bar.png")),
+                    LiftedBar { age: 0.0, tint },
+                    Sprite { color: tint, ..Sprite::from_image(assets.load(bar_sprite)) },
                     Transform::from_translation(spot.with_z(0.5)),
                 ));
             }
@@ -239,17 +333,18 @@ fn lift_bars(
     const LIFE: f32 = 0.5;
     let dt = time.delta_secs();
     for (entity, mut bar, mut transform, mut sprite) in &mut bars {
-        bar.0 += dt;
-        if bar.0 >= LIFE {
+        bar.age += dt;
+        if bar.age >= LIFE {
             commands.entity(entity).despawn();
             continue;
         }
         transform.translation.y += 24.0 * dt;
-        sprite.color = Color::WHITE.with_alpha(1.0 - bar.0 / LIFE);
+        sprite.color = bar.tint.with_alpha(1.0 - bar.age / LIFE);
     }
 }
 
-/// Gives every pirate a slim gold bar under their feet for pulling bars.
+/// Gives every pirate a slim bar under their feet for pulling bars, in the
+/// vault's tier colour (see `draw_looting`).
 fn dress_looting(add: On<Add, Looting>, mut commands: Commands) {
     commands.entity(add.entity).with_children(|parent| {
         parent.spawn((
@@ -269,6 +364,7 @@ fn dress_looting(add: On<Add, Looting>, mut commands: Commands) {
 
 fn draw_looting(
     players: Query<&Looting>,
+    vault: Option<Single<&Vault>>,
     mut bars: Query<(&ChildOf, &LootingBar, &mut Visibility, &mut Transform, &mut Sprite)>,
 ) {
     for (parent, bar, mut visibility, mut transform, mut sprite) in &mut bars {
@@ -276,6 +372,7 @@ fn draw_looting(
         let frac = looting.0.clamp(0.0, 1.0);
         visibility.set_if_neq(if frac > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
         if bar.fill {
+            sprite.color = vault.as_ref().map_or(GOLD, |v| v.tier.color());
             let width = (12.0 * frac).round();
             sprite.custom_size = Some(Vec2::new(width, 1.0));
             transform.translation.x = (width - 12.0) / 2.0;

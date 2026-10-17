@@ -235,7 +235,7 @@ fn update_hud(
             .find(|(v, t)| v.bars > 0 && t.translation.truncate().distance(pos) <= VAULT_REACH)
             .map(|(v, _)| {
                 let left = if v.bars == 1 { "1 bar left".into() } else { format!("{} bars left", v.bars) };
-                (format!("Hold to loot the vault  ({left})"), hud::GOLD)
+                (format!("Hold to loot the {} vault  ({left})", v.tier.name()), v.tier.color())
             })
     };
     let display = if shown.is_some() { Display::Flex } else { Display::None };

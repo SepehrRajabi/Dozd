@@ -1218,6 +1218,16 @@ VAULT_BAR = (
     },
 )
 
+# The same bar in plain steel, tinted in game for the silver and platinum vaults.
+VAULT_BAR_PLAIN = (
+    VAULT_BAR[0],
+    {
+        "Y": rgb(226, 230, 238),
+        "y": rgb(170, 176, 190),
+        "o": rgb(112, 118, 134),
+    },
+)
+
 
 def floor_shadows():
     """Soft shade a wall casts across the floor beside it: from the north, west
@@ -1362,6 +1372,7 @@ def main():
     write_png(os.path.join(ROOT, "shadow.png"), shadow())
     write_png(os.path.join(ROOT, "vault.png"), vault_floor())
     write_png(os.path.join(ROOT, "vault_bar.png"), from_ascii("vault_bar", *VAULT_BAR, width=6, height=5))
+    write_png(os.path.join(ROOT, "vault_bar_plain.png"), from_ascii("vault_bar_plain", *VAULT_BAR_PLAIN, width=6, height=5))
 
     guns = {}
     for name, (rows, pal) in GUNS.items():

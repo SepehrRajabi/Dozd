@@ -85,6 +85,19 @@ pub fn panel_accent(node: Node, accent: Color) -> (Node, BackgroundColor, Border
     )
 }
 
+/// Credits with thousands separators, e.g. `1,240 cr`.
+pub fn credits(amount: u32) -> String {
+    let digits = amount.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out + " cr"
+}
+
 pub fn text(content: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
     (Text::new(content), TextFont::from_font_size(size), TextColor(color))
 }
@@ -412,5 +425,18 @@ fn retire_controls_hint(
     }
     if *played > CONTROLS_HINT_TIME && hint.display != Display::None {
         hint.display = Display::None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credits_are_grouped_in_thousands() {
+        assert_eq!(credits(0), "0 cr");
+        assert_eq!(credits(950), "950 cr");
+        assert_eq!(credits(1240), "1,240 cr");
+        assert_eq!(credits(1_000_000), "1,000,000 cr");
     }
 }

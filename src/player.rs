@@ -28,7 +28,8 @@ const TRAIL_INTERVAL: f32 = 0.025;
 const HITBOX_HALF: Vec2 = Vec2::new(5.0, 3.0);
 /// The hitbox sits at the pirate's feet, not the sprite centre.
 const FEET_OFFSET: Vec2 = Vec2::new(0.0, -5.0);
-/// Where pirates who aren't on the current deck are parked, far off the map.
+/// Where pirates who aren't on the current deck, or have extracted, are parked,
+/// far off the map.
 pub const OFF_DECK: Vec2 = Vec2::new(-100_000.0, 0.0);
 /// Name-tag colours, by join order.
 const SLOT_COLORS: [Color; 4] = [
@@ -93,9 +94,8 @@ impl Default for CrewSize {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PirateStatus {
     Active,
+    /// Got out by a pad; out of play for the rest of the run.
     Extracted,
-    /// Alive when the extraction left without them.
-    LeftBehind,
 }
 
 #[derive(Component, Serialize, Deserialize, Clone)]
@@ -112,6 +112,10 @@ pub struct Player {
     pub credits: u32,
     pub items: u32,
     pub status: PirateStatus,
+    /// Took a pad out while the rest of the crew stayed in: keeps only their own haul.
+    pub left_early: bool,
+    /// What they take home, settled by the host when the run ends (0 until then).
+    pub payout: u32,
     /// Deck this pirate is on (0 = top). The crew only moves down together.
     pub deck: u8,
 }
@@ -214,6 +218,8 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
             credits: 0,
             items: 0,
             status: PirateStatus::Active,
+            left_early: false,
+            payout: 0,
             deck,
         },
         Team::Player,
@@ -622,11 +628,12 @@ fn dash_trails(
     }
 }
 
-/// Pirates left on another deck aren't drawn.
+/// Pirates on another deck, or who left early by a pad, aren't drawn, nor is
+/// anything hung on them (name tag, shadow, pull bar).
 fn hide_other_decks(status: Option<Single<&MissionStatus>>, mut players: Query<(&Player, &mut Visibility)>) {
     let Some(status) = status else { return };
     for (player, mut visibility) in &mut players {
-        visibility.set_if_neq(if player.deck == status.deck {
+        visibility.set_if_neq(if player.deck == status.deck && !player.left_early {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -634,8 +641,8 @@ fn hide_other_decks(status: Option<Single<&MissionStatus>>, mut players: Query<(
     }
 }
 
-/// Follows this machine's pirate, or, once they're left behind, whoever is still
-/// in the heist.
+/// Follows this machine's pirate, or, once they've got out, whoever is still in
+/// the heist.
 fn follow_camera(
     time: Res<Time>,
     mut shake: ResMut<Shake>,
@@ -646,12 +653,16 @@ fn follow_camera(
     mut smoothed: Local<Option<Vec2>>,
 ) {
     let local = players.iter().find(|(_, _, _, local)| *local);
-    let in_heist = |p: &Player| p.status != PirateStatus::LeftBehind;
+    let in_heist = |p: &Player| p.status == PirateStatus::Active;
     let followed = match local {
-        Some(local) if in_heist(local.1) => Some(local),
+        // Those who end the run on a pad stay where they got out.
+        Some(local) if !local.1.left_early => Some(local),
+        // Watch a living crewmate, else where the crew fell; an early leaver
+        // sits off the map, so their own pirate is the last resort.
         _ => players
             .iter()
-            .find(|(_, p, h, _)| p.status == PirateStatus::Active && !h.is_dead())
+            .find(|(_, p, h, _)| in_heist(p) && !h.is_dead())
+            .or_else(|| players.iter().find(|(_, p, ..)| in_heist(p)))
             .or(local),
     };
     let Some((player, ..)) = followed else { return };
