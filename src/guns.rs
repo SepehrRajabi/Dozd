@@ -82,7 +82,7 @@ pub struct GunStats {
     pub sprite: &'static str,
     mode: FireMode,
     look: ProjectileLook,
-    color: Color,
+    pub color: Color,
     /// Seconds between shots.
     cooldown: f32,
     automatic: bool,
@@ -283,6 +283,17 @@ impl GunKind {
         }
     }
 
+    /// Snake_case file stem shared by its gun and ammo sprites, e.g. "rail_lance".
+    pub fn stem(self) -> &'static str {
+        let sprite = self.stats().sprite;
+        sprite.strip_prefix("sprites/guns/").and_then(|s| s.strip_suffix(".png")).unwrap_or(sprite)
+    }
+
+    /// Its first word in capitals, for short labels: "RAIL", "NOVA".
+    pub fn short_name(self) -> String {
+        self.stats().name.split(' ').next().unwrap_or_default().to_uppercase()
+    }
+
     /// Recoil distance in pixels.
     fn kick(self) -> f32 {
         match self {
@@ -351,21 +362,27 @@ impl Arsenal {
         self.reloading = None;
     }
 
-    /// Adds a magazine's worth of spare rounds to every gun with limited ammo.
-    pub fn add_ammo(&mut self) {
-        for gun in &mut self.guns {
-            let stats = gun.kind.stats();
-            if let (Some(spare), Some(reserve)) = (gun.spare.as_mut(), stats.reserve) {
-                *spare = (*spare + stats.magazine).min(reserve * 2);
-            }
-        }
+    /// Adds a magazine's worth of spare rounds to `kind`, up to twice its
+    /// reserve. Returns the rounds actually added.
+    pub fn add_ammo_for(&mut self, kind: GunKind) -> u32 {
+        let stats = kind.stats();
+        let Some(reserve) = stats.reserve else { return 0 };
+        let Some(spare) = self.guns.iter_mut().find(|g| g.kind == kind).and_then(|g| g.spare.as_mut()) else { return 0 };
+        let before = *spare;
+        *spare = (*spare + stats.magazine).min(reserve * 2);
+        *spare - before
     }
 
-    /// Whether any gun can carry more spare rounds.
-    pub fn needs_ammo(&self) -> bool {
+    /// Whether this pirate carries `kind` and has room for more of its spare rounds.
+    pub fn needs_ammo_for(&self, kind: GunKind) -> bool {
         self.guns
             .iter()
-            .any(|gun| matches!((gun.spare, gun.kind.stats().reserve), (Some(spare), Some(reserve)) if spare < reserve * 2))
+            .any(|gun| gun.kind == kind && matches!((gun.spare, kind.stats().reserve), (Some(spare), Some(reserve)) if spare < reserve * 2))
+    }
+
+    /// The carried guns with limited ammo.
+    pub fn limited_guns(&self) -> impl Iterator<Item = GunKind> + '_ {
+        self.guns.iter().filter(|gun| gun.spare.is_some()).map(|gun| gun.kind)
     }
 
     fn gun(&self) -> &Gun {

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::abilities::{RICOCHET_DAMAGE, RICOCHET_REACH, RICOCHET_TARGETS};
 use crate::class::{RIOT_POINTS, RIOT_THICKNESS, RiotShield};
+use crate::guns::GunKind;
 use crate::net::{LocalPlayer, authority};
 use crate::perks::PerkKind;
 use crate::room::RoomGrid;
@@ -292,8 +293,8 @@ pub enum FxKind {
     Popup(u32),
     /// Perk name and a burst of sparks when one is picked up.
     Perk(PerkKind),
-    /// "+AMMO" after grabbing an ammo box.
-    Ammo,
+    /// "+12 RAIL" after grabbing an ammo box: the rounds added and their gun.
+    Ammo(GunKind, u32),
     /// An electric arc from `pos` to this point.
     Zap(Vec2),
     /// A grenade going off.
@@ -407,7 +408,7 @@ fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rn
             }
             shake.add(0.25);
         }
-        FxKind::Popup(_) | FxKind::Perk(_) | FxKind::Ammo => {
+        FxKind::Popup(_) | FxKind::Perk(_) | FxKind::Ammo(..) => {
             let text = match fx.kind {
                 FxKind::Perk(kind) => {
                     for i in 0..10 {
@@ -417,7 +418,7 @@ fn spawn_fx(fx: On<Fx>, mut commands: Commands, assets: Res<AssetServer>, mut rn
                     kind.name().to_string()
                 }
                 FxKind::Popup(credits) => format!("+{credits} cr"),
-                FxKind::Ammo => "+AMMO".to_string(),
+                FxKind::Ammo(kind, rounds) => format!("+{rounds} {}", kind.short_name()),
                 _ => unreachable!(),
             };
             commands.spawn((

@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::abilities::Passive;
 use crate::class::{Boons, HACK_COLOR, JAM_MISS, JAM_RADIUS, Sentry};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
-use crate::drops::{EnemyDrop, spawn_drops};
+use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
+use crate::guns::Arsenal;
 use crate::mission::Alarm;
 use crate::net::authority;
 use crate::perks::{PerkKind, Perks};
@@ -943,7 +944,19 @@ fn update_health_bars(
     }
 }
 
-fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(Entity, &Enemy, &Health, &Transform)>) {
+fn enemy_deaths(
+    mut commands: Commands,
+    mut rng: ResMut<Rng>,
+    enemies: Query<(Entity, &Enemy, &Health, &Transform)>,
+    pirates: Query<(&Player, &Health, &Arsenal), Without<Enemy>>,
+) {
+    // Ammo boxes are for the guns the living crew carries.
+    let crew = || {
+        pirates
+            .iter()
+            .filter(|(player, health, _)| player.status == PirateStatus::Active && !health.is_dead())
+            .map(|(.., arsenal)| arsenal)
+    };
     for (entity, enemy, health, transform) in &enemies {
         if health.is_dead() {
             let stats = enemy.kind.stats();
@@ -959,8 +972,10 @@ fn enemy_deaths(mut commands: Commands, mut rng: ResMut<Rng>, enemies: Query<(En
                 drops.push(EnemyDrop::Credits(credits));
             }
             for _ in 0..ammo_rolls {
-                if rng.unit() < AMMO_DROP_CHANCE {
-                    drops.push(EnemyDrop::Ammo);
+                if rng.unit() < AMMO_DROP_CHANCE
+                    && let Some(kind) = pick_ammo(&mut rng, crew())
+                {
+                    drops.push(EnemyDrop::Ammo(kind));
                 }
             }
             spawn_drops(&mut commands, &mut rng, pos, &drops);
