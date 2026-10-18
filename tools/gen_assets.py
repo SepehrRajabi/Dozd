@@ -1722,6 +1722,136 @@ def stalker_boss():
     return px
 
 
+# The vault brute: the deck's brute grown huge and plated, drawn like the
+# keeper in near-neutral hide and steel so the game can tint it by the vault's
+# tier; only its visor and the studs on its belt glow.
+BRUTE_HIDE = rgb(168, 150, 146)
+BRUTE_PLATE = rgb(150, 156, 172)
+BRUTE_EYE = rgb(255, 120, 40)
+
+
+def brute_boss():
+    """The vault brute, 40x40: the deck's brute grown monstrous. A slab of
+    muscle on stumpy armoured legs, a plated chest and a studded belt, huge
+    spiked pauldrons, arms like pillars ending in great steel gauntlets, and a
+    small helmeted head sunk between its shoulders, its visor glowing."""
+    n = 40
+    px = canvas(n, n)
+    hide = BRUTE_HIDE
+    m = BRUTE_PLATE
+
+    # Two stumpy legs in heavy boots.
+    for side in (-1, 1):
+        cx = 19.5 + side * 5
+        part = canvas(n, n)
+        for y in range(28, 35):
+            for x in range(int(cx - 3), int(cx + 4)):
+                part[y][x] = shade(hide, -40 - (y - 28) * 3 - (side * (x - cx)) * 4)
+        for y in range(34, 39):
+            for x in range(int(cx - 4 + (side > 0)), int(cx + 4 + (side > 0))):
+                part[y][x] = shade(m, -10 - (y - 34) * 12)
+        for x in range(int(cx - 3), int(cx + 4)):
+            part[34][x] = shade(m, 30)
+        stamp(px, part)
+
+    # Torso: a broad slab of muscle under a chest plate.
+    part = canvas(n, n)
+    lit = metal_at(hide, cx=19.5, cy=21.0, rx=10.5, ry=9.0, seed=91)
+    fill_ellipse(part, 19.5, 21.0, 10.5, 9.0, lambda x, y, d: shade(lit(x, y, d), -max(0, y - 21) * 3))
+    # Abs, lit like the brute's, below the plate.
+    for y in (24, 27):
+        for x in range(15, 25):
+            if part[y][x][3]:
+                part[y][x] = shade(part[y][x], -40)
+    for y in range(23, 29):
+        if part[y][19][3]:
+            part[y][19] = shade(part[y][19], -36)
+    # The chest plate, riveted, with a scowling ridge.
+    plate = metal_at(shade(m, 8), cx=19.5, cy=17.0, rx=7.5, ry=4.5, seed=92)
+    fill_ellipse(part, 19.5, 17.0, 7.5, 4.5, plate)
+    for x in range(13, 27):
+        part[20][x] = shade(m, -60) if part[20][x][3] else part[20][x]
+    for x, y in ((14, 17), (24, 17)):
+        rivet(part, x, y)
+    for y in range(14, 20):
+        part[y][19] = shade(m, 40)
+        part[y][20] = shade(m, -24)
+    # The belt, studded with glowing amber.
+    for x in range(10, 30):
+        for y in (28, 29):
+            if part[y][x][3]:
+                part[y][x] = shade(m, -50 if y == 29 else -20)
+    for x in (13, 17, 22, 26):
+        part[28][x] = AMBER
+    part[28][19] = part[28][20] = part[29][19] = part[29][20] = shade(AMBER, 30)
+    stamp(px, part)
+
+    # Arms like pillars off each shoulder, down to great steel gauntlets.
+    for side in (-1, 1):
+        part = canvas(n, n)
+        pts = [(19.5 + side * 12, 14), (19.5 + side * 16, 20), (19.5 + side * 15, 26)]
+        thick_curve(part, pts, 3.6, 3.0, lambda x, y, t, s: shade(hide, -10 - t * 30 - s * side * 18))
+        # Bracers round the forearm.
+        for y in (23, 24):
+            for x in range(n):
+                if part[y][x][3]:
+                    part[y][x] = shade(m, 10 if y == 23 else -30)
+        stamp(px, part)
+        part = canvas(n, n)
+        fx = 19.5 + side * 15
+        fill_ellipse(part, fx, 30.0, 4.6, 4.2, metal_at(shade(m, 16), cx=fx, cy=30.0, rx=4.6, ry=4.2, seed=93))
+        # Knuckle ridges and spikes across the fist.
+        for x in range(int(fx - 3), int(fx + 4)):
+            if part[32][x][3]:
+                part[32][x] = shade(m, -60)
+        for dx in (-2, 0, 2):
+            part[33][int(fx + dx)] = shade(m, 50)
+            part[34][int(fx + dx)] = shade(m, -20)
+        stamp(px, part)
+
+    # Pauldrons: huge plated shells over the shoulders, ringed with spikes.
+    for side in (-1, 1):
+        cx = 19.5 + side * 10.5
+        part = canvas(n, n)
+        fill_ellipse(part, cx, 13.0, 7.0, 5.5, metal_at(shade(m, 12), cx=cx, cy=13.0, rx=7.0, ry=5.5, seed=94))
+        for x in range(int(cx) - 6, int(cx) + 7):
+            if 0 <= x < n and part[16][x][3]:
+                part[16][x] = shade(m, -56)
+            if 0 <= x < n and part[17][x][3]:
+                part[17][x] = shade(m, -30)
+        for x in range(int(cx) - 4, int(cx) + 5):
+            y = 11 + (abs(x - cx) > 3)
+            if part[y][x][3]:
+                part[y][x] = shade(m, -44)
+                part[y - 1][x] = shade(m, 36)
+        for i, (dx, dy) in enumerate(((1, 7), (3, 6), (5, 7), (7, 9))):
+            x = int(cx + side * dx)
+            part[dy][x] = shade(m, 50 - i * 14)
+            part[dy - 1][x] = shade(m, 20 - i * 14)
+        stamp(px, part)
+
+    # Head: a small helmet sunk low between the pauldrons, a glowing visor slit
+    # under a heavy brow, and a crest down its middle.
+    part = canvas(n, n)
+    fill_ellipse(part, 19.5, 9.0, 4.8, 4.8, metal_at(shade(m, 4), cx=19.5, cy=9.0, rx=4.8, ry=4.8, seed=95))
+    for x in range(15, 25):
+        part[8][x] = rgb(22, 18, 30)
+        part[9][x] = rgb(22, 18, 30)
+    for x in range(16, 24):
+        part[9][x] = BRUTE_EYE if 16 < x < 23 else shade(BRUTE_EYE, -80)
+    part[9][18] = part[9][21] = WHITE
+    # A brow scowling down to the middle.
+    for x, y in ((15, 7), (16, 7), (23, 7), (24, 7), (19, 9), (20, 9)):
+        part[y][x] = rgb(22, 18, 30)
+    for x in range(17, 23):
+        part[12][x] = shade(m, -60)
+    for y in range(4, 8):
+        part[y][19] = shade(m, 44)
+        part[y][20] = shade(m, -24)
+    stamp(px, part)
+    return px
+
+
 def gate_tiles():
     """The vault's gate, 32x16 across two wall tiles: a sealed bulkhead with
     hazard-striped leaves meeting at a locked seam, and the same frame once
@@ -1891,6 +2021,8 @@ def main():
     write_png(os.path.join(ROOT, "boss", "hand.png"), hand)
     stalker = stalker_boss()
     write_png(os.path.join(ROOT, "boss", "stalker.png"), stalker)
+    brute = brute_boss()
+    write_png(os.path.join(ROOT, "boss", "brute.png"), brute)
     gate, gate_open = gate_tiles()
     write_png(os.path.join(ROOT, "tiles", "gate.png"), gate)
     write_png(os.path.join(ROOT, "tiles", "gate_open.png"), gate_open)
@@ -1911,7 +2043,7 @@ def main():
     write_png(os.path.join(preview, "station.png"), contact_sheet([station], scale=4))
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
-    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))
+    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, brute, gate, gate_open]))
     write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
     write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
     write_png(

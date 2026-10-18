@@ -301,9 +301,11 @@ impl Rewards {
 pub struct Streak(Vec<f32>);
 
 impl Streak {
-    /// Forgets kills more than `window` seconds before `now`.
-    pub fn prune(&mut self, now: f32, window: f32) {
+    /// Forgets kills more than `window` seconds before `now`; whether any went.
+    pub fn prune(&mut self, now: f32, window: f32) -> bool {
+        let before = self.0.len();
         self.0.retain(|t| now - t < window);
+        self.0.len() != before
     }
 
     pub fn push(&mut self, now: f32) {
@@ -427,7 +429,9 @@ fn track_challenges(
             .map(|(p, ..)| p.owner)
             .collect();
 
-        // New goals get an arm here, feeding their own tally.
+        // New goals get an arm here, feeding their own tally. `lapsed` is
+        // whether someone's attempt ran out: a streak's window closed on them.
+        let mut lapsed = false;
         let progress: Vec<Progress> = match challenge.goal {
             Goal::KillStreak { window, .. } => {
                 tally.streaks.retain(|(owner, _)| eligible.contains(owner));
@@ -440,7 +444,7 @@ fn track_challenges(
                     .streaks
                     .iter_mut()
                     .map(|(owner, streak)| {
-                        streak.prune(now, window);
+                        lapsed |= streak.prune(now, window);
                         for _ in kills.iter().filter(|k| *k == owner) {
                             streak.push(now);
                         }
@@ -486,7 +490,10 @@ fn track_challenges(
                     BANNER_SECS,
                 );
             }
-        } else if eligible.is_empty() || challenge.span.over(heist.deck, tally.left) {
+        } else if lapsed || eligible.is_empty() || challenge.span.over(heist.deck, tally.left) {
+            if lapsed {
+                banner.show(format!("{} FAILED  -  out of time", challenge.name), BANNER_COLOR, BANNER_SECS);
+            }
             challenge.state = ChallengeState::Failed;
             log.failed += 1;
         }
@@ -741,17 +748,27 @@ mod tests {
     }
 
     #[test]
-    fn kills_before_the_offer_or_outside_the_window_dont_count() {
+    fn kills_before_the_offer_dont_count_and_a_lapsed_window_fails_it() {
         let mut app = sim::app(&[PirateClass::Gunner]);
         sim::run_for(&mut app, 2.0);
         sim::kill(&mut app, 0, 4);
         sim::run_for(&mut app, OFFER_DELAY);
         sim::kill(&mut app, 0, 4);
-        sim::run_for(&mut app, 15.5);
-        sim::kill(&mut app, 0, 1);
+        sim::run_for(&mut app, 14.0);
         let challenge = &sim::challenges(&mut app)[0];
         assert!(challenge.is_open());
-        assert_eq!(challenge.progress[0].count, 1);
+        assert_eq!(challenge.progress[0].count, 4, "only the kills since the offer");
+        // The window closes one short: the attempt is over, and it's cleared away.
+        sim::run_for(&mut app, 1.5);
+        assert!(sim::challenges(&mut app).is_empty());
+        assert_eq!(sim::log(&app), (1, 0, 1));
+    }
+
+    #[test]
+    fn no_kills_yet_leaves_it_open() {
+        let mut app = sim::offered(&[PirateClass::Gunner]);
+        sim::run_for(&mut app, 30.0);
+        assert!(sim::challenges(&mut app)[0].is_open(), "the window only starts with a kill");
     }
 
     #[test]

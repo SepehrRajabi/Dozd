@@ -684,6 +684,7 @@ fn boss_color(kind: KeeperKind) -> Color {
         KeeperKind::Hands => KEEPER_COLOR,
         // The orange of the marks it lays on its prey.
         KeeperKind::Stalker => Color::srgb(1.0, 0.4, 0.15),
+        KeeperKind::Brute => Color::srgb(0.95, 0.6, 0.2),
     }
 }
 

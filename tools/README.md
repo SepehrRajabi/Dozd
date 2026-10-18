@@ -42,17 +42,40 @@ are not generated from a single source of truth.
 | `keepers` | u32 | vault keepers (`src/boss.rs`) killed: breaches that ended with the gate opening. `breaches - keepers` is 1 when the crew was wiped (or the run timed out) locked in | `0..=breaches` |
 | `keeper_secs` | f32 | in-game seconds spent locked in with a keeper (`Fight`), summed over the run's breaches | `0.0..=seconds` |
 | `keeper_deaths` | u32 | times a pirate went down while locked in with a keeper (a pirate revived and downed again counts twice) | `0..` |
+| `breaches_hands`, `breaches_stalker`, `breaches_brute` | u32 | `breaches`, split by the kind of guardian behind the gate (`KeeperKind` in `src/boss.rs`: the vault keeper's hands, the Vault Stalker, the Vault Brute). The kinds take turns down the decks (`KeeperKind::pick`), so without `--boss` a full run meets each once | `0..=breaches` |
+| `keepers_hands`, `keepers_stalker`, `keepers_brute` | u32 | `keepers`, split the same way | `0..=breaches_<kind>` |
+| `keeper_secs_hands`, `keeper_secs_stalker`, `keeper_secs_brute` | f32 | `keeper_secs`, split the same way | `0.0..=keeper_secs` |
+| `keeper_deaths_hands`, `keeper_deaths_stalker`, `keeper_deaths_brute` | u32 | `keeper_deaths`, split the same way | `0..=keeper_deaths` |
 
 Settlement rules, for checking rows: early leavers' payout equals their own
 credits; the final group each get `round((pool + bonus) / finishers)`; dead
 and still-in pirates get 0, and on a wipe `pool` and `bonus` are 0.
 
 Every row also implicitly reflects whatever else was passed to `headless`
-that run (`--crew`, `--bot`, `--hz`, `--time`) — those aren't repeated per
+that run (`--crew`, `--bot`, `--boss`, `--hz`, `--time`) — those aren't repeated per
 row since a single invocation holds them constant across its batch. If you
 sweep more than one of them, carry the value into the CSV yourself (e.g. a
 second column from the sweep script) since the binary doesn't know it's
 being swept.
+
+## Boss balance (`--boss`)
+
+`--boss hands|stalker|brute` puts that guardian behind every deck's gate (the
+sleeping one the deck was built with is swapped out at the same spot), so a
+batch measures one kind across all three tiers; `--boss mixed` (the default)
+keeps the usual rotation. The `done: ...` summary on stderr also lists each
+kind's kills over breaches. For example:
+
+```sh
+for boss in hands stalker brute; do
+  ./target/release/dozd headless --seed 500 --runs 50 --crew 3 --boss $boss --quiet --csv > boss_$boss.csv
+done
+```
+
+then compare `keepers_<kind>/breaches_<kind>`, `keeper_secs_<kind>` and
+`keeper_deaths_<kind>` across the files. Without `--boss`, the per-kind
+columns of one mixed batch give the same comparison, but each kind then only
+appears at the tier(s) the rotation gives it for that seed.
 
 ## Per-tick trace (`--trace`)
 

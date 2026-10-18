@@ -338,6 +338,12 @@ impl Enemy {
     }
 }
 
+/// Host only: called in by a boss (see the Vault Brute in `boss.rs`). Fights
+/// like any other guard, but drops nothing, so the fight can't be farmed, and
+/// goes down with the boss.
+#[derive(Component)]
+pub struct Summoned;
+
 #[derive(Component)]
 struct HealthBar {
     fill: bool,
@@ -347,7 +353,7 @@ struct HealthBar {
 #[derive(Component)]
 struct PowerRing;
 
-pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool) {
+pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool) -> Entity {
     let stats = kind.stats();
     let state = if alerted { AiState::Hunt } else { AiState::Idle };
     let enemy = Enemy {
@@ -378,7 +384,8 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
         Hurtbox(stats.hurtbox),
         Knockback::default(),
         Transform::from_translation(pos.extend(8.0)),
-    ));
+    ))
+    .id()
 }
 
 fn dress_enemy(add: On<Add, EnemyLook>, mut commands: Commands, assets: Res<AssetServer>, looks: Query<&EnemyLook>) {
@@ -947,7 +954,7 @@ fn update_health_bars(
 fn enemy_deaths(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
-    enemies: Query<(Entity, &Enemy, &Health, &Transform)>,
+    enemies: Query<(Entity, &Enemy, &Health, &Transform, Has<Summoned>)>,
     pirates: Query<(&Player, &Health, &Arsenal), Without<Enemy>>,
 ) {
     // Ammo boxes are for the guns the living crew carries.
@@ -957,11 +964,16 @@ fn enemy_deaths(
             .filter(|(player, health, _)| player.status == PirateStatus::Active && !health.is_dead())
             .map(|(.., arsenal)| arsenal)
     };
-    for (entity, enemy, health, transform) in &enemies {
+    for (entity, enemy, health, transform, summoned) in &enemies {
         if health.is_dead() {
             let stats = enemy.kind.stats();
             let pos = transform.translation.truncate();
             fx(&mut commands, FxKind::Burst, pos, 0.0, stats.death_color);
+            if summoned {
+                // A boss's summons leave nothing behind.
+                commands.entity(entity).despawn();
+                continue;
+            }
 
             let (lo, hi) = stats.bounty;
             let credits = lo + (rng.unit() * (hi - lo) as f32).round() as u32;

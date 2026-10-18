@@ -1,11 +1,13 @@
 //! How a vault's guardian looks: the keeper's body, hands, beams and charging
-//! orbs, the stalker's crouch, marks and lunge, and the health bar while the
-//! crew fights either. None of it shows unless the camera is in the vault room:
+//! orbs, the stalker's crouch, routes and lunge, its rampage lanes, the
+//! brute's stomp, slam and roar, and the health bar while the crew fights any of them. None of it shows unless the camera is in the vault room:
 //! what guards a vault is meant to be a surprise.
 
 use bevy::prelude::*;
 
-use crate::boss::{HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, StalkerLook, StalkerState};
+use crate::boss::{
+    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, StalkerLook, StalkerState,
+};
 use crate::combat::{Fade, Health, Shake};
 use crate::hud::{self, HudSlot, Meter};
 use crate::room::RoomGrid;
@@ -20,13 +22,41 @@ const HIT_COLOR: Color = Color::srgb(1.0, 0.3, 0.3);
 const MARK_COLOR: Color = Color::srgb(1.0, 0.4, 0.15);
 /// Spent after a lunge, like a guard stalker recovering: dull and bluish.
 const RECOVER_COLOR: Color = Color::srgb(0.6, 0.6, 0.75);
-/// How far apart the chevrons along the stalker's path sit, and how many
-/// there can be.
+/// How far apart the chevrons along the stalker's routes sit, and how many
+/// there can be across all of them.
 const CHEVRON_GAP: f32 = 9.0;
-const CHEVRONS: usize = 72;
+const CHEVRONS: usize = 240;
+/// How many marked pirates its routes can show reticles on at once.
+const RETICLES: usize = 12;
+/// Roughly how long a wind-up lasts, for its candidate routes to brighten
+/// over, and how long the route it takes flashes as it goes.
+const WIND_UP_LOOK: f32 = 0.85;
+const CHOSEN_FLASH: f32 = 0.25;
+/// How wide a rampage lane's danger strip is, how far apart its chevrons sit
+/// and how many there can be, and how long a warning takes to reach full heat.
+const LANE_WIDTH: f32 = 36.0;
+const LANE_ARROW_GAP: f32 = 24.0;
+const LANE_ARROWS: usize = 40;
+const LANE_HEAT: f32 = 0.6;
 /// Seconds between the afterimages a lunge leaves, and how long each lasts.
 const GHOST_GAP: f32 = 0.025;
 const GHOST_LIFE: f32 = 0.22;
+/// The brute's roar and the spots its guards will appear at: an alarm amber.
+const SUMMON_COLOR: Color = Color::srgb(1.0, 0.75, 0.2);
+/// Roughly how long the brute's fists stay raised (and, enraged, how long),
+/// and how long it roars, for its slam disc and summoning sigils to fill over;
+/// and how long the slam's flash lingers once it lands.
+const SLAM_LOOK: f32 = 0.8;
+const ENRAGED_SLAM_LOOK: f32 = 0.65;
+const ROAR_LOOK: f32 = 1.2;
+const SLAM_FLASH: f32 = 0.3;
+/// How many summoning sigils one roar can show at once.
+const SIGILS: usize = 8;
+/// How far across a sigil grows by the end of the roar.
+const SIGIL_RADIUS: f32 = 10.0;
+/// The diameters, in pixels, of `shock_ring.png` and of the disc in `explosion.png`.
+const RING_SIZE: f32 = 113.0;
+const DISC_SIZE: f32 = 52.0;
 /// How far from a hand's centre its palm emitter sits, along its aim.
 const PALM: f32 = 4.0;
 const BAR_WIDTH: f32 = 420.0;
@@ -42,12 +72,25 @@ impl Plugin for BossViewPlugin {
             .add_observer(dress_hand)
             .add_observer(dress_beam)
             .add_observer(dress_marks)
+            .add_observer(dress_lane)
+            .add_observer(dress_brute)
             .add_systems(Startup, spawn_boss_bar)
             .add_systems(
                 Update,
                 (
                     watch_vault_room,
-                    (hide_boss, draw_keeper, draw_hands, draw_beams, draw_marks, lunge_ghosts, fade_ghosts, update_boss_bar),
+                    (
+                        hide_boss,
+                        draw_keeper,
+                        draw_hands,
+                        draw_beams,
+                        draw_marks,
+                        draw_lane,
+                        draw_brute,
+                        lunge_ghosts,
+                        fade_ghosts,
+                        update_boss_bar,
+                    ),
                 )
                     .chain(),
             );
@@ -92,26 +135,114 @@ enum BeamPart {
 #[derive(Component)]
 struct BeamImpact;
 
-/// Draws a stalker's `StalkerLook` marks: the path it'll lunge along and a
-/// numbered reticle on each pirate it marked. Its children sit in world space.
+/// Draws a stalker's `StalkerLook` routes: the ways it might lunge (or the
+/// one it took) and a numbered reticle on each pirate they pass through. Its
+/// children sit in world space.
 #[derive(Component)]
 struct MarksLook(Entity);
 
-/// One chevron along the stalker's path, pointing the way it'll go.
+/// How long a guardian has been doing what it's doing, as far as a look can
+/// tell: reset whenever `key` changes.
 #[derive(Component)]
-struct MarkChevron(usize);
+struct StateClock<K: Send + Sync + 'static> {
+    key: Option<K>,
+    since: f32,
+}
+
+impl<K: Send + Sync + 'static> Default for StateClock<K> {
+    fn default() -> Self {
+        Self { key: None, since: 0.0 }
+    }
+}
+
+impl<K: PartialEq + Copy + Send + Sync + 'static> StateClock<K> {
+    /// Seconds spent in `key`, counting this frame's `dt`.
+    fn tick(&mut self, key: K, dt: f32) -> f32 {
+        if self.key == Some(key) {
+            self.since += dt;
+        } else {
+            self.key = Some(key);
+            self.since = 0.0;
+        }
+        self.since
+    }
+}
+
+/// The `index`th chevron along the stalker's routes, pointing the way it'd go.
+#[derive(Component)]
+struct MarkChevron {
+    index: usize,
+    color: Color,
+}
 
 /// One of a chevron's two strokes.
 #[derive(Component)]
 struct MarkStroke;
 
-/// The reticle on the stalker's `n`th mark, numbered in the order it'll strike.
+/// The `index`th reticle, on a pirate a route passes through; `label` is where
+/// it falls in each such route, `first` the earliest.
 #[derive(Component)]
-struct MarkReticle(usize);
+struct MarkReticle {
+    index: usize,
+    first: usize,
+    color: Color,
+    label: String,
+}
 
 /// A reticle's ring, a child so it can spin and throb under its number.
 #[derive(Component)]
 struct MarkRing;
+
+/// A reticle's number.
+#[derive(Component)]
+struct MarkNumber;
+
+/// Draws a stalker's rampage lane, from wall to wall; laid along it, so its
+/// children sit in lane space.
+#[derive(Component)]
+struct LaneLook(Entity);
+
+/// The wide danger strip down a lane, or one of its two edges (`-1` or `1`).
+#[derive(Component, Clone, Copy, PartialEq)]
+enum LanePart {
+    Strip,
+    Edge(f32),
+}
+
+/// One of the big chevrons racing down a lane the way the stalker will charge.
+#[derive(Component)]
+struct LaneArrow(usize);
+
+/// One of a lane chevron's two strokes.
+#[derive(Component)]
+struct LaneStroke;
+
+/// Draws a brute's `BruteLook`: the disc its slam will land on, and a sigil
+/// at each spot a guard it's calling will appear. Its children sit in world space.
+#[derive(Component)]
+struct BruteMarks(Entity);
+
+/// The faint disc the slam reaches, the brighter one filling it as the fists
+/// rise, or the dashed ring round its edge.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum SlamPart {
+    Base,
+    Fill,
+    Edge,
+}
+
+/// The `0`th, `1`st... summoning sigil, on the matching `BruteLook::summons` spot.
+#[derive(Component)]
+struct Sigil(usize);
+
+/// A sigil's outer ring, the smaller ring turning the other way inside it, or
+/// the glow at its heart.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum SigilPart {
+    Ring,
+    Inner,
+    Core,
+}
 
 /// A fading copy of the stalker left behind as it lunges.
 #[derive(Component)]
@@ -217,16 +348,22 @@ fn seethe(tint: Srgba, t: f32) -> Srgba {
 /// Asleep, a guardian sits dim and breathes slowly; enraged, it seethes red;
 /// either flashes red when hit, like any guard. Awake, the keeper hovers. The
 /// stalker prowls, crouches trembling and blinking as it winds up, stretches
-/// as it lunges and slumps, dull, when spent.
+/// as it lunges and slumps, dull, when spent. Before a rampage it rears up
+/// tall, shaking and flashing; rampaging it stretches along its lane as it
+/// dashes and squashes, coiled and blinking, braced against each wall. The
+/// brute stomps heavily; raising its fists it stretches up tall, trembling and
+/// flashing; after a slam it slumps, squashed and dull; roaring it swells and
+/// shakes, glowing amber.
+#[allow(clippy::type_complexity)]
 fn draw_keeper(
     time: Res<Time>,
-    keepers: Query<(&Keeper, &Health, Option<&StalkerLook>, &Transform), Without<KeeperSprite>>,
+    keepers: Query<(&Keeper, &Health, Option<&StalkerLook>, Option<&BruteLook>, &Transform), Without<KeeperSprite>>,
     mut sprites: Query<(&ChildOf, &mut Sprite, &mut Transform), With<KeeperSprite>>,
 ) {
     let t = time.elapsed_secs();
     let blink = (t * 30.0).sin() > 0.0;
     for (parent, mut sprite, mut transform) in &mut sprites {
-        let Ok((keeper, health, look, body)) = keepers.get(parent.parent()) else { continue };
+        let Ok((keeper, health, look, brute, body)) = keepers.get(parent.parent()) else { continue };
         let tint = Srgba::from(tier_tint(keeper.tier));
         // Squashing keeps its feet where they were.
         let squash = |scale: Vec2| Vec2::new(0.0, BODY_HALF * (scale.y - 1.0));
@@ -244,7 +381,7 @@ fn draw_keeper(
                 }
                 StalkerState::Lunge { hit } => {
                     // Stretched along the way it's going.
-                    let next = look.marks.get(hit as usize).copied().unwrap_or(body.translation.truncate());
+                    let next = look.routes.first().and_then(|route| route.get(hit as usize)).copied().unwrap_or(body.translation.truncate());
                     let dir = (next - body.translation.truncate()).normalize_or_zero().abs();
                     let scale = Vec2::ONE + 0.3 * dir - 0.12 * dir.yx();
                     let color = if keeper.enraged { seethe(tint, t) } else { tint.mix(&Srgba::WHITE, 0.3) };
@@ -254,11 +391,74 @@ fn draw_keeper(
                     let scale = Vec2::new(1.04, 0.92 + 0.02 * (t * 2.0).sin());
                     (times(tint, Srgba::from(RECOVER_COLOR)), squash(scale), scale)
                 }
+                StalkerState::Rear => {
+                    let scale = Vec2::new(0.86, 1.22);
+                    let tremble = 1.2 * Vec2::new((t * 61.0).sin(), (t * 47.0).cos() * 0.5);
+                    let color = if blink {
+                        Srgba::from(MARK_COLOR)
+                    } else if keeper.enraged {
+                        seethe(tint, t)
+                    } else {
+                        tint.mix(&Srgba::WHITE, 0.5)
+                    };
+                    (color, squash(scale) + tremble, scale)
+                }
+                StalkerState::Rampage { moving, .. } => {
+                    let dir = look.lane.map_or(Vec2::X, |[from, to]| (to - from).normalize_or_zero()).abs();
+                    if moving {
+                        // Stretched along its lane, hurtling.
+                        let scale = Vec2::ONE + 0.38 * dir - 0.15 * dir.yx();
+                        let color = if keeper.enraged { seethe(tint, t) } else { tint.mix(&Srgba::from(MARK_COLOR), 0.35) };
+                        (color, Vec2::ZERO, scale)
+                    } else {
+                        // Squashed against the wall, coiled for the next dash.
+                        let scale = Vec2::ONE - 0.2 * dir + 0.14 * dir.yx();
+                        let tremble = 0.6 * Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
+                        let color = if blink { Srgba::from(MARK_COLOR) } else { tint };
+                        (color, squash(scale) + tremble, scale)
+                    }
+                }
                 StalkerState::Prowl => {
                     // A heavy, swaying gait.
                     let step = Vec2::new(0.0, (t * 4.5).sin().abs());
                     let color = if keeper.enraged { seethe(tint, t) } else { tint };
                     (color, step, Vec2::ONE)
+                }
+            }
+        } else if let Some(brute) = brute {
+            match brute.state {
+                BruteState::Plod => {
+                    // Heavy stomps: up off each foot, squashing as it lands.
+                    let lift = (t * 3.5).sin().abs();
+                    let scale = Vec2::new(1.0 + 0.05 * (1.0 - lift), 1.0 - 0.05 * (1.0 - lift));
+                    let sway = Vec2::new(0.6 * (t * 3.5).cos(), 2.0 * lift);
+                    let color = if keeper.enraged { seethe(tint, t) } else { tint };
+                    (color, squash(scale) + sway, scale)
+                }
+                BruteState::WindUp => {
+                    // Fists raised over its head, straining.
+                    let scale = Vec2::new(0.9, 1.18);
+                    let tremble = Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
+                    let color = if blink {
+                        Srgba::from(MARK_COLOR)
+                    } else if keeper.enraged {
+                        seethe(tint, t)
+                    } else {
+                        tint.mix(&Srgba::WHITE, 0.4)
+                    };
+                    (color, squash(scale) + tremble, scale)
+                }
+                BruteState::Recover => {
+                    let scale = Vec2::new(1.14, 0.84 + 0.02 * (t * 2.0).sin());
+                    (times(tint, Srgba::from(RECOVER_COLOR)), squash(scale), scale)
+                }
+                BruteState::Summon => {
+                    // Roaring: chest swelling, shaking with it.
+                    let swell = 1.1 + 0.04 * (t * 18.0).sin();
+                    let scale = Vec2::new(swell, swell);
+                    let shake = 1.2 * Vec2::new((t * 53.0).sin(), (t * 41.0).cos() * 0.5);
+                    let heat = 0.45 + 0.25 * (t * 12.0).sin();
+                    (tint.mix(&Srgba::from(SUMMON_COLOR), heat), squash(scale) + shake, scale)
                 }
             }
         } else if keeper.enraged {
@@ -419,31 +619,38 @@ fn draw_beams(
 
 fn dress_marks(add: On<Add, StalkerLook>, mut commands: Commands, assets: Res<AssetServer>) {
     commands
-        .spawn((Level, MarksLook(add.entity), Transform::from_xyz(0.0, 0.0, 13.0), Visibility::Hidden))
+        .spawn((Level, MarksLook(add.entity), StateClock::<StalkerState>::default(), Transform::from_xyz(0.0, 0.0, 13.0), Visibility::Hidden))
         .with_children(|parent| {
             for i in 0..CHEVRONS {
-                parent.spawn((MarkChevron(i), Transform::default(), Visibility::Hidden)).with_children(|chevron| {
-                    // Two short strokes meeting in a point: ">".
-                    for side in [-1.0f32, 1.0] {
-                        chevron.spawn((
-                            MarkStroke,
-                            Sprite::from_color(MARK_COLOR, Vec2::new(4.0, 1.0)),
-                            Transform::from_xyz(-1.4, side * 1.4, 0.0)
-                                .with_rotation(Quat::from_rotation_z(-side * std::f32::consts::FRAC_PI_4)),
-                        ));
-                    }
-                });
+                parent.spawn((MarkChevron { index: i, color: MARK_COLOR }, Transform::default(), Visibility::Hidden)).with_children(
+                    |chevron| {
+                        // Two short strokes meeting in a point: ">".
+                        for side in [-1.0f32, 1.0] {
+                            chevron.spawn((
+                                MarkStroke,
+                                Sprite::from_color(MARK_COLOR, Vec2::new(4.0, 1.0)),
+                                Transform::from_xyz(-1.4, side * 1.4, 0.0)
+                                    .with_rotation(Quat::from_rotation_z(-side * std::f32::consts::FRAC_PI_4)),
+                            ));
+                        }
+                    },
+                );
             }
-            for n in 0..3 {
+            for n in 0..RETICLES {
                 parent
-                    .spawn((MarkReticle(n), Transform::from_xyz(0.0, 0.0, 0.5), Visibility::Hidden))
+                    .spawn((
+                        MarkReticle { index: n, first: 0, color: MARK_COLOR, label: String::new() },
+                        Transform::from_xyz(0.0, 0.0, 0.5),
+                        Visibility::Hidden,
+                    ))
                     .with_children(|reticle| {
                         reticle.spawn((
                             MarkRing,
                             Sprite { image: assets.load("sprites/ui/crosshair.png"), color: MARK_COLOR, ..default() },
                         ));
                         reticle.spawn((
-                            Text2d::new(format!("{}", n + 1)),
+                            MarkNumber,
+                            Text2d::new(""),
                             TextFont::from_font_size(6.0 * PIXEL_SCALE),
                             TextColor(MARK_COLOR),
                             Transform::from_xyz(0.0, 10.0, 0.1).with_scale(Vec3::splat(1.0 / PIXEL_SCALE)),
@@ -453,94 +660,414 @@ fn dress_marks(add: On<Add, StalkerLook>, mut commands: Commands, assets: Res<As
         });
 }
 
-/// While the stalker winds up and lunges, lays a trail of marching chevrons
-/// from it through each pirate it marked, in order, and a throbbing numbered
-/// reticle on each mark it has yet to reach.
+/// A point some route turns at (or ends on), and its number, if it has one.
+struct PlannedMark {
+    at: Vec2,
+    label: String,
+    first: usize,
+    color: Color,
+}
+
+/// Where a stalker's chevrons and reticles go this frame.
+#[derive(Default)]
+struct MarksPlan {
+    spots: Vec<(Vec2, Vec2, Color)>,
+    marks: Vec<PlannedMark>,
+}
+
+/// Lays out the chevrons along every route the stalker shows, from `from`,
+/// and a reticle on each point still ahead of it. Winding up, the candidate
+/// routes all look alike, dim and flickering out of step, quickening and
+/// brightening as the wind-up runs out, their reticles small and unnumbered;
+/// lunging, the one it took flashes white the moment it goes, then blinks as
+/// before with its points numbered in the order it'll reach them.
+fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, t: f32) -> MarksPlan {
+    let mut plan = MarksPlan::default();
+    let choosing = stalker.state == StalkerState::WindUp;
+    let reached = match stalker.state {
+        StalkerState::Lunge { hit } => hit as usize,
+        _ => 0,
+    };
+    let heat = (since / WIND_UP_LOOK).clamp(0.0, 1.0);
+    for (r, route) in stalker.routes.iter().enumerate() {
+        let color: Color = if choosing {
+            let flicker = 0.5 + 0.5 * (t * (8.0 + 22.0 * heat) + r as f32 * 2.1).sin();
+            MARK_COLOR.with_alpha((0.2 + 0.55 * heat) * (0.55 + 0.45 * flicker))
+        } else {
+            let flash = (1.0 - since / CHOSEN_FLASH).max(0.0);
+            let blink = 0.55 + 0.45 * (t * 14.0).sin();
+            Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, flash).with_alpha(blink.max(flash)).into()
+        };
+        // Walk the route from the body, chevrons marching along it.
+        let points: Vec<Vec2> = std::iter::once(from).chain(route.iter().skip(reached).copied()).collect();
+        let mut along = (t * 24.0) % CHEVRON_GAP;
+        for leg in points.windows(2) {
+            let length = leg[0].distance(leg[1]);
+            let dir = (leg[1] - leg[0]) / length.max(0.01);
+            while along < length {
+                plan.spots.push((leg[0] + dir * along, dir, color));
+                along += CHEVRON_GAP;
+            }
+            along -= length;
+        }
+        // Routes through the same point share its reticle.
+        for (n, &mark) in route.iter().enumerate().skip(reached) {
+            if !plan.marks.iter().any(|m| m.at.distance(mark) < 2.0) {
+                let label = if choosing { String::new() } else { (n + 1).to_string() };
+                plan.marks.push(PlannedMark { at: mark, label, first: n, color });
+            }
+        }
+    }
+    plan
+}
+
+/// While the stalker winds up, lays a trail of marching chevrons along every
+/// route it might lunge, and a small throbbing reticle where each turns, none
+/// favoured, so nobody knows which it'll take. Once it lunges, only the route
+/// it took is left, its points numbered in the order it'll reach them.
 #[allow(clippy::type_complexity)]
 fn draw_marks(
     mut commands: Commands,
     time: Res<Time>,
     seen: Res<BossSeen>,
     stalkers: Query<(&StalkerLook, &Health, &Transform), (With<Keeper>, Without<MarksLook>)>,
-    mut looks: Query<(Entity, &MarksLook, &mut Visibility), (Without<MarkChevron>, Without<MarkReticle>)>,
-    mut chevrons: Query<(&ChildOf, &MarkChevron, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkReticle>, Without<MarkRing>)>,
-    mut reticles: Query<(&ChildOf, &MarkReticle, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkChevron>, Without<MarkRing>)>,
+    mut looks: Query<(Entity, &MarksLook, &mut StateClock<StalkerState>, &mut Visibility), (Without<MarkChevron>, Without<MarkReticle>)>,
+    mut chevrons: Query<(&ChildOf, &mut MarkChevron, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkReticle>, Without<MarkRing>)>,
+    mut reticles: Query<(&ChildOf, &mut MarkReticle, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkChevron>, Without<MarkRing>)>,
     mut rings: Query<(&ChildOf, &mut Transform, &mut Sprite), (With<MarkRing>, Without<Keeper>)>,
-    mut strokes: Query<&mut Sprite, (With<MarkStroke>, Without<MarkRing>)>,
+    mut numbers: Query<(&ChildOf, &mut Text2d, &mut TextColor), With<MarkNumber>>,
+    mut strokes: Query<(&ChildOf, &mut Sprite), (With<MarkStroke>, Without<MarkRing>)>,
 ) {
     let t = time.elapsed_secs();
-    let blink = 0.55 + 0.45 * (t * 14.0).sin();
-
-    for (entity, look, mut visibility) in &mut looks {
-        let Ok((stalker, health, _)) = stalkers.get(look.0) else {
+    let mut plans = Vec::new();
+    for (entity, look, mut clock, mut visibility) in &mut looks {
+        let Ok((stalker, health, body)) = stalkers.get(look.0) else {
             commands.entity(entity).despawn();
             continue;
         };
-        let marking = matches!(stalker.state, StalkerState::WindUp | StalkerState::Lunge { .. });
-        let shown = seen.0 && marking && !health.is_dead() && !stalker.marks.is_empty();
-        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
-    }
-
-    // Which marks are still ahead of it, and the path through them.
-    let path = |look: &MarksLook| {
-        let (stalker, _, body) = stalkers.get(look.0).ok()?;
-        let reached = match stalker.state {
-            StalkerState::Lunge { hit } => hit as usize,
-            _ => 0,
+        // Each hit of a lunge is still the same lunge.
+        let key = match stalker.state {
+            StalkerState::Lunge { .. } => StalkerState::Lunge { hit: 0 },
+            state => state,
         };
-        let from = body.translation.truncate();
-        Some((reached, std::iter::once(from).chain(stalker.marks.iter().skip(reached).copied()).collect::<Vec<_>>()))
-    };
-
-    for (parent, chevron, mut transform, mut visibility) in &mut chevrons {
-        let Ok((_, look, _)) = looks.get(parent.parent()) else { continue };
-        let Some((_, points)) = path(look) else { continue };
-        // Walk the path from the body, chevrons marching along it.
-        let mut along = (t * 24.0) % CHEVRON_GAP + chevron.0 as f32 * CHEVRON_GAP;
-        let mut spot = None;
-        for leg in points.windows(2) {
-            let length = leg[0].distance(leg[1]);
-            if along < length {
-                let dir = (leg[1] - leg[0]) / length.max(0.01);
-                spot = Some((leg[0] + dir * along, dir));
-                break;
-            }
-            along -= length;
+        let since = clock.tick(key, time.delta_secs());
+        let marking = matches!(stalker.state, StalkerState::WindUp | StalkerState::Lunge { .. });
+        let shown = seen.0 && marking && !health.is_dead() && stalker.routes.iter().any(|route| !route.is_empty());
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        if shown {
+            plans.push((entity, plan_marks(stalker, body.translation.truncate(), since, t)));
         }
-        let Some((at, dir)) = spot else {
+    }
+    let plan = |look: Entity| plans.iter().find(|(entity, _)| *entity == look).map(|(_, plan)| plan);
+
+    for (parent, mut chevron, mut transform, mut visibility) in &mut chevrons {
+        let spot = plan(parent.parent()).and_then(|plan| plan.spots.get(chevron.index));
+        let Some(&(at, dir, color)) = spot else {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
         visibility.set_if_neq(Visibility::Inherited);
         transform.translation = at.extend(0.0);
         transform.rotation = Quat::from_rotation_z(dir.to_angle());
+        chevron.color = color;
+    }
+    for (parent, mut sprite) in &mut strokes {
+        let Ok((_, chevron, ..)) = chevrons.get(parent.parent()) else { continue };
+        sprite.color = chevron.color;
     }
 
-    for (parent, reticle, mut transform, mut visibility) in &mut reticles {
-        let Ok((_, look, _)) = looks.get(parent.parent()) else { continue };
-        let Some((reached, _)) = path(look) else { continue };
-        let Ok((stalker, ..)) = stalkers.get(look.0) else { continue };
-        let mark = stalker.marks.get(reticle.0).filter(|_| reticle.0 >= reached);
-        visibility.set_if_neq(if mark.is_some() { Visibility::Inherited } else { Visibility::Hidden });
-        if let Some(mark) = mark {
-            transform.translation = mark.extend(0.5);
+    for (parent, mut reticle, mut transform, mut visibility) in &mut reticles {
+        let mark = plan(parent.parent()).and_then(|plan| plan.marks.get(reticle.index));
+        let Some(mark) = mark else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        transform.translation = mark.at.extend(0.5);
+        if reticle.label != mark.label {
+            reticle.label.clone_from(&mark.label);
         }
+        reticle.first = mark.first;
+        reticle.color = mark.color;
     }
-
-    // The chevrons and the rings blink together.
-    let color = MARK_COLOR.with_alpha(blink);
     for (parent, mut transform, mut sprite) in &mut rings {
         let Ok((_, reticle, ..)) = reticles.get(parent.parent()) else { continue };
-        let beat = (t * 10.0 - reticle.0 as f32 * 1.2).sin();
+        let beat = (t * 10.0 - reticle.first as f32 * 1.2).sin();
         transform.rotation = Quat::from_rotation_z(t * 2.5);
-        transform.scale = Vec3::splat(1.4 + 0.25 * beat);
-        sprite.color = color;
+        // Candidates' reticles (unnumbered) sit smaller than the chosen route's.
+        let size = if reticle.label.is_empty() { 1.0 } else { 1.4 };
+        transform.scale = Vec3::splat(size + 0.25 * beat);
+        sprite.color = reticle.color;
     }
-    for mut sprite in &mut strokes {
-        sprite.color = color;
+    for (parent, mut text, mut color) in &mut numbers {
+        let Ok((_, reticle, ..)) = reticles.get(parent.parent()) else { continue };
+        if text.0 != reticle.label {
+            text.0.clone_from(&reticle.label);
+        }
+        color.set_if_neq(TextColor(reticle.color));
     }
 }
-/// Leaves fading copies of the stalker behind it as it lunges.
+
+fn dress_lane(add: On<Add, StalkerLook>, mut commands: Commands) {
+    commands
+        .spawn((Level, LaneLook(add.entity), StateClock::<StalkerState>::default(), Transform::from_xyz(0.0, 0.0, 12.5), Visibility::Hidden))
+        .with_children(|parent| {
+            for (part, z) in [(LanePart::Strip, 0.0), (LanePart::Edge(-1.0), 0.1), (LanePart::Edge(1.0), 0.1)] {
+                parent.spawn((part, Sprite::from_color(MARK_COLOR, Vec2::ONE), Transform::from_xyz(0.0, 0.0, z)));
+            }
+            for i in 0..LANE_ARROWS {
+                parent
+                    .spawn((LaneArrow(i), Transform::from_xyz(0.0, 0.0, 0.2).with_scale(Vec3::splat(2.0)), Visibility::Hidden))
+                    .with_children(|arrow| {
+                        for side in [-1.0f32, 1.0] {
+                            arrow.spawn((
+                                LaneStroke,
+                                Sprite::from_color(MARK_COLOR, Vec2::new(4.0, 1.0)),
+                                Transform::from_xyz(-1.4, side * 1.4, 0.0)
+                                    .with_rotation(Quat::from_rotation_z(-side * std::f32::consts::FRAC_PI_4)),
+                            ));
+                        }
+                    });
+            }
+        });
+}
+
+/// How a rampage lane looks this frame: how long it is, whether it's a
+/// warning (the stalker rearing or braced to go) and how hot it burns.
+struct LanePlan {
+    length: f32,
+    warning: bool,
+    pulse: f32,
+    color: Color,
+}
+
+/// While the stalker rears up or rampages, lays its lane wall to wall as a
+/// wide danger strip. Before a dash it throbs, quicker and whiter the longer
+/// it's held, with big chevrons racing the way it'll charge; while it dashes
+/// the strip just smoulders.
+#[allow(clippy::type_complexity)]
+fn draw_lane(
+    mut commands: Commands,
+    time: Res<Time>,
+    seen: Res<BossSeen>,
+    stalkers: Query<(&StalkerLook, &Health), With<Keeper>>,
+    mut looks: Query<(Entity, &LaneLook, &mut StateClock<StalkerState>, &mut Transform, &mut Visibility), (Without<LanePart>, Without<LaneArrow>)>,
+    mut parts: Query<(&ChildOf, &LanePart, &mut Sprite, &mut Transform), (Without<LaneLook>, Without<LaneArrow>, Without<LaneStroke>)>,
+    mut arrows: Query<(&ChildOf, &LaneArrow, &mut Transform, &mut Visibility), (Without<LaneLook>, Without<LanePart>)>,
+    mut strokes: Query<(&ChildOf, &mut Sprite), (With<LaneStroke>, Without<LanePart>)>,
+) {
+    let t = time.elapsed_secs();
+    let mut plans = Vec::new();
+    for (entity, look, mut clock, mut transform, mut visibility) in &mut looks {
+        let Ok((stalker, health)) = stalkers.get(look.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let since = clock.tick(stalker.state, time.delta_secs());
+        let warning = match stalker.state {
+            StalkerState::Rear | StalkerState::Rampage { moving: false, .. } => true,
+            StalkerState::Rampage { moving: true, .. } => false,
+            _ => {
+                visibility.set_if_neq(Visibility::Hidden);
+                continue;
+            }
+        };
+        let Some([from, to]) = stalker.lane.filter(|_| seen.0 && !health.is_dead()) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let length = from.distance(to);
+        let dir = (to - from) / length.max(0.01);
+        transform.translation = ((from + to) / 2.0).extend(12.5);
+        transform.rotation = Quat::from_rotation_z(dir.to_angle());
+        let heat = (since / LANE_HEAT).clamp(0.0, 1.0);
+        let pulse = if warning { 0.5 + 0.5 * (t * (10.0 + 20.0 * heat)).sin() } else { 0.0 };
+        let color = Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, 0.45 * heat * pulse).into();
+        plans.push((entity, LanePlan { length, warning, pulse: pulse * (0.5 + 0.5 * heat), color }));
+    }
+    let plan = |look: Entity| plans.iter().find(|(entity, _)| *entity == look).map(|(_, plan)| plan);
+
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Some(lane) = plan(parent.parent()) else { continue };
+        let (width, y, alpha) = match (*part, lane.warning) {
+            (LanePart::Strip, true) => (LANE_WIDTH, 0.0, 0.12 + 0.2 * lane.pulse),
+            (LanePart::Strip, false) => (LANE_WIDTH, 0.0, 0.07),
+            (LanePart::Edge(side), true) => (1.0, side * LANE_WIDTH / 2.0, 0.4 + 0.6 * lane.pulse),
+            (LanePart::Edge(side), false) => (1.0, side * LANE_WIDTH / 2.0, 0.15),
+        };
+        sprite.custom_size = Some(Vec2::new(lane.length, width));
+        sprite.color = lane.color.with_alpha(alpha);
+        transform.translation.y = y;
+    }
+
+    for (parent, arrow, mut transform, mut visibility) in &mut arrows {
+        let along = (t * 90.0) % LANE_ARROW_GAP + arrow.0 as f32 * LANE_ARROW_GAP;
+        // Only while it's about to go, and clear of the wall at the far end.
+        let lane = plan(parent.parent()).filter(|lane| lane.warning && along < lane.length - LANE_ARROW_GAP / 2.0);
+        let Some(lane) = lane else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        transform.translation.x = along - lane.length / 2.0;
+    }
+    for (parent, mut sprite) in &mut strokes {
+        let Ok((arrow, ..)) = arrows.get(parent.parent()) else { continue };
+        let Some(lane) = plan(arrow.parent()) else { continue };
+        sprite.color = lane.color.with_alpha(0.4 + 0.6 * lane.pulse);
+    }
+}
+
+fn dress_brute(add: On<Add, BruteLook>, mut commands: Commands, assets: Res<AssetServer>) {
+    let disc = assets.load("sprites/fx/explosion.png");
+    let ring = assets.load("sprites/fx/shock_ring.png");
+    commands
+        .spawn((
+            Level,
+            BruteMarks(add.entity),
+            StateClock::<BruteState>::default(),
+            Transform::from_xyz(0.0, 0.0, 12.5),
+            Visibility::Hidden,
+        ))
+        .with_children(|parent| {
+            for (part, image) in [(SlamPart::Base, &disc), (SlamPart::Fill, &disc), (SlamPart::Edge, &ring)] {
+                parent.spawn((part, Sprite::from_image(image.clone()), Transform::default(), Visibility::Hidden));
+            }
+            for i in 0..SIGILS {
+                parent.spawn((Sigil(i), Transform::default(), Visibility::Hidden)).with_children(|sigil| {
+                    for (part, image, z) in [(SigilPart::Core, &disc, 0.0), (SigilPart::Ring, &ring, 0.1), (SigilPart::Inner, &ring, 0.2)] {
+                        sigil.spawn((part, Sprite::from_image(image.clone()), Transform::from_xyz(0.0, 0.0, z)));
+                    }
+                });
+            }
+        });
+}
+
+/// How a brute's marks look this frame.
+struct BrutePlan {
+    state: BruteState,
+    at: Vec2,
+    summons: Vec<Vec2>,
+    /// How far through its wind-up or roar it is, `0..=1`.
+    progress: f32,
+    since: f32,
+}
+
+/// While the brute raises its fists, lays the disc its slam will land on: a
+/// faint disc under a dashed edge, throbbing quicker, with a brighter disc
+/// filling it from the middle as the fists rise, near white just before they
+/// fall. When they land it flashes and fades. While it roars, a sigil opens on
+/// each spot a guard will appear, spinning and growing until they step out.
+#[allow(clippy::type_complexity)]
+fn draw_brute(
+    mut commands: Commands,
+    time: Res<Time>,
+    seen: Res<BossSeen>,
+    brutes: Query<(&Keeper, &BruteLook, &Health)>,
+    mut looks: Query<(Entity, &BruteMarks, &mut StateClock<BruteState>, &mut Visibility), (Without<SlamPart>, Without<Sigil>)>,
+    mut slams: Query<
+        (&ChildOf, &SlamPart, &mut Sprite, &mut Transform, &mut Visibility),
+        (Without<BruteMarks>, Without<Sigil>, Without<SigilPart>),
+    >,
+    mut sigils: Query<(&ChildOf, &Sigil, &mut Transform, &mut Visibility), (Without<BruteMarks>, Without<SlamPart>, Without<SigilPart>)>,
+    mut parts: Query<(&ChildOf, &SigilPart, &mut Sprite, &mut Transform), (Without<BruteMarks>, Without<SlamPart>, Without<Sigil>)>,
+) {
+    let t = time.elapsed_secs();
+    let mut plans = Vec::new();
+    for (entity, look, mut clock, mut visibility) in &mut looks {
+        let Ok((keeper, brute, health)) = brutes.get(look.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let since = clock.tick(brute.state, time.delta_secs());
+        let shown = seen.0 && keeper.awake && !health.is_dead();
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        if !shown {
+            continue;
+        }
+        let length = match brute.state {
+            BruteState::WindUp if keeper.enraged => ENRAGED_SLAM_LOOK,
+            BruteState::WindUp => SLAM_LOOK,
+            BruteState::Summon => ROAR_LOOK,
+            _ => 1.0,
+        };
+        let progress = (since / length).clamp(0.0, 1.0);
+        plans.push((entity, BrutePlan { state: brute.state, at: brute.at, summons: brute.summons.clone(), progress, since }));
+    }
+    let plan = |look: Entity| plans.iter().find(|(entity, _)| *entity == look).map(|(_, plan)| plan);
+
+    for (parent, part, mut sprite, mut transform, mut visibility) in &mut slams {
+        let Some(plan) = plan(parent.parent()) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        let full = BRUTE_SLAM_RADIUS;
+        let look = match (plan.state, *part) {
+            (BruteState::WindUp, _) => {
+                let p = plan.progress;
+                let pulse = 0.5 + 0.5 * (t * (10.0 + 22.0 * p)).sin();
+                let hot = Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, 0.6 * p * p);
+                match part {
+                    SlamPart::Base => Some((full, hot.with_alpha(0.1 + 0.06 * pulse))),
+                    SlamPart::Fill => Some((full * p, hot.with_alpha(0.18 + 0.3 * p))),
+                    SlamPart::Edge => Some((full, hot.mix(&Srgba::WHITE, 0.3).with_alpha(0.45 + 0.55 * pulse))),
+                }
+            }
+            // The flash where it landed, fading.
+            (BruteState::Recover, SlamPart::Fill | SlamPart::Edge) if plan.since < SLAM_FLASH => {
+                let fade = 1.0 - plan.since / SLAM_FLASH;
+                let color = Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, fade);
+                let radius = if *part == SlamPart::Edge { full * (1.0 + 0.25 * (1.0 - fade)) } else { full };
+                Some((radius, color.with_alpha(0.7 * fade)))
+            }
+            _ => None,
+        };
+        let Some((radius, color)) = look else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let (size, z) = match part {
+            SlamPart::Base => (DISC_SIZE, 0.0),
+            SlamPart::Fill => (DISC_SIZE, 0.1),
+            SlamPart::Edge => (RING_SIZE, 0.2),
+        };
+        transform.translation = plan.at.extend(z);
+        transform.rotation = Quat::from_rotation_z(if *part == SlamPart::Edge { t * 1.5 } else { 0.0 });
+        transform.scale = Vec3::splat(2.0 * radius / size);
+        sprite.color = color.into();
+    }
+
+    for (parent, sigil, mut transform, mut visibility) in &mut sigils {
+        let spot = plan(parent.parent()).filter(|plan| plan.state == BruteState::Summon).and_then(|plan| plan.summons.get(sigil.0));
+        let Some(&at) = spot else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        transform.translation = at.extend(0.3 + 0.01 * sigil.0 as f32);
+    }
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Ok((sigil_parent, sigil, ..)) = sigils.get(parent.parent()) else { continue };
+        let Some(plan) = plan(sigil_parent.parent()) else { continue };
+        let p = plan.progress;
+        // Opens fast, then keeps swelling; each a little out of step.
+        let phase = sigil.0 as f32 * 1.7;
+        let radius = SIGIL_RADIUS * (0.25 + 0.75 * (1.0 - (1.0 - p).powi(2))) * (1.0 + 0.08 * (t * (8.0 + 16.0 * p) + phase).sin());
+        let glow = Srgba::from(SUMMON_COLOR).mix(&Srgba::WHITE, 0.5 * p * p);
+        let (scale, spin, color) = match part {
+            SigilPart::Ring => (2.0 * radius / RING_SIZE, t * 3.0 + phase, glow.mix(&Srgba::WHITE, 0.3).with_alpha(0.5 + 0.5 * p)),
+            SigilPart::Inner => (1.2 * radius / RING_SIZE, -t * 5.0 - phase, glow.mix(&Srgba::WHITE, 0.3).with_alpha(0.35 + 0.5 * p)),
+            SigilPart::Core => (1.6 * radius / DISC_SIZE, 0.0, glow.with_alpha(0.12 + 0.4 * p)),
+        };
+        transform.scale = Vec3::splat(scale);
+        transform.rotation = Quat::from_rotation_z(spin);
+        sprite.color = color.into();
+    }
+}
+
+/// Leaves fading copies of the stalker behind it as it lunges or rampages.
 fn lunge_ghosts(
     mut commands: Commands,
     time: Res<Time>,
@@ -554,7 +1081,7 @@ fn lunge_ghosts(
         return;
     }
     for (keeper, look, transform) in &stalkers {
-        if !matches!(look.state, StalkerState::Lunge { .. }) {
+        if !matches!(look.state, StalkerState::Lunge { .. } | StalkerState::Rampage { moving: true, .. }) {
             continue;
         }
         *wait = GHOST_GAP;

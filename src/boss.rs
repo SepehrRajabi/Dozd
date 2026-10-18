@@ -1,9 +1,13 @@
 //! The vault's guardians: a hulking boss waiting in every sealed vault room
-//! (see `breach.rs`), one of two kinds taking turns down the decks. The vault
+//! (see `breach.rs`), one of three kinds taking turns down the decks. The vault
 //! keeper fights with two floating hands, each sweeping lasers and hurling
 //! nova orbs; badly hurt, it enrages and both hands attack together. The
-//! vault stalker marks up to three pirates, then lunges through them one after
-//! another. Each one further down is tougher and hits harder (see `might`).
+//! vault stalker crouches showing several routes it might lunge along (one
+//! through up to three pirates in a row), then takes one at random; now and
+//! then it rampages instead, dashing wall to wall across the room again and
+//! again. The vault brute plods after the crew and slams whoever it reaches,
+//! and keeps roaring for guards to do its fighting for it. Each one further
+//! down is tougher and hits harder (see `might`).
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::class::RiotShield;
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_outlines};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
+use crate::enemies::{EnemyKind, Summoned, spawn_enemy};
 use crate::guns::Arsenal;
 use crate::mission::Banner;
 use crate::net::authority;
@@ -100,29 +105,110 @@ const PROWL_SPEED: f32 = 48.0;
 const PROWL_NEAR: f32 = 40.0;
 const PROWL_FAR: f32 = 80.0;
 /// Seconds it prowls between lunges, plus up to `PROWL_JITTER` more.
-const PROWL_TIME: f32 = 3.4;
-const ENRAGED_PROWL_TIME: f32 = 2.3;
+const PROWL_TIME: f32 = 2.6;
+const ENRAGED_PROWL_TIME: f32 = 1.8;
 const PROWL_JITTER: f32 = 0.6;
-/// Seconds crouched with its marks showing before it goes.
+/// Seconds crouched with its routes showing before it goes.
 const WIND_UP: f32 = 0.95;
 const ENRAGED_WIND_UP: f32 = 0.75;
-/// The most pirates one lunge goes through.
+/// How many routes it threatens while winding up; it takes one at random.
+const ROUTES: usize = 3;
+const ENRAGED_ROUTES: usize = 4;
+/// Every route's first leg heads at least this far from every other's, so
+/// each reads as its own direction.
+const ROUTE_SPLIT: f32 = 30.0 * std::f32::consts::PI / 180.0;
+/// The most pirates the through-the-crew route goes through, and the most legs any route has.
 const MAX_MARKS: usize = 3;
+const MAX_LEGS: usize = 3;
+/// A swerving leg is aimed this far off a pirate, and runs `OVERSHOOT` past them.
+const SWERVE_MIN: f32 = 25.0 * std::f32::consts::PI / 180.0;
+const SWERVE_MAX: f32 = 50.0 * std::f32::consts::PI / 180.0;
+const OVERSHOOT: f32 = 28.0;
+/// How far a feint into open floor runs before it turns on someone.
+const FEINT_MIN: f32 = 48.0;
+const FEINT_MAX: f32 = 100.0;
+/// A first leg shorter than this doesn't read as a direction.
+const MIN_LEG: f32 = 20.0;
 /// How fast it lunges, the longest it spends on any one leg, and the steps it
 /// takes so it can't skip past a pirate or a shield.
 const LUNGE_SPEED: f32 = 420.0;
 const LEG_TIME: f32 = 0.6;
 const LUNGE_STEP: f32 = 3.0;
-/// Pirates this close to its body's edge as it lunges by are hit.
+/// Pirates this close to its body's edge as it lunges or dashes by are hit.
 const LUNGE_REACH: f32 = 4.0;
 /// A lunge's damage to each pirate it goes through (once each), and how hard it throws them.
-const LUNGE_HIT: f32 = 34.0;
+const LUNGE_HIT: f32 = 48.0;
 const LUNGE_KNOCKBACK: f32 = 200.0;
-/// Seconds spent after a lunge, open to punishment; longer if a riot shield
-/// stopped it, throwing it back `REBOUND` pixels.
-const RECOVER: f32 = 1.2;
+/// Seconds spent after a lunge, open to punishment; longer after a rampage,
+/// and longer still if a riot shield stopped it, throwing it back `REBOUND` pixels.
+const RECOVER: f32 = 0.9;
+const RAMPAGE_RECOVER: f32 = 1.6;
 const STAGGER: f32 = 1.8;
 const REBOUND: f32 = 8.0;
+
+/// Odds it rampages instead of lunging when its prowl runs out (never twice in a row).
+const RAMPAGE_CHANCE: f32 = 0.33;
+const ENRAGED_RAMPAGE_CHANCE: f32 = 0.5;
+/// Seconds rearing up, its first lane showing, before the rampage starts.
+const REAR: f32 = 1.0;
+const ENRAGED_REAR: f32 = 0.85;
+/// Wall-to-wall dashes in one rampage.
+const RAMPAGE_DASHES: u8 = 4;
+const ENRAGED_RAMPAGE_DASHES: u8 = 6;
+/// How fast it dashes, and the longest one dash may take.
+const DASH_SPEED: f32 = 640.0;
+const DASH_TIME: f32 = 0.8;
+/// Seconds braced at the wall between dashes, the next lane showing.
+const BRACE: f32 = 0.45;
+const ENRAGED_BRACE: f32 = 0.35;
+/// Each lane runs through a pirate, or up to this far to one side of them.
+const LANE_JITTER: f32 = 10.0;
+/// A lane shorter than this ahead of it isn't worth dashing: it heads for the
+/// middle of the room instead.
+const MIN_DASH: f32 = 64.0;
+/// A dash's damage to each pirate it touches (once each per dash), and how hard it throws them.
+const DASH_HIT: f32 = 75.0;
+const DASH_KNOCKBACK: f32 = 330.0;
+
+/// The vault brute's plodding pace: slower than the stalker prowls, faster
+/// than a regular brute. It stops closing in once a pirate is this close.
+const PLOD_SPEED: f32 = 32.0;
+const PLOD_NEAR: f32 = 22.0;
+/// It raises its fists once a pirate it can see is this close, locking its
+/// slam `SLAM_AHEAD` in front of it, toward them.
+const SLAM_TRIGGER: f32 = 34.0;
+const SLAM_AHEAD: f32 = 16.0;
+/// Seconds its fists are raised before they come down.
+const SLAM_WIND_UP: f32 = 0.8;
+const ENRAGED_SLAM_WIND_UP: f32 = 0.65;
+/// The slam's damage to everyone within `BRUTE_SLAM_RADIUS` of where it
+/// lands, how hard it throws them, and the seconds it's stuck afterwards.
+const SLAM_HIT: f32 = 55.0;
+const SLAM_KNOCKBACK: f32 = 300.0;
+const SLAM_RECOVER: f32 = 1.0;
+/// Seconds after waking before its first roar, then between roars.
+const FIRST_SUMMON: f32 = 2.0;
+const SUMMON_GAP: f32 = 12.0;
+const ENRAGED_SUMMON_GAP: f32 = 9.0;
+/// Seconds it stands roaring, its guards' spots showing, before they appear.
+const ROAR: f32 = 1.2;
+/// Guards each roar calls in for each pirate it can see, up to a crew of
+/// `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged. At most `CAP_PER_PIRATE`
+/// per pirate plus one are alive at once, never fewer than `MIN_CAP` nor more
+/// than `MAX_SUMMONS`: at the cap a roar calls fewer, or none.
+const SUMMON_CREW: usize = 3;
+const ENRAGED_SUMMONS: usize = 1;
+const CAP_PER_PIRATE: usize = 2;
+const MIN_CAP: usize = 3;
+const MAX_SUMMONS: usize = 6;
+/// Guards appear this far in from the room's walls, at least `SUMMON_CLEAR`
+/// from every pirate (half that if the crew leaves no such room), and
+/// `SUMMON_SPREAD` from each other.
+const SUMMON_INSET: f32 = 12.0;
+const SUMMON_CLEAR: f32 = 56.0;
+const SUMMON_SPREAD: f32 = 22.0;
+/// A summoned guard's collision half-extent, for keeping it out of walls: the biggest guard's.
+const SUMMON_HALF: f32 = 6.0;
 
 /// Credit drops it leaves behind, sharing its bounty, and ammo boxes.
 const BOUNTY_DROPS: u32 = 10;
@@ -135,7 +221,7 @@ impl Plugin for BossPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (drive_keeper, drive_stalker, move_keeper_orbs, keeper_deaths)
+            (drive_keeper, drive_stalker, drive_brute, move_keeper_orbs, keeper_deaths)
                 .chain()
                 .run_if(in_state(GameState::Playing))
                 .run_if(authority),
@@ -186,16 +272,20 @@ pub enum HandAction {
 pub enum KeeperKind {
     /// The vault keeper: two floating hands sweeping lasers and hurling nova orbs.
     Hands,
-    /// A hulking, buffed-up stalker: winds up, then lunges through up to three
-    /// pirates in a row, with a moderate cooldown between.
+    /// A hulking, buffed-up stalker: winds up showing several lunge routes and
+    /// takes one at random, or rampages wall to wall across the room, with a
+    /// moderate cooldown between.
     Stalker,
+    /// A beefy, buffed-up brute: melee only, it has to get up close to slam,
+    /// and keeps calling in guards to do its fighting for it.
+    Brute,
 }
 
 impl KeeperKind {
-    pub const ALL: [KeeperKind; 2] = [Self::Hands, Self::Stalker];
+    pub const ALL: [KeeperKind; 3] = [Self::Hands, Self::Stalker, Self::Brute];
 
     /// The guardian of `deck`'s vault in the heist from `seed`. The kinds take
-    /// turns down the decks, so a heist always meets both.
+    /// turns down the decks, so a heist meets each of them once.
     pub fn pick(seed: u32, deck: u8) -> Self {
         Self::ALL[(seed as usize + deck as usize) % Self::ALL.len()]
     }
@@ -204,6 +294,7 @@ impl KeeperKind {
         match self {
             Self::Hands => KEEPER_NAME,
             Self::Stalker => "VAULT STALKER",
+            Self::Brute => "VAULT BRUTE",
         }
     }
 
@@ -212,6 +303,7 @@ impl KeeperKind {
         match self {
             Self::Hands => "BOSS - RANGED",
             Self::Stalker => "BOSS - MELEE",
+            Self::Brute => "BOSS - SUMMONER",
         }
     }
 
@@ -219,7 +311,8 @@ impl KeeperKind {
     pub fn details(self) -> &'static str {
         match self {
             Self::Hands => "Guards a vault. Two floating hands sweep lasers and hurl nova orbs; badly hurt, both attack at once.",
-            Self::Stalker => "Guards a vault. Marks up to three pirates, then lunges through them one after another. Spread out.",
+            Self::Stalker => "Guards a vault. Shows several ways it might lunge, then takes one at random: get off them all. Sometimes rampages wall to wall instead. Riot shields stop it.",
+            Self::Brute => "Guards a vault. A beefy brute that slams whoever it reaches, and keeps calling in guards to fight for it.",
         }
     }
 
@@ -227,6 +320,7 @@ impl KeeperKind {
         match self {
             Self::Hands => "sprites/boss/keeper.png",
             Self::Stalker => "sprites/boss/stalker.png",
+            Self::Brute => "sprites/boss/brute.png",
         }
     }
 }
@@ -240,7 +334,8 @@ pub struct Keeper {
     /// Asleep until the crew is let into its room.
     pub awake: bool,
     /// Badly hurt: the keeper's hands attack together, and faster; the
-    /// stalker lunges sooner and winds up quicker.
+    /// stalker lunges sooner and winds up quicker; the brute slams quicker
+    /// and calls in more guards, more often.
     pub enraged: bool,
 }
 
@@ -257,7 +352,7 @@ impl Keeper {
 struct Might {
     /// Scales its health.
     health: f32,
-    /// Scales every hit it lands: beams, orbs, arcs and lunges.
+    /// Scales every hit it lands: beams, orbs, arcs, lunges and slams.
     power: f32,
 }
 
@@ -281,7 +376,8 @@ fn might(tier: VaultTier) -> Might {
 fn keeper_health(kind: KeeperKind, tier: VaultTier, crew: usize) -> f32 {
     let base = match kind {
         KeeperKind::Hands => 1800.0,
-        KeeperKind::Stalker => 1800.0,
+        KeeperKind::Stalker => 2400.0,
+        KeeperKind::Brute => 3000.0,
     };
     base * might(tier).health * (0.4 + 0.6 * crew.max(1) as f32)
 }
@@ -310,21 +406,61 @@ pub struct KeeperHand {
 pub enum StalkerState {
     /// Circling, waiting out its cooldown.
     Prowl,
-    /// Crouched, winding up: its `marks` show who it'll go through.
+    /// Crouched, winding up: `StalkerLook::routes` shows every way it might
+    /// lunge; nobody knows which until it goes.
     WindUp,
-    /// Lunging through its marks, `hit` of them reached so far.
+    /// Lunging along the one route it picked (`routes[0]`), `hit` of its legs done.
     Lunge { hit: u8 },
-    /// Spent after a lunge: a moment to punish it.
+    /// Spent after a lunge or rampage: a moment to punish it.
     Recover,
+    /// Rearing up before a rampage: `StalkerLook::lane` shows the first dash.
+    Rear,
+    /// Rampaging: dashing wall to wall across the room, `dash` (from 0) of
+    /// `total` dashes. While `moving` is false it's braced at a wall, lining up
+    /// the next dash along `lane`.
+    Rampage { dash: u8, total: u8, moving: bool },
 }
 
-/// Beside a Vault Stalker's `Keeper`: what it's doing and, while it winds up
-/// and lunges, where the pirates it marked stood, in the order it goes
-/// through them. Replicated.
+/// Beside a Vault Stalker's `Keeper`: what it's doing and where it's going.
+/// Replicated.
 #[derive(Component, Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct StalkerLook {
     pub state: StalkerState,
-    pub marks: Vec<Vec2>,
+    /// While it winds up, every route it might lunge along, each the points
+    /// it would pass through in order, starting after its body. While it
+    /// lunges, only the route it picked. Empty otherwise.
+    pub routes: Vec<Vec<Vec2>>,
+    /// While it rears up or rampages, the current (or next) dash's lane,
+    /// from wall to wall. `None` otherwise.
+    pub lane: Option<[Vec2; 2]>,
+}
+
+/// What a Vault Brute is doing, for the view.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BruteState {
+    /// Plodding after the nearest pirate.
+    Plod,
+    /// Fists raised over `BruteLook::at`, about to slam them down: everyone
+    /// within `BRUTE_SLAM_RADIUS` of it when they land is hit.
+    WindUp,
+    /// Just slammed: stuck a moment, open to punishment.
+    Recover,
+    /// Roaring, calling in guards: they appear at `BruteLook::summons` when it ends.
+    Summon,
+}
+
+/// How far from `BruteLook::at` a Vault Brute's slam reaches.
+pub const BRUTE_SLAM_RADIUS: f32 = 26.0;
+
+/// Beside a Vault Brute's `Keeper`: what it's doing, where its slam lands,
+/// and where the guards it's calling in will appear. Replicated.
+#[derive(Component, Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct BruteLook {
+    pub state: BruteState,
+    /// While it winds up or recovers, where its slam lands.
+    pub at: Vec2,
+    /// While it roars, where each guard it's calling will appear. Empty otherwise.
+    pub summons: Vec<Vec2>,
 }
 
 /// A hand's laser: a warning line while it aims, then the burning beam, from
@@ -398,12 +534,24 @@ struct StalkerBrain {
     /// Which way it circles the crew, flipped now and then.
     strafe: f32,
     strafe_timer: f32,
-    /// Who this lunge has hit already: nobody's hit twice by one.
+    /// Who this lunge or dash has hit already: nobody's hit twice by one.
     hits: Vec<Entity>,
+    /// Its last attack was a rampage: the next is a lunge.
+    rampaged: bool,
+}
+
+/// Host only: the vault brute's hidden side; what it's doing is its `BruteLook`.
+#[derive(Component)]
+struct BruteBrain {
+    /// Seconds into its current state.
+    timer: f32,
+    /// Seconds until it may roar for guards again.
+    summon_cd: f32,
+    velocity: Vec2,
 }
 
 /// Host only: puts the sleeping guardian of `deck`'s vault at `pos`: the
-/// keeper with its two hands, or the stalker.
+/// keeper with its two hands, the stalker, or the brute.
 pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKind) {
     let tier = VaultTier::for_deck(deck);
     let body = commands
@@ -428,8 +576,16 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
                 strafe: 1.0,
                 strafe_timer: 3.0,
                 hits: Vec::new(),
+                rampaged: false,
             },
-            StalkerLook { state: StalkerState::Prowl, marks: Vec::new() },
+            StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), lane: None },
+        ));
+        return;
+    }
+    if kind == KeeperKind::Brute {
+        commands.entity(body).insert((
+            BruteBrain { timer: 0.0, summon_cd: FIRST_SUMMON, velocity: Vec2::ZERO },
+            BruteLook { state: BruteState::Plod, at: pos.round(), summons: Vec::new() },
         ));
         return;
     }
@@ -553,6 +709,332 @@ fn in_room(room: Rect, half: Vec2, p: Vec2) -> Vec2 {
         return p;
     }
     p.clamp(room.min + half, room.max - half)
+}
+
+/// A uniformly random index below `n` (which must be above zero).
+fn roll(rng: &mut Rng, n: usize) -> usize {
+    (rng.unit() * n as f32) as usize % n
+}
+
+/// Up to `n` of the pirates at `crew`, picked at random, in a random order.
+fn shuffled(rng: &mut Rng, crew: &[Vec2], n: usize) -> Vec<Vec2> {
+    let mut left = crew.to_vec();
+    let mut picked = Vec::with_capacity(n.min(left.len()));
+    while picked.len() < n && !left.is_empty() {
+        picked.push(left.swap_remove(roll(rng, left.len())));
+    }
+    picked
+}
+
+/// Which way a route from `pos` sets off: toward its first point at least
+/// `MIN_LEG` away. `None` if it never gets that far.
+fn heading(pos: Vec2, route: &[Vec2]) -> Option<Vec2> {
+    route.iter().find(|p| p.distance(pos) >= MIN_LEG).map(|p| (*p - pos).normalize())
+}
+
+/// The routes a lunge from `pos` might take, `count` of them if there's room:
+/// each the points it passes through in order, on the room floor `room` (for
+/// a body of half-extent `half`). With pirates at `crew`, the first goes
+/// through up to `MAX_MARKS` of them in a chain (see `pick_marks`); the rest
+/// take them in other orders, swerve past one and cut back through, or feint
+/// into open floor before turning on someone. No two set off within
+/// `ROUTE_SPLIT` of each other, so even a lone pirate can't just stand aside
+/// from one line.
+fn plan_routes(room: Rect, half: Vec2, pos: Vec2, crew: &[Vec2], count: usize, rng: &mut Rng) -> Vec<Vec<Vec2>> {
+    let fit = |p: Vec2| in_room(room, half, p).round();
+    let mut routes: Vec<Vec<Vec2>> = Vec::new();
+    // Takes a route if it sets off its own way.
+    let offer = |routes: &mut Vec<Vec<Vec2>>, route: Vec<Vec2>| {
+        let mut route: Vec<Vec2> = route.into_iter().map(fit).collect();
+        route.dedup_by(|a, b| a.distance(*b) < 1.0);
+        route.truncate(MAX_LEGS);
+        let Some(dir) = heading(pos, &route) else { return };
+        let apart = routes
+            .iter()
+            .filter_map(|r| heading(pos, r))
+            .all(|other| dir.angle_to(other).abs() >= ROUTE_SPLIT);
+        if apart && routes.len() < count {
+            routes.push(route);
+        }
+    };
+
+    if !crew.is_empty() {
+        let chain: Vec<Vec2> = pick_marks(pos, crew).into_iter().map(|i| fit(crew[i])).collect();
+        // Always on offer, however close they stand.
+        if heading(pos, &chain).is_some() {
+            offer(&mut routes, chain);
+        } else {
+            routes.push(chain);
+        }
+    }
+    for _ in 0..48 {
+        if routes.len() >= count {
+            break;
+        }
+        let kind = if crew.is_empty() { 2 } else { roll(rng, 3) };
+        let route = match kind {
+            // The crew in another order.
+            0 => shuffled(rng, crew, MAX_MARKS),
+            // Past a pirate, off to one side, then back through them and on.
+            1 => {
+                let target = crew[roll(rng, crew.len())];
+                let to = target - pos;
+                let swerve = (SWERVE_MIN + rng.unit() * (SWERVE_MAX - SWERVE_MIN)) * rng.signed().signum();
+                let past = pos + Vec2::from_angle(swerve).rotate(to.normalize_or(Vec2::X)) * (to.length() + OVERSHOOT);
+                let mut route = vec![past, target];
+                let others: Vec<Vec2> = crew.iter().copied().filter(|p| *p != target).collect();
+                if !others.is_empty() && rng.unit() < 0.5 {
+                    route.push(others[roll(rng, others.len())]);
+                } else {
+                    route.push(target + (target - fit(past)).normalize_or(Vec2::X) * OVERSHOOT);
+                }
+                route
+            }
+            // Into open floor, then through one or two of them.
+            _ => {
+                let dir = Vec2::from_angle(rng.unit() * std::f32::consts::TAU);
+                let feint = pos + dir * (FEINT_MIN + rng.unit() * (FEINT_MAX - FEINT_MIN));
+                let mut route = vec![feint];
+                if crew.is_empty() {
+                    route.push(feint + Vec2::from_angle(rng.signed() * 2.0).rotate(dir) * FEINT_MAX);
+                } else {
+                    let n = 1 + roll(rng, 2);
+                    route.extend(shuffled(rng, crew, n));
+                }
+                route
+            }
+        };
+        offer(&mut routes, route);
+    }
+    // Cornered or crowded: feints fanned out all around, then at someone.
+    let start = rng.unit() * std::f32::consts::TAU;
+    for k in 0..24 {
+        if routes.len() >= count {
+            break;
+        }
+        let dir = Vec2::from_angle(start + k as f32 * std::f32::consts::TAU / 24.0);
+        let mut route = vec![pos + dir * FEINT_MAX];
+        if let Some(target) = crew.first() {
+            route.push(*target);
+        }
+        offer(&mut routes, route);
+    }
+    routes
+}
+
+/// How far a body at `p` can go along unit `dir` before leaving `floor`.
+fn edge_reach(floor: Rect, p: Vec2, dir: Vec2) -> f32 {
+    let mut reach = f32::INFINITY;
+    for (at, d, min, max) in [(p.x, dir.x, floor.min.x, floor.max.x), (p.y, dir.y, floor.min.y, floor.max.y)] {
+        if d > 1e-6 {
+            reach = reach.min((max - at) / d);
+        } else if d < -1e-6 {
+            reach = reach.min((min - at) / d);
+        }
+    }
+    if reach.is_finite() { reach.max(0.0) } else { 0.0 }
+}
+
+/// A rampage dash's lane from `from` toward `aim`, from wall to wall of the
+/// room floor `room` (for a body of half-extent `half`): it starts behind
+/// `from` and ends past `aim`, where the dash ends. If that's hardly any way
+/// ahead, it runs toward the middle of the room instead.
+fn rampage_lane(room: Rect, half: Vec2, from: Vec2, aim: Vec2) -> [Vec2; 2] {
+    let floor = Rect { min: room.min + half, max: room.max - half };
+    if floor.width() <= 0.0 || floor.height() <= 0.0 {
+        return [from, from];
+    }
+    let from = in_room(room, half, from);
+    let mut dir = (aim - from).normalize_or(Vec2::X);
+    if edge_reach(floor, from, dir) < MIN_DASH {
+        dir = (floor.center() - from).normalize_or(-dir);
+    }
+    [from - dir * edge_reach(floor, from, -dir), from + dir * edge_reach(floor, from, dir)]
+}
+
+/// Cuts a lane through `from` short at the first walls (or vault) either way,
+/// for a body of half-extent `half`.
+fn clip_lane(grid: &RoomGrid, half: Vec2, from: Vec2, lane: [Vec2; 2]) -> [Vec2; 2] {
+    lane.map(|end| {
+        let dir = (end - from).normalize_or_zero();
+        let mut at = from;
+        while at.distance(end) > 2.0 {
+            let next = at + dir * at.distance(end).min(2.0);
+            if grid.collides(next, half) {
+                break;
+            }
+            at = next;
+        }
+        at.round()
+    })
+}
+
+/// Where the vault brute's slam from `pos` at a pirate at `target` lands: a
+/// little in front of it, toward them.
+fn slam_spot(pos: Vec2, target: Vec2) -> Vec2 {
+    pos + (target - pos).normalize_or(Vec2::NEG_Y) * SLAM_AHEAD
+}
+
+/// Whether a slam landing at `at` reaches someone at `victim` with a hurtbox of `hurtbox`.
+fn slam_reaches(at: Vec2, victim: Vec2, hurtbox: f32) -> bool {
+    victim.distance(at) <= BRUTE_SLAM_RADIUS + hurtbox
+}
+
+/// The most of its guards alive at once, facing `crew` pirates.
+fn summon_cap(crew: usize) -> usize {
+    (CAP_PER_PIRATE * crew + 1).clamp(MIN_CAP, MAX_SUMMONS)
+}
+
+/// How many guards a roar calls in facing `crew` pirates, with `alive` of its
+/// summons still up: a lone pirate isn't swamped, and never past the cap.
+fn summon_count(enraged: bool, alive: usize, crew: usize) -> usize {
+    let wanted = crew.clamp(1, SUMMON_CREW) + if enraged { ENRAGED_SUMMONS } else { 0 };
+    wanted.min(summon_cap(crew).saturating_sub(alive))
+}
+
+/// Which guard a roar calls in for a vault of `tier`: mostly drones and
+/// stalkers, with wardens and brutes likelier deeper down.
+fn summon_kind(rng: &mut Rng, tier: VaultTier) -> EnemyKind {
+    // Odds of a drone, a stalker and a warden; the rest are brutes.
+    let (drone, stalker, warden) = match tier {
+        VaultTier::Silver => (0.45, 0.45, 0.1),
+        VaultTier::Gold => (0.35, 0.35, 0.2),
+        VaultTier::Platinum => (0.25, 0.3, 0.25),
+    };
+    let r = rng.unit();
+    if r < drone {
+        EnemyKind::SentryDrone
+    } else if r < drone + stalker {
+        EnemyKind::Stalker
+    } else if r < drone + stalker + warden {
+        EnemyKind::Warden
+    } else {
+        EnemyKind::Brute
+    }
+}
+
+/// Where up to `count` summoned guards appear on the room floor `room`: near
+/// its walls, in whole pixels, at spots `open` says a guard fits, at least
+/// `SUMMON_CLEAR` from every pirate at `crew` (or half that, if the crew
+/// leaves no such room), and `SUMMON_SPREAD` apart. Fewer if there's no room.
+fn summon_spots(room: Rect, crew: &[Vec2], count: usize, open: impl Fn(Vec2) -> bool, rng: &mut Rng) -> Vec<Vec2> {
+    let floor = Rect { min: room.min + SUMMON_INSET, max: room.max - SUMMON_INSET };
+    if floor.width() <= 0.0 || floor.height() <= 0.0 {
+        return Vec::new();
+    }
+    // Random spots along the walls, up to a tile in from them.
+    let candidates: Vec<Vec2> = (0..64)
+        .map(|_| {
+            let (t, inward) = (rng.unit(), rng.unit() * 16.0);
+            let p = match roll(rng, 4) {
+                0 => Vec2::new(floor.min.x.lerp(floor.max.x, t), floor.min.y + inward),
+                1 => Vec2::new(floor.min.x.lerp(floor.max.x, t), floor.max.y - inward),
+                2 => Vec2::new(floor.min.x + inward, floor.min.y.lerp(floor.max.y, t)),
+                _ => Vec2::new(floor.max.x - inward, floor.min.y.lerp(floor.max.y, t)),
+            };
+            p.clamp(floor.min, floor.max).round()
+        })
+        .filter(|p| open(*p))
+        .collect();
+    let clearance = |p: Vec2| crew.iter().map(|c| c.distance(p)).fold(f32::INFINITY, f32::min);
+    let mut picked: Vec<Vec2> = Vec::with_capacity(count);
+    for clear in [SUMMON_CLEAR, SUMMON_CLEAR / 2.0] {
+        for p in &candidates {
+            if picked.len() >= count {
+                return picked;
+            }
+            if clearance(*p) >= clear && picked.iter().all(|q| q.distance(*p) >= SUMMON_SPREAD) {
+                picked.push(*p);
+            }
+        }
+    }
+    picked
+}
+
+/// The pirates on the crew's side, who a lunge or dash can hurt.
+type Crew<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Team,
+        &'static Hurtbox,
+        &'static Transform,
+        &'static mut Health,
+        Option<&'static Player>,
+        Option<&'static mut Knockback>,
+    ),
+    Without<Keeper>,
+>;
+
+/// How a frame of a lunge leg or rampage dash ended.
+enum Charge {
+    Going,
+    /// At the point it was charging for, or up against a wall.
+    There,
+    /// A raised riot shield stopped it dead, heading this way.
+    Blocked(Vec2),
+}
+
+/// One frame of a lunge leg or rampage dash: carries the body at `pos` up to
+/// `left` pixels on toward `to`, in small steps, and hits everyone it touches
+/// who isn't in `hits` yet for `damage`, throwing them `throw` hard: onward,
+/// and if `fling`, off to the side too.
+#[allow(clippy::too_many_arguments)]
+fn charge(
+    commands: &mut Commands,
+    grid: &RoomGrid,
+    shields: &[[Vec2; crate::class::RIOT_POINTS]],
+    pos: &mut Vec2,
+    to: Vec2,
+    mut left: f32,
+    hits: &mut Vec<Entity>,
+    crew: &mut Crew,
+    damage: f32,
+    throw: f32,
+    fling: bool,
+) -> Charge {
+    let half = Vec2::splat(KEEPER_HALF);
+    while left > 0.0 {
+        let ahead = to - *pos;
+        if ahead.length() < 0.5 {
+            return Charge::There;
+        }
+        let dir = ahead.normalize();
+        let step = left.min(LUNGE_STEP).min(ahead.length());
+        // A raised riot shield in its way stops it dead.
+        let front = *pos + dir * (KEEPER_HALF + step);
+        if hits_shield(shields, front) || shield_between(shields, *pos, front) {
+            return Charge::Blocked(dir);
+        }
+        let next = in_room(grid.vault_room, half, grid.slide(*pos, dir * step, half));
+        if next.distance(*pos) < step * 0.5 {
+            // Up against a wall: as far as this goes.
+            return Charge::There;
+        }
+        *pos = next;
+        left -= step;
+        // Hits everyone on the crew's side it touches, once each.
+        for (entity, team, hurtbox, t, mut victim, player, victim_knockback) in crew.iter_mut() {
+            let at = t.translation.truncate();
+            if hits.contains(&entity)
+                || !in_play(team, &victim, player)
+                || at.distance(*pos) > KEEPER_HALF + LUNGE_REACH + hurtbox.0
+                || shield_between(shields, *pos, at)
+            {
+                continue;
+            }
+            hits.push(entity);
+            if victim.hurt(damage) {
+                fx(commands, FxKind::Spark, at, dir.to_angle(), KEEPER_COLOR);
+                if let Some(mut victim_knockback) = victim_knockback {
+                    let side = if fling { dir.perp() * dir.perp().dot(at - *pos).signum() } else { Vec2::ZERO };
+                    victim_knockback.0 += (dir + side).normalize_or(dir) * throw;
+                }
+            }
+        }
+    }
+    Charge::Going
 }
 
 /// Wakes, moves and fights the keeper: the body drifts within its room, the
@@ -807,9 +1289,11 @@ fn drive_keeper(
     }
 }
 
-/// Wakes, moves and fights the stalker: it prowls around the crew, winds up
-/// marking up to three of them, lunges through each mark in turn, then stands
-/// spent for a moment. A riot shield in its way stops a lunge dead.
+/// Wakes, moves and fights the stalker: it prowls around the crew, then
+/// either winds up showing several routes and lunges along one picked at
+/// random, or rears up and rampages wall to wall across the room, then stands
+/// spent for a moment. A riot shield in its way stops a lunge, or a whole
+/// rampage, dead.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_stalker(
     mut commands: Commands,
@@ -818,10 +1302,7 @@ fn drive_stalker(
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
     mut stalkers: Query<(&mut Keeper, &Health, &mut Transform, &mut Knockback, &mut StalkerBrain, &mut StalkerLook)>,
-    mut crew: Query<
-        (Entity, &Team, &Hurtbox, &Transform, &mut Health, Option<&Player>, Option<&mut Knockback>),
-        Without<Keeper>,
-    >,
+    mut crew: Crew,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
 ) {
     let Ok((mut keeper, health, mut body, mut knockback, mut brain, mut look)) = stalkers.single_mut() else { return };
@@ -831,7 +1312,7 @@ fn drive_stalker(
         knockback.0 = Vec2::ZERO;
     }
     if !keeper.awake {
-        look.set_if_neq(StalkerLook { state: StalkerState::Prowl, marks: Vec::new() });
+        look.set_if_neq(StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), lane: None });
         return;
     }
     let start = body.translation.truncate();
@@ -857,9 +1338,16 @@ fn drive_stalker(
         })
         .map(|(_, _, _, t, ..)| t.translation.truncate())
         .collect();
+    // A dash's lane from `from`: wall to wall, through or just beside someone.
+    let next_lane = |rng: &mut Rng, from: Vec2| {
+        let target = spots[roll(rng, spots.len())];
+        let aside = (target - from).normalize_or(Vec2::X).perp() * rng.signed() * LANE_JITTER;
+        clip_lane(&grid, half, from, rampage_lane(room, half, from, target + aside))
+    };
 
     let mut state = look.state;
-    let mut marks = look.marks.clone();
+    let mut routes = look.routes.clone();
+    let mut lane = look.lane;
     brain.timer += dt;
     match state {
         StalkerState::Prowl => {
@@ -873,15 +1361,29 @@ fn drive_stalker(
             pos = in_room(room, half, grid.slide(pos, brain.velocity * dt, half));
             brain.cooldown -= dt;
             if brain.cooldown <= 0.0 && !spots.is_empty() {
-                // Locked in now, so whoever sidesteps in time is missed.
-                marks = pick_marks(pos, &spots).into_iter().map(|i| in_room(room, half, spots[i]).round()).collect();
-                state = StalkerState::WindUp;
                 brain.timer = 0.0;
                 brain.velocity = Vec2::ZERO;
+                // Routes and lanes are locked in now, so whoever gets off them in time is missed.
+                let chance = if enraged { ENRAGED_RAMPAGE_CHANCE } else { RAMPAGE_CHANCE };
+                if !brain.rampaged && rng.unit() < chance {
+                    brain.rampaged = true;
+                    lane = Some(next_lane(&mut rng, pos));
+                    state = StalkerState::Rear;
+                } else {
+                    brain.rampaged = false;
+                    let count = if enraged { ENRAGED_ROUTES } else { ROUTES };
+                    routes = plan_routes(room, half, pos, &spots, count, &mut rng);
+                    state = StalkerState::WindUp;
+                }
             }
         }
         StalkerState::WindUp => {
-            if brain.timer >= if enraged { ENRAGED_WIND_UP } else { WIND_UP } {
+            if routes.is_empty() {
+                state = StalkerState::Prowl;
+            } else if brain.timer >= if enraged { ENRAGED_WIND_UP } else { WIND_UP } {
+                // Only now does anyone find out which way it's going.
+                let pick = roll(&mut rng, routes.len());
+                routes = vec![routes.swap_remove(pick)];
                 state = StalkerState::Lunge { hit: 0 };
                 brain.timer = 0.0;
                 brain.hits.clear();
@@ -889,66 +1391,74 @@ fn drive_stalker(
             }
         }
         StalkerState::Lunge { hit } => {
-            let mark = marks.get(hit as usize).copied().unwrap_or(pos);
-            let mut left = LUNGE_SPEED * dt;
-            let mut reached = false;
-            let mut blocked = None;
-            while left > 0.0 {
-                let to = mark - pos;
-                if to.length() < 0.5 {
-                    reached = true;
-                    break;
+            let legs = routes.first().map_or(0, Vec::len);
+            let to = routes.first().and_then(|r| r.get(hit as usize)).copied().unwrap_or(pos);
+            let speed = LUNGE_SPEED * dt;
+            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, LUNGE_HIT * power, LUNGE_KNOCKBACK, false) {
+                Charge::Blocked(dir) => {
+                    fx(&mut commands, FxKind::Spark, pos + dir * KEEPER_HALF, dir.to_angle(), KEEPER_COLOR);
+                    pos = in_room(room, half, grid.slide(pos, -dir * REBOUND, half));
+                    state = StalkerState::Recover;
+                    brain.recover = STAGGER;
+                    brain.timer = 0.0;
                 }
-                let dir = to.normalize();
-                let step = left.min(LUNGE_STEP).min(to.length());
-                // A raised riot shield in its way stops it dead.
-                let front = pos + dir * (KEEPER_HALF + step);
-                if hits_shield(&shields, front) || shield_between(&shields, pos, front) {
-                    blocked = Some(dir);
-                    break;
-                }
-                let next = in_room(room, half, grid.slide(pos, dir * step, half));
-                if next.distance(pos) < step * 0.5 {
-                    // Up against a wall: as far as this leg goes.
-                    reached = true;
-                    break;
-                }
-                pos = next;
-                left -= step;
-                // Hits everyone on the crew's side it touches, once each per lunge.
-                for (entity, team, hurtbox, t, mut victim, player, victim_knockback) in &mut crew {
-                    let at = t.translation.truncate();
-                    if brain.hits.contains(&entity)
-                        || !in_play(team, &victim, player)
-                        || at.distance(pos) > KEEPER_HALF + LUNGE_REACH + hurtbox.0
-                        || shield_between(&shields, pos, at)
-                    {
-                        continue;
-                    }
-                    brain.hits.push(entity);
-                    if victim.hurt(LUNGE_HIT * power) {
-                        fx(&mut commands, FxKind::Spark, at, dir.to_angle(), KEEPER_COLOR);
-                        if let Some(mut victim_knockback) = victim_knockback {
-                            victim_knockback.0 += dir * LUNGE_KNOCKBACK;
+                done => {
+                    if matches!(done, Charge::There) || brain.timer >= LEG_TIME {
+                        let hit = hit + 1;
+                        brain.timer = 0.0;
+                        if hit as usize >= legs {
+                            state = StalkerState::Recover;
+                            brain.recover = RECOVER;
+                        } else {
+                            state = StalkerState::Lunge { hit };
                         }
                     }
                 }
             }
-            if let Some(dir) = blocked {
-                fx(&mut commands, FxKind::Spark, pos + dir * KEEPER_HALF, dir.to_angle(), KEEPER_COLOR);
-                pos = in_room(room, half, grid.slide(pos, -dir * REBOUND, half));
-                state = StalkerState::Recover;
-                brain.recover = STAGGER;
+        }
+        StalkerState::Rear => {
+            if brain.timer >= if enraged { ENRAGED_REAR } else { REAR } {
+                let total = if enraged { ENRAGED_RAMPAGE_DASHES } else { RAMPAGE_DASHES };
+                state = StalkerState::Rampage { dash: 0, total, moving: true };
                 brain.timer = 0.0;
-            } else if reached || brain.timer >= LEG_TIME {
-                let hit = hit + 1;
-                brain.timer = 0.0;
-                if hit as usize >= marks.len() {
+                brain.hits.clear();
+                fx(&mut commands, FxKind::Burst, pos, 0.0, KEEPER_COLOR);
+            }
+        }
+        StalkerState::Rampage { dash, total, moving: true } => {
+            let to = lane.map_or(pos, |l| l[1]);
+            let speed = DASH_SPEED * dt;
+            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, DASH_HIT * power, DASH_KNOCKBACK, true) {
+                Charge::Blocked(dir) => {
+                    // A shield ends the whole rampage.
+                    fx(&mut commands, FxKind::Spark, pos + dir * KEEPER_HALF, dir.to_angle(), KEEPER_COLOR);
+                    pos = in_room(room, half, grid.slide(pos, -dir * REBOUND, half));
                     state = StalkerState::Recover;
-                    brain.recover = RECOVER;
-                } else {
-                    state = StalkerState::Lunge { hit };
+                    brain.recover = STAGGER;
+                    brain.timer = 0.0;
                 }
+                done => {
+                    if matches!(done, Charge::There) || brain.timer >= DASH_TIME {
+                        fx(&mut commands, FxKind::Burst, pos, 0.0, KEEPER_COLOR);
+                        let dash = dash + 1;
+                        brain.timer = 0.0;
+                        if dash >= total || spots.is_empty() {
+                            state = StalkerState::Recover;
+                            brain.recover = RAMPAGE_RECOVER;
+                        } else {
+                            // Braced at the wall, lining up the next.
+                            lane = Some(next_lane(&mut rng, pos));
+                            state = StalkerState::Rampage { dash, total, moving: false };
+                        }
+                    }
+                }
+            }
+        }
+        StalkerState::Rampage { dash, total, moving: false } => {
+            if brain.timer >= if enraged { ENRAGED_BRACE } else { BRACE } {
+                state = StalkerState::Rampage { dash, total, moving: true };
+                brain.timer = 0.0;
+                brain.hits.clear();
             }
         }
         StalkerState::Recover => {
@@ -960,14 +1470,170 @@ fn drive_stalker(
         }
     }
     if !matches!(state, StalkerState::WindUp | StalkerState::Lunge { .. }) {
-        marks.clear();
+        routes.clear();
+    }
+    if !matches!(state, StalkerState::Rear | StalkerState::Rampage { .. }) {
+        lane = None;
     }
 
     if pos != start {
         body.translation.x = pos.x;
         body.translation.y = pos.y;
     }
-    look.set_if_neq(StalkerLook { state, marks });
+    look.set_if_neq(StalkerLook { state, routes, lane });
+}
+
+/// Wakes, moves and fights the vault brute: it plods after the nearest pirate
+/// and, once one is close, raises its fists and slams them down in front of
+/// it, then stands stuck a moment. Every so often (and as soon as it enrages)
+/// it stops to roar instead, calling in guards at the room's edges to do its
+/// fighting for it. Riot shields stop its slam.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn drive_brute(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut rng: ResMut<Rng>,
+    mut banner: ResMut<Banner>,
+    mut brutes: Query<(&mut Keeper, &Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
+    mut crew: Crew,
+    summoned: Query<(), With<Summoned>>,
+    riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
+) {
+    let Ok((mut keeper, health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
+    let dt = time.delta_secs();
+    // Nothing pushes it around.
+    if knockback.0 != Vec2::ZERO {
+        knockback.0 = Vec2::ZERO;
+    }
+    if !keeper.awake {
+        let at = look.at;
+        look.set_if_neq(BruteLook { state: BruteState::Plod, at, summons: Vec::new() });
+        return;
+    }
+    let start = body.translation.truncate();
+    let mut pos = start;
+
+    if !keeper.enraged && health.current <= health.max * ENRAGE_AT {
+        keeper.enraged = true;
+        // Enraging, it roars for help as soon as it's free.
+        brain.summon_cd = 0.0;
+        fx(&mut commands, FxKind::Explosion, pos, 0.0, KEEPER_COLOR);
+        banner.show(format!("THE {} IS ENRAGED", keeper.kind.name()), KEEPER_COLOR, 3.0);
+    }
+    let enraged = keeper.enraged;
+    let power = might(keeper.tier).power;
+    let half = Vec2::splat(KEEPER_HALF);
+    let room = grid.vault_room;
+
+    // Every pirate in play, who its guards keep clear of, and the ones it can see.
+    let pirates: Vec<Vec2> = crew
+        .iter()
+        .filter(|(_, team, _, _, health, player, _)| player.is_some() && in_play(team, health, *player))
+        .map(|(_, _, _, t, ..)| t.translation.truncate())
+        .collect();
+    let nearest = pirates
+        .iter()
+        .filter(|at| at.distance(pos) <= SIGHT && grid.line_of_sight(pos, **at))
+        .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+        .copied();
+
+    let mut state = look.state;
+    let mut at = look.at;
+    let mut summons = look.summons.clone();
+    brain.timer += dt;
+    brain.summon_cd -= dt;
+    match state {
+        BruteState::Plod => {
+            if brain.summon_cd <= 0.0 {
+                brain.summon_cd = if enraged { ENRAGED_SUMMON_GAP } else { SUMMON_GAP };
+                // At the cap, it skips this roar.
+                let count = summon_count(enraged, summoned.iter().count(), pirates.len());
+                if count > 0 {
+                    let open = |p: Vec2| !grid.collides(p, Vec2::splat(SUMMON_HALF));
+                    summons = summon_spots(room, &pirates, count, open, &mut rng);
+                    if !summons.is_empty() {
+                        state = BruteState::Summon;
+                        brain.timer = 0.0;
+                        brain.velocity = Vec2::ZERO;
+                        fx(&mut commands, FxKind::Burst, pos, 0.0, KEEPER_COLOR);
+                    }
+                }
+            }
+            if state == BruteState::Plod {
+                let mut want = Vec2::ZERO;
+                if let Some(target) = nearest {
+                    let dist = target.distance(pos);
+                    if dist <= SLAM_TRIGGER {
+                        // Locked in now: whoever steps out of reach in time is missed.
+                        state = BruteState::WindUp;
+                        at = in_room(room, Vec2::ZERO, slam_spot(pos, target)).round();
+                        brain.timer = 0.0;
+                        brain.velocity = Vec2::ZERO;
+                    } else if dist > PLOD_NEAR {
+                        want = (target - pos).normalize_or_zero() * PLOD_SPEED;
+                    }
+                }
+                if state == BruteState::Plod {
+                    brain.velocity = brain.velocity.lerp(want, (4.0 * dt).min(1.0));
+                    pos = in_room(room, half, grid.slide(pos, brain.velocity * dt, half));
+                }
+            }
+        }
+        BruteState::WindUp => {
+            if brain.timer >= if enraged { ENRAGED_SLAM_WIND_UP } else { SLAM_WIND_UP } {
+                // Down come the fists, on everyone in reach a raised shield doesn't cover.
+                let shields = shield_outlines(&riot_shields);
+                let ahead = (at - pos).normalize_or(Vec2::NEG_Y);
+                for (_, team, hurtbox, t, mut victim, player, victim_knockback) in crew.iter_mut() {
+                    let spot = t.translation.truncate();
+                    if !in_play(team, &victim, player) || !slam_reaches(at, spot, hurtbox.0) {
+                        continue;
+                    }
+                    if shield_between(&shields, at, spot) {
+                        fx(&mut commands, FxKind::Spark, spot, (spot - at).to_angle(), KEEPER_COLOR);
+                        continue;
+                    }
+                    if victim.hurt(SLAM_HIT * power) {
+                        fx(&mut commands, FxKind::Spark, spot, 0.0, KEEPER_COLOR);
+                        if let Some(mut victim_knockback) = victim_knockback {
+                            victim_knockback.0 += (spot - at).normalize_or(ahead) * SLAM_KNOCKBACK;
+                        }
+                    }
+                }
+                fx(&mut commands, FxKind::Explosion, at, 0.0, KEEPER_COLOR);
+                state = BruteState::Recover;
+                brain.timer = 0.0;
+            }
+        }
+        BruteState::Recover => {
+            if brain.timer >= SLAM_RECOVER {
+                state = BruteState::Plod;
+                brain.timer = 0.0;
+            }
+        }
+        BruteState::Summon => {
+            if brain.timer >= ROAR {
+                // The cap was checked as the roar began: nothing else calls guards in.
+                for spot in &summons {
+                    let guard = spawn_enemy(&mut commands, summon_kind(&mut rng, keeper.tier), *spot, true);
+                    commands.entity(guard).insert(Summoned);
+                    fx(&mut commands, FxKind::Burst, *spot, 0.0, KEEPER_COLOR);
+                }
+                state = BruteState::Plod;
+                brain.timer = 0.0;
+            }
+        }
+    }
+    if state != BruteState::Summon {
+        summons.clear();
+    }
+
+    if pos != start {
+        body.translation.x = pos.x;
+        body.translation.y = pos.y;
+    }
+    look.set_if_neq(BruteLook { state, at, summons });
 }
 
 /// Drifts the keeper's orbs on, lashing nearby pirates with arcs, and bursts
@@ -1048,7 +1714,8 @@ fn move_keeper_orbs(
 }
 
 /// When the keeper falls: a string of explosions, a generous bounty, a nano
-/// patch, and the body, hands, beams and orbs all gone, so the breach opens the gate.
+/// patch, and the body, hands, beams, orbs and summoned guards all gone, so
+/// the breach opens the gate.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn keeper_deaths(
     mut commands: Commands,
@@ -1057,6 +1724,7 @@ fn keeper_deaths(
     hands: Query<(Entity, &Transform), With<KeeperHand>>,
     beams: Query<Entity, With<KeeperBeam>>,
     orbs: Query<Entity, With<KeeperOrb>>,
+    summoned: Query<(Entity, &Transform), (With<Summoned>, Without<Keeper>)>,
     pirates: Query<(&Player, &Health, &Arsenal), Without<Keeper>>,
 ) {
     for (entity, keeper, health, transform) in &keepers {
@@ -1075,6 +1743,11 @@ fn keeper_deaths(
         }
         for e in beams.iter().chain(orbs.iter()) {
             commands.entity(e).despawn();
+        }
+        // Its guards go down with it, leaving nothing behind.
+        for (guard, t) in &summoned {
+            fx(&mut commands, FxKind::Burst, t.translation.truncate(), 0.0, KEEPER_COLOR);
+            commands.entity(guard).despawn();
         }
 
         let share = keeper_bounty(keeper.tier) / BOUNTY_DROPS;
@@ -1104,7 +1777,12 @@ mod tests {
     #[test]
     fn health_grows_with_tier_and_crew() {
         for kind in KeeperKind::ALL {
-            assert_eq!(keeper_health(kind, VaultTier::Silver, 1), 1800.0);
+            let base = match kind {
+                KeeperKind::Hands => 1800.0,
+                KeeperKind::Stalker => 2400.0,
+                KeeperKind::Brute => 3000.0,
+            };
+            assert_eq!(keeper_health(kind, VaultTier::Silver, 1), base);
             assert_eq!(keeper_health(kind, VaultTier::Silver, 0), keeper_health(kind, VaultTier::Silver, 1), "never less than solo");
             for crew in 1..5 {
                 let (now, more) = (keeper_health(kind, VaultTier::Gold, crew), keeper_health(kind, VaultTier::Gold, crew + 1));
@@ -1141,11 +1819,13 @@ mod tests {
     #[test]
     fn kinds_take_turns_down_the_decks() {
         for seed in [0, 1, 500, 501] {
-            assert_ne!(KeeperKind::pick(seed, 1), KeeperKind::pick(seed, 2));
-            assert_ne!(KeeperKind::pick(seed, 2), KeeperKind::pick(seed, 3));
+            let mut met: Vec<_> = (1..=3).map(|deck| KeeperKind::pick(seed, deck)).collect();
+            met.sort_by_key(|k| *k as u8);
+            assert_eq!(met, KeeperKind::ALL, "every heist meets each of them once");
         }
-        assert_eq!(KeeperKind::pick(0, 2), KeeperKind::Hands);
+        assert_eq!(KeeperKind::pick(0, 3), KeeperKind::Hands);
         assert_eq!(KeeperKind::pick(0, 1), KeeperKind::Stalker);
+        assert_eq!(KeeperKind::pick(0, 2), KeeperKind::Brute);
     }
 
     #[test]
@@ -1158,6 +1838,164 @@ mod tests {
         let crew = [Vec2::new(200.0, 0.0), Vec2::new(30.0, 0.0), Vec2::new(-60.0, 0.0), Vec2::new(70.0, 0.0)];
         assert_eq!(pick_marks(pos, &crew), vec![1, 3, 2]);
         assert_eq!(pick_marks(pos, &crew).len(), MAX_MARKS);
+    }
+
+    /// A vault-sized floor for the route and lane tests: 15 by 11 tiles.
+    const ROOM: Rect = Rect { min: Vec2::new(0.0, 0.0), max: Vec2::new(240.0, 176.0) };
+
+    fn on_floor(p: Vec2) -> bool {
+        let half = Vec2::splat(KEEPER_HALF);
+        p.cmpge(ROOM.min + half).all() && p.cmple(ROOM.max - half).all()
+    }
+
+    fn check_routes(pos: Vec2, crew: &[Vec2], count: usize, seed: u32) -> Vec<Vec<Vec2>> {
+        let mut rng = Rng::new(seed);
+        let routes = plan_routes(ROOM, Vec2::splat(KEEPER_HALF), pos, crew, count, &mut rng);
+        let cornered = pos.distance(ROOM.min) < 40.0;
+        if cornered {
+            // Only a quarter of the directions are open: not always room for four.
+            assert!((ROUTES..=count).contains(&routes.len()), "seed {seed}: cornered, still a few routes");
+        } else {
+            assert_eq!(routes.len(), count, "seed {seed}: as many routes as asked for");
+        }
+        for route in &routes {
+            assert!((1..=MAX_LEGS).contains(&route.len()), "seed {seed}: 1 to {MAX_LEGS} legs");
+            assert!(route.iter().all(|p| on_floor(*p) && *p == p.round()), "seed {seed}: on the floor, whole pixels");
+        }
+        for (i, a) in routes.iter().enumerate() {
+            for b in &routes[i + 1..] {
+                let (a, b) = (heading(pos, a).unwrap(), heading(pos, b).unwrap());
+                assert!(a.angle_to(b).abs() >= ROUTE_SPLIT - 1e-4, "seed {seed}: first legs head apart");
+            }
+        }
+        routes
+    }
+
+    #[test]
+    fn routes_head_apart_on_the_floor_and_one_goes_through_the_crew() {
+        let pos = Vec2::new(120.0, 88.0);
+        let crew = [Vec2::new(170.0, 90.0), Vec2::new(100.0, 140.0), Vec2::new(60.0, 40.0)];
+        let chain: Vec<Vec2> = pick_marks(pos, &crew).into_iter().map(|i| crew[i]).collect();
+        let mut firsts = Vec::new();
+        for seed in 1..200 {
+            for count in [ROUTES, ENRAGED_ROUTES] {
+                let routes = check_routes(pos, &crew, count, seed);
+                assert_eq!(routes[0], chain, "the through-the-crew chain is always one of them");
+                firsts.extend(routes[1..].iter().map(|r| r[0]));
+            }
+        }
+        firsts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        firsts.dedup();
+        assert!(firsts.len() > 50, "the other routes vary from lunge to lunge");
+        // Cornered, there's still room for a few.
+        for seed in 1..50 {
+            check_routes(Vec2::new(12.0, 12.0), &crew, ENRAGED_ROUTES, seed);
+        }
+        // Nobody about: feints only.
+        check_routes(pos, &[], ROUTES, 7);
+    }
+
+    #[test]
+    fn a_lone_pirate_cant_just_stand_aside() {
+        let pos = Vec2::new(120.0, 88.0);
+        let pirate = Vec2::new(180.0, 88.0);
+        for seed in 1..200 {
+            let routes = check_routes(pos, &[pirate], ROUTES, seed);
+            let straight = routes.iter().filter(|r| heading(pos, r).unwrap().angle_to(pirate - pos).abs() < 0.1).count();
+            assert_eq!(straight, 1, "seed {seed}: only one route sets off straight at them");
+            assert!(routes.iter().all(|r| r.contains(&pirate)), "seed {seed}: but every route comes for them");
+        }
+    }
+
+    #[test]
+    fn rampage_lanes_run_wall_to_wall() {
+        let half = Vec2::splat(KEEPER_HALF);
+        let floor = Rect { min: ROOM.min + half, max: ROOM.max - half };
+        // Mid-room at someone to the right: from the left wall to the right.
+        let [a, b] = rampage_lane(ROOM, half, Vec2::new(120.0, 88.0), Vec2::new(170.0, 88.0));
+        assert!((a - Vec2::new(floor.min.x, 88.0)).length() < 1e-3);
+        assert!((b - Vec2::new(floor.max.x, 88.0)).length() < 1e-3);
+        // From a wall, across through someone and on to the far side.
+        let from = Vec2::new(floor.min.x, 40.0);
+        let pirate = Vec2::new(150.0, 120.0);
+        let [a, b] = rampage_lane(ROOM, half, from, pirate);
+        assert!(a.distance(from) < 1e-3, "starts where it's braced");
+        let along = (b - a).normalize();
+        assert!((pirate - a).perp_dot(along).abs() < 1e-3, "through them");
+        assert!(b.distance(a) > pirate.distance(a), "and out past them");
+        assert!((b.x - floor.max.x).abs() < 1e-3 || (b.y - floor.max.y).abs() < 1e-3, "to the far wall");
+        // Someone hugging the same wall: it charges out across the room instead.
+        let [_, b] = rampage_lane(ROOM, half, from, from + Vec2::new(-4.0, 6.0));
+        assert!(b.distance(from) >= MIN_DASH);
+        assert!(on_floor(b));
+    }
+
+    #[test]
+    fn slams_land_in_front_and_reach_only_so_far() {
+        let pos = Vec2::new(100.0, 100.0);
+        let at = slam_spot(pos, Vec2::new(130.0, 100.0));
+        assert_eq!(at, pos + Vec2::new(SLAM_AHEAD, 0.0), "a little in front, toward them");
+        assert_eq!(slam_spot(pos, pos), pos + Vec2::NEG_Y * SLAM_AHEAD, "right on top of it: still somewhere");
+        assert!(slam_reaches(at, at + Vec2::new(BRUTE_SLAM_RADIUS + 5.0, 0.0), 5.0));
+        assert!(!slam_reaches(at, at + Vec2::new(BRUTE_SLAM_RADIUS + 6.0, 0.0), 5.0));
+        // Whoever close enough to set it off stands where the slam lands, unless they step out.
+        let target = pos + Vec2::new(SLAM_TRIGGER, 0.0);
+        assert!(slam_reaches(slam_spot(pos, target), target, 0.0));
+        assert!(!slam_reaches(slam_spot(pos, target), pos - Vec2::new(SLAM_AHEAD, 0.0), 4.0), "it doesn't reach behind it");
+    }
+
+    #[test]
+    fn roars_never_raise_more_than_the_cap() {
+        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (1, 2), "a lone pirate isn't swamped");
+        assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (3, 4));
+        assert_eq!(summon_count(false, 0, 5), SUMMON_CREW, "a big crew calls no more each roar");
+        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 5, MAX_SUMMONS, MAX_SUMMONS));
+        assert_eq!(summon_count(true, MAX_SUMMONS - 1, 3), 1, "shrinks near the cap");
+        for crew in 0..5 {
+            for alive in 0..MAX_SUMMONS + 3 {
+                for enraged in [false, true] {
+                    assert!(alive + summon_count(enraged, alive, crew) <= summon_cap(crew).max(alive));
+                }
+            }
+        }
+        assert_eq!(summon_count(false, MAX_SUMMONS, 3), 0);
+        assert_eq!(summon_count(true, MIN_CAP, 1), 0);
+        // Every kind of guard turns up deep down, and Silver's are lighter.
+        let mut rng = Rng::new(3);
+        let deep: Vec<EnemyKind> = (0..400).map(|_| summon_kind(&mut rng, VaultTier::Platinum)).collect();
+        for kind in [EnemyKind::SentryDrone, EnemyKind::Stalker, EnemyKind::Warden, EnemyKind::Brute] {
+            assert!(deep.contains(&kind));
+        }
+        assert!((0..400).all(|_| summon_kind(&mut rng, VaultTier::Silver) != EnemyKind::Brute));
+        assert!(!deep.contains(&EnemyKind::Herald));
+    }
+
+    #[test]
+    fn guards_appear_on_open_floor_away_from_the_crew() {
+        // The vault itself, in the middle of the room, is no place for a guard.
+        let vault = Rect::new(104.0, 72.0, 136.0, 104.0);
+        let open = |p: Vec2| ROOM.contains(p) && !vault.inflate(SUMMON_HALF).contains(p);
+        let crew = [Vec2::new(40.0, 40.0), Vec2::new(200.0, 140.0)];
+        for seed in 1..200 {
+            let mut rng = Rng::new(seed);
+            let spots = summon_spots(ROOM, &crew, ENRAGED_SUMMONS, open, &mut rng);
+            assert_eq!(spots.len(), ENRAGED_SUMMONS, "seed {seed}: room for them all");
+            for (i, p) in spots.iter().enumerate() {
+                assert!(open(*p) && *p == p.round(), "seed {seed}: on open floor, whole pixels");
+                assert!(p.cmpge(ROOM.min + SUMMON_INSET).all() && p.cmple(ROOM.max - SUMMON_INSET).all(), "seed {seed}: off the walls");
+                assert!(crew.iter().all(|c| c.distance(*p) >= SUMMON_CLEAR), "seed {seed}: well clear of the crew");
+                assert!(spots[i + 1..].iter().all(|q| q.distance(*p) >= SUMMON_SPREAD), "seed {seed}: spread out");
+            }
+        }
+        // The crew all over the room: closer in, but never on top of anyone.
+        let crowd: Vec<Vec2> = (0..5).flat_map(|x| (0..4).map(move |y| Vec2::new(24.0 + x as f32 * 48.0, 22.0 + y as f32 * 44.0))).collect();
+        let mut rng = Rng::new(9);
+        let spots = summon_spots(ROOM, &crowd, SUMMON_CREW, open, &mut rng);
+        assert!(spots.iter().all(|p| crowd.iter().all(|c| c.distance(*p) >= SUMMON_CLEAR / 2.0)));
+        // No floor to speak of, or none open: nobody.
+        assert!(summon_spots(Rect::new(0.0, 0.0, 16.0, 16.0), &[], SUMMON_CREW, |_| true, &mut rng).is_empty());
+        assert!(summon_spots(ROOM, &[], SUMMON_CREW, |_| false, &mut rng).is_empty());
+        assert_eq!(summon_spots(ROOM, &crew, 0, open, &mut rng).len(), 0);
     }
 
     #[test]

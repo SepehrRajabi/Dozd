@@ -10,7 +10,7 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
-use crate::boss::{Keeper, KeeperBeam, KeeperHand, StalkerLook};
+use crate::boss::{BruteLook, Keeper, KeeperBeam, KeeperHand, StalkerLook};
 use crate::breach::Breach;
 use crate::challenge::{Challenge, Rewards};
 use crate::class::{Ability, Boons, Laser, Loadout, PirateClass, RiotShield, Sentry};
@@ -205,6 +205,7 @@ impl Plugin for NetPlugin {
             .replicate::<KeeperHand>()
             .replicate::<KeeperBeam>()
             .replicate::<StalkerLook>()
+            .replicate::<BruteLook>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)

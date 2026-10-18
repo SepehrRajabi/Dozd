@@ -15,7 +15,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::abilities::{Active, Passive};
-use crate::boss::{Keeper, KeeperBeam};
+use crate::boss::{BRUTE_SLAM_RADIUS, BruteLook, BruteState, Keeper, KeeperBeam, KeeperHand, KeeperKind, spawn_keeper};
 use crate::breach::{Breach, BreachState, GATE_REACH};
 use crate::challenge::{ChallengeLog, Rewards};
 use crate::class::{Loadout, Loadouts, PirateClass};
@@ -30,12 +30,19 @@ use crate::vault::{VAULT_REACH, Vault};
 use crate::{GamePlugins, GameState, Rng};
 
 const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|doctor|mixed] \
-                      [--passive NAME] [--active NAME] [--bot random|idle] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
+                      [--passive NAME] [--active NAME] [--bot random|idle] [--boss hands|stalker|brute|mixed] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_early,dead,still_in,deck,decks,credits,payout,\
                           pool,bonus,bars_silver,bars_gold,bars_platinum,kills,alarm,seconds,pirates,\
                           ch_offered,ch_completed,ch_failed,reward_secs,pirate_kills,\
-                          breaches,keepers,keeper_secs,keeper_deaths";
+                          breaches,keepers,keeper_secs,keeper_deaths,\
+                          breaches_hands,breaches_stalker,breaches_brute,\
+                          keepers_hands,keepers_stalker,keepers_brute,\
+                          keeper_secs_hands,keeper_secs_stalker,keeper_secs_brute,\
+                          keeper_deaths_hands,keeper_deaths_stalker,keeper_deaths_brute";
+/// Short names of `KeeperKind::ALL`, in order, for the per-kind columns and
+/// `--boss`. Keep in sync with `KeeperKind::ALL` and the CSV header.
+const KIND_NAMES: [&str; 3] = ["hands", "stalker", "brute"];
 /// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
 /// you which columns apply — `ai_state` is enemy-only, `move_x..dash` are
 /// pirate-only, blank on the other kind.
@@ -59,6 +66,17 @@ const BEAM_CLEAR: f32 = 22.0;
 /// After this long without the keeper losing health, bots take it their guns
 /// are dry and keep switching until one bites (the pistol never runs out).
 const STALL_TIME: f32 = 2.5;
+/// Fighting the Vault Brute, bots keep about this far from it, out of its reach.
+const BRUTE_RANGE: f32 = 120.0;
+/// Closer than this to a Vault Brute, bots back straight off rather than circle.
+const BRUTE_TOO_CLOSE: f32 = 70.0;
+/// A bot this much past `BRUTE_SLAM_RADIUS` from a raised slam's spot still
+/// steps further away.
+const SLAM_CLEAR: f32 = 20.0;
+/// Fighting the Vault Brute, bots shoot a guard this close before the brute.
+const GUARD_THREAT: f32 = 110.0;
+/// Fighting the Vault Brute, bots edge away from guards this close.
+const GUARD_SPACE: f32 = 45.0;
 /// Below this share of health a bot makes for the pad for good.
 const HURT: f32 = 0.3;
 /// The crew taking the last pad out gather within this distance of it before
@@ -93,6 +111,8 @@ pub struct Config {
     pub passive: Option<Passive>,
     pub active: Option<Active>,
     pub bot: BotKind,
+    /// Every deck's vault guardian; `None` lets the kinds take turns as usual.
+    pub boss: Option<KeeperKind>,
     /// Game seconds before a run is called off.
     pub time_limit: f32,
     /// Simulation steps per game second.
@@ -118,6 +138,7 @@ impl Config {
             passive: None,
             active: None,
             bot: BotKind::Random,
+            boss: None,
             time_limit: 600.0,
             hz: 60.0,
             csv: false,
@@ -162,6 +183,16 @@ impl Config {
                         "random" => BotKind::Random,
                         "idle" => BotKind::Idle,
                         _ => return Err(bad(raw)),
+                    };
+                }
+                "--boss" => {
+                    let raw = value()?;
+                    config.boss = match raw.as_str() {
+                        "mixed" => None,
+                        name => {
+                            let i = KIND_NAMES.iter().position(|&n| n == name).ok_or_else(|| bad(raw))?;
+                            Some(KeeperKind::ALL[i])
+                        }
                     };
                 }
                 "--time" => {
@@ -228,13 +259,27 @@ struct Batch {
     keeper_secs: f32,
     /// Pirates who went down this run while locked in with a keeper.
     keeper_deaths: u32,
+    /// The same four, split by the kind of keeper (indexed as `KeeperKind::ALL`).
+    kind_breaches: [u32; 3],
+    kind_keepers: [u32; 3],
+    kind_secs: [f32; 3],
+    kind_deaths: [u32; 3],
     /// Locked in with a keeper as of the last tick.
     fighting: bool,
+    /// The kind of keeper the crew is (or was last) locked in with.
+    kind: Option<usize>,
     /// Pirates down as of the last tick.
     down: usize,
     /// Over the whole batch, for the summary.
     total_breaches: u32,
     total_keepers: u32,
+    total_kind_breaches: [u32; 3],
+    total_kind_keepers: [u32; 3],
+}
+
+/// Where `kind` sits in `KeeperKind::ALL` (and the per-kind columns).
+fn kind_index(kind: KeeperKind) -> usize {
+    KeeperKind::ALL.iter().position(|&k| k == kind).unwrap_or(0)
 }
 
 /// Drives the bots; reseeded every run so a seed replays exactly.
@@ -372,7 +417,7 @@ pub fn run(config: Config) {
     .init_resource::<BotRng>()
     .add_observer(count_kills)
     .add_systems(Startup, start_batch)
-    .add_systems(PreUpdate, drive_bots.run_if(in_state(GameState::Playing)))
+    .add_systems(PreUpdate, (force_boss, drive_bots).chain().run_if(in_state(GameState::Playing)))
     .add_systems(Update, (tally_challenges, tally_breaches).run_if(in_state(GameState::Playing)))
     .add_systems(Last, next_run);
 
@@ -425,24 +470,64 @@ fn tally_breaches(
     mut batch: ResMut<Batch>,
     breaches: Query<&Breach>,
     players: Query<&Health, With<Player>>,
+    keepers: Query<&Keeper>,
 ) {
     let fighting = breaches.iter().any(|b| b.state == BreachState::Fight);
     let down = players.iter().filter(|h| h.is_dead()).count();
     if fighting && !batch.fighting {
         batch.breaches += 1;
+        // One keeper per deck; its body goes once it falls, so remember its kind.
+        batch.kind = keepers.iter().next().map(|k| kind_index(k.kind));
+        if let Some(k) = batch.kind {
+            batch.kind_breaches[k] += 1;
+        }
     }
+    let kind = batch.kind;
     // The keeper going down is what opens the gate; a wipe leaves it locked.
     if batch.fighting && !fighting && breaches.iter().any(Breach::is_open) {
         batch.keepers += 1;
+        if let Some(k) = kind {
+            batch.kind_keepers[k] += 1;
+        }
     }
     if batch.fighting || fighting {
-        batch.keeper_deaths += down.saturating_sub(batch.down) as u32;
+        let lost = down.saturating_sub(batch.down) as u32;
+        batch.keeper_deaths += lost;
+        if let Some(k) = kind {
+            batch.kind_deaths[k] += lost;
+        }
     }
     if fighting {
         batch.keeper_secs += time.delta_secs();
+        if let Some(k) = kind {
+            batch.kind_secs[k] += time.delta_secs();
+        }
     }
     batch.fighting = fighting;
     batch.down = down;
+}
+
+/// With `--boss`, swaps each deck's sleeping guardian for one of the kind asked
+/// for, at the same spot, before anyone gets near it.
+fn force_boss(
+    mut commands: Commands,
+    config: Res<Config>,
+    heist: Res<Heist>,
+    keepers: Query<(Entity, &Keeper, &Transform)>,
+    hands: Query<Entity, With<KeeperHand>>,
+) {
+    let Some(kind) = config.boss else { return };
+    for (entity, keeper, transform) in &keepers {
+        if keeper.kind == kind || keeper.awake {
+            continue;
+        }
+        commands.entity(entity).despawn();
+        // Only the vault keeper has hands, and there's one guardian per deck.
+        for hand in &hands {
+            commands.entity(hand).despawn();
+        }
+        spawn_keeper(&mut commands, transform.translation.truncate(), heist.deck, kind);
+    }
 }
 
 fn drive_bots(
@@ -457,7 +542,7 @@ fn drive_bots(
     heist: Res<Heist>,
     vaults: Query<&Vault>,
     breaches: Query<&Breach>,
-    keepers: Query<(&Transform, &Health), With<Keeper>>,
+    keepers: Query<(&Transform, &Health, &Keeper, Option<&BruteLook>)>,
     beams: Query<&KeeperBeam>,
     mut nav: Local<Nav>,
 ) {
@@ -516,13 +601,31 @@ fn drive_bots(
     // The whole crew stops looting at once, so they all make for the lift together.
     let looting = vaults.iter().any(|v| v.bars > 0) && nav.open_for.is_some_and(|t| t < LOOT_TIME);
     let give_up_lift = nav.open_for.unwrap_or(nav.since) >= DECK_TIME;
-    let keeper = keepers.iter().find(|(_, h)| !h.is_dead());
-    if let Some((_, hp)) = keeper {
-        nav.stalled = if nav.keeper_hp.is_none_or(|old| hp.current < old) { 0.0 } else { nav.stalled + dt };
+    let keeper = keepers.iter().find(|(_, h, ..)| !h.is_dead());
+    // Against the Vault Brute: where it is, and where a raised slam will land.
+    let brute = keeper.filter(|(_, _, k, _)| k.kind == KeeperKind::Brute).map(|(t, _, _, look)| {
+        let slam = look.filter(|l| l.state == BruteState::WindUp).map(|l| l.at);
+        (t.translation.truncate(), slam)
+    });
+    let guards: Vec<Vec2> = enemies
+        .iter()
+        .filter(|(_, _, h, team, _)| **team == Team::Enemy && !h.is_dead())
+        .map(|(_, t, ..)| t.translation.truncate())
+        .collect();
+    // Guards near the brute are what the crew is shooting, not a sign their guns are dry.
+    let busy = brute.is_some_and(|(b, _)| guards.iter().any(|g| g.distance(b) <= ENGAGE * 2.0));
+    if let Some((_, hp, ..)) = keeper {
+        nav.stalled = if nav.keeper_hp.is_none_or(|old| hp.current < old) {
+            0.0
+        } else if busy {
+            nav.stalled
+        } else {
+            nav.stalled + dt
+        };
         nav.keeper_hp = Some(hp.current);
     }
     let stalled = fighting && nav.stalled >= STALL_TIME;
-    let keeper = keeper.map(|(t, _)| t.translation.truncate());
+    let keeper = keeper.map(|(t, ..)| t.translation.truncate());
     // Whether everyone meaning to leave together is at the pad (or has given up waiting).
     let gathered = give_up_lift
         || nav.pad.as_ref().is_none_or(|pad| {
@@ -567,15 +670,71 @@ fn drive_bots(
             }
             bot.bail |= health.current < health.max * HURT;
 
-            let nearest = enemies
+            let nearest = guards
                 .iter()
-                .filter(|(_, _, h, team, _)| **team == Team::Enemy && !h.is_dead())
-                .map(|(_, t, ..)| t.translation.truncate())
+                .copied()
                 .filter(|e| e.distance(pos) <= ENGAGE)
                 .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
             // Locked in, the keeper is the target from anywhere in its room.
             let target = if fighting { keeper.or(nearest) } else { nearest };
 
+            if let Some((b, slam)) = brute.filter(|_| fighting) {
+                // Kites the brute: circles well out of its reach, backs off
+                // when it gets close, steps out of a raised slam, and shoots
+                // its guards first when they come near.
+                let out = (pos - b).normalize_or(Vec2::X);
+                let dist = pos.distance(b);
+                let mut movement = if dist < BRUTE_TOO_CLOSE {
+                    out
+                } else {
+                    let radial = ((BRUTE_RANGE - dist) / 40.0).clamp(-1.0, 1.0);
+                    (out * radial + out.perp() * bot.orbit).normalize_or_zero()
+                };
+                for g in guards.iter().filter(|g| g.distance(pos) < GUARD_SPACE) {
+                    movement += (pos - *g).normalize_or_zero() * 0.5;
+                }
+                let mut dodging = false;
+                if let Some(at) = slam.filter(|at| at.distance(pos) < BRUTE_SLAM_RADIUS + SLAM_CLEAR) {
+                    movement = (pos - at).normalize_or(out);
+                    dodging = true;
+                }
+                let mut movement = movement.normalize_or_zero();
+                // Blocked (backed into a wall or corner): slide whichever open
+                // way gains the most room from the brute and its slam.
+                if movement != Vec2::ZERO && grid.is_solid_at(pos + movement * TILE) {
+                    let room = |d: Vec2| {
+                        let to = pos + d * TILE;
+                        to.distance(b) + slam.map_or(0.0, |at| to.distance(at))
+                    };
+                    let open = (0..16)
+                        .map(|i| Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0))
+                        .filter(|&d| !grid.is_solid_at(pos + d * TILE))
+                        .max_by(|&x, &y| room(x).total_cmp(&room(y)));
+                    movement = open.unwrap_or(movement);
+                    // Circling into a wall: circle the other way from now on.
+                    if !dodging && dist >= BRUTE_TOO_CLOSE {
+                        bot.orbit = -bot.orbit;
+                    }
+                }
+                dodging |= dist < BRUTE_TOO_CLOSE;
+                let aim = nearest.filter(|g| g.distance(pos) <= GUARD_THREAT).unwrap_or(b);
+                break 'input PlayerInput {
+                    movement,
+                    aim,
+                    fire: true,
+                    fire_pressed: true,
+                    dash: movement != Vec2::ZERO && rng.unit() < if dodging { 0.08 } else { 0.01 },
+                    reload: rng.unit() < 0.002,
+                    slot: (rng.unit() < if stalled { 0.02 } else { 0.004 }).then(|| (rng.unit() * 4.0) as u8 % 4),
+                    cycle: 0,
+                    interact: false,
+                    interact_held: false,
+                    ability: rng.unit() < 0.02,
+                    accept: true,
+                    decline: false,
+                    restart: false,
+                };
+            }
             if fighting {
                 // Circles the keeper at range, stepping out of any laser line.
                 let mut movement = keeper.map_or(Vec2::ZERO, |k| {
@@ -806,12 +965,20 @@ fn next_run(
     let ending = if batch.timed_out { "TIMEOUT" } else { "OVER" };
     let seconds = batch.ticks as f32 / config.hz;
     let [silver, gold, platinum] = batch.bars;
+    let join = |values: [String; 3]| values.join(",");
+    let per_kind = [
+        join(batch.kind_breaches.map(|n| n.to_string())),
+        join(batch.kind_keepers.map(|n| n.to_string())),
+        join(batch.kind_secs.map(|t| format!("{t:.1}"))),
+        join(batch.kind_deaths.map(|n| n.to_string())),
+    ]
+    .join(",");
     if config.csv {
         println!(
             "{},{},{},{ending},{extracted},{left},{dead},{active},{},{DECKS},{haul},{paid},{},{},\
              {silver},{gold},{platinum},{},{:.1},{seconds:.1},{pirates},\
              {ch_offered},{ch_completed},{ch_failed},{reward_secs:.1},{pirate_kills},\
-             {breaches},{keepers},{keeper_secs:.1},{keeper_deaths}",
+             {breaches},{keepers},{keeper_secs:.1},{keeper_deaths},{per_kind}",
             config.class.map_or("mixed", PirateClass::name),
             batch.run + 1,
             config.run_seed(batch.run),
@@ -849,6 +1016,15 @@ fn next_run(
     batch.reward_secs = 0.0;
     batch.total_breaches += breaches;
     batch.total_keepers += keepers;
+    for k in 0..KIND_NAMES.len() {
+        batch.total_kind_breaches[k] += batch.kind_breaches[k];
+        batch.total_kind_keepers[k] += batch.kind_keepers[k];
+    }
+    batch.kind_breaches = [0; 3];
+    batch.kind_keepers = [0; 3];
+    batch.kind_secs = [0.0; 3];
+    batch.kind_deaths = [0; 3];
+    batch.kind = None;
     batch.breaches = 0;
     batch.keepers = 0;
     batch.keeper_secs = 0.0;
@@ -869,12 +1045,18 @@ fn next_run(
     let wall = batch.started.map_or(0.0, |s| s.elapsed().as_secs_f64());
     let game = batch.total_ticks as f64 / config.hz as f64;
     let summary = format!(
-        "done: {} run(s), {} with the crew out, {} keeper(s) killed in {} breach(es); \
+        "done: {} run(s), {} with the crew out, {} keeper(s) killed in {} breach(es) ({}); \
          {:.0}s of game in {:.2}s ({:.0}x real time, {:.0} ticks/s)",
         config.runs,
         batch.extracted,
         batch.total_keepers,
         batch.total_breaches,
+        KIND_NAMES
+            .iter()
+            .enumerate()
+            .map(|(k, name)| format!("{name} {}/{}", batch.total_kind_keepers[k], batch.total_kind_breaches[k]))
+            .collect::<Vec<_>>()
+            .join(", "),
         game,
         wall,
         game / wall.max(1e-9),

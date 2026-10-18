@@ -27,23 +27,34 @@ down, and the call lapses after 20 s). Once all have said yes, the whole crew
 is let in together and the gate locks behind you until the boss is down. You
 can't see the boss from outside its room.
 
-Two kinds of boss take turns down the decks, so every heist meets both:
+Three kinds of boss take turns down the decks, so every heist meets each once:
 
 - **Vault Keeper:** fights with two floating hands. Each hand either sweeps a
   laser across where you stand, after a warning line shows where it'll burn, or
   gathers a nova orb in its palm and hurls it, arcing at whoever it passes and
   bursting on impact. Enraged, both hands attack at once and faster, lasers
   sweep wider and novas come in threes.
-- **Vault Stalker:** a hulking stalker. Every 3-4 s it crouches and marks up to
-  three pirates, then lunges through them one after another, hitting hard and
-  throwing them aside. It stands spent for a moment after. Spread out, and
-  sidestep once the marks show. Enraged, it lunges sooner and winds up quicker.
+- **Vault Stalker:** a hulking stalker. Every 2-3 s it crouches and lays out
+  three possible lunge routes (four enraged), each through up to three pirates
+  or feinting into open floor first. Only when it goes does it pick one, at
+  random, and lunge along it, hitting hard and throwing pirates aside. Now and
+  then it rampages instead: it rears up, then dashes wall to wall across the
+  room four times (six enraged), bracing at the wall between dashes with the
+  next lane showing. A dash does massive damage. It stands spent for a moment
+  after either attack. Step off every route it shows, and out of the lane.
+
+- **Vault Brute:** a beefy, armoured brute with the most health of the three.
+  It only fights up close: it plods after you, raises its fists over a spot
+  just in front of it, then slams it, hitting everyone in the circle hard.
+  Every 12 s (9 s enraged, and once as it enrages) it roars and calls in
+  guards to fight for it, more the bigger the crew; their spots glow while it
+  roars. Summoned guards drop nothing, and they all fall with the Brute.
 
 A boss has a lot of health, more for a bigger crew, and enrages below half
 health. Each one further down has more health and hits harder, and the last
 deck's is deliberately overtuned. A raised riot shield blocks all of their
-attacks, lasers, orbs, arcs and blasts alike, and stops a lunge dead,
-staggering the stalker. Hacks, Blackout and shock fields don't touch them.
+attacks, lasers, orbs, arcs, blasts and slams alike, and stops a lunge dead,
+staggering the stalker; it ends a rampage too. Hacks, Blackout and shock fields don't touch them.
 When a boss falls it drops a bounty, some ammo and a Nano Patch, and the gate
 opens for good.
 
@@ -75,7 +86,9 @@ About 10 s after the crew reaches a deck, the station may set challenges. Each
 has a goal, lasts for the whole heist, one deck or a set time, and is for the
 whole crew or one class. Completing it earns a reward, for whoever completed
 it or for the whole crew. Open challenges and running rewards show under the
-top-left panel. Each disappears once it's completed or failed.
+top-left panel. Each disappears once it's completed or failed. A streak's
+clock starts with its first kill: if it runs out short of the goal, the
+challenge fails.
 
 | Challenge | For | Goal | Lasts | Reward |
 |---|---|---|---|---|
