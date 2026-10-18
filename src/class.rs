@@ -20,6 +20,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, LIFESTEAL_CHANCE, LIFESTEAL_SHARE, Passive, RICOCHET_CHANCE};
+use crate::boss::Keeper;
 use crate::challenge::Rewards;
 use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
@@ -970,7 +971,7 @@ fn fire_lasers(
     mut crew_hits: MessageWriter<CrewHit>,
     players: Query<(&Player, &Health, &Transform, &Aim, &Boons, &Rewards)>,
     mut lasers: Query<(Entity, &mut Laser, &mut Transform), Without<Player>>,
-    mut enemies: Query<(&Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>, Without<Laser>)>,
+    mut enemies: Query<(&Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (Or<(With<Enemy>, With<Keeper>)>, Without<Player>, Without<Laser>)>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut laser, mut transform) in &mut lasers {
@@ -1025,7 +1026,7 @@ fn run_sentries(
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
     mut sentries: Query<(Entity, &mut Sentry, &Health, &Transform)>,
-    enemies: Query<(&Transform, &Health, &Hurtbox, &Team), With<Enemy>>,
+    enemies: Query<(&Transform, &Health, &Hurtbox, &Team), Or<(With<Enemy>, With<Keeper>)>>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut sentry, health, transform) in &mut sentries {

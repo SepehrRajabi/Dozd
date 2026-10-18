@@ -167,6 +167,8 @@ pub struct Controls {
     pub interact: bool,
     pub interact_held: bool,
     pub ability: bool,
+    pub accept: bool,
+    pub decline: bool,
 }
 
 impl Controls {
@@ -184,6 +186,8 @@ impl Controls {
         self.interact |= input.interact;
         self.interact_held = input.interact_held;
         self.ability |= input.ability;
+        self.accept |= input.accept;
+        self.decline |= input.decline;
     }
 }
 
@@ -466,6 +470,8 @@ fn gather_input(
         interact: keys.just_pressed(KeyCode::KeyE),
         interact_held: keys.pressed(KeyCode::KeyE),
         ability: keys.just_pressed(KeyCode::KeyQ),
+        accept: keys.just_pressed(KeyCode::KeyY),
+        decline: keys.just_pressed(KeyCode::KeyN),
         restart: keys.just_pressed(KeyCode::Enter),
     });
 }
@@ -504,6 +510,8 @@ fn clear_input_edges(mut controls: Query<&mut Controls>) {
         c.cycle = 0;
         c.interact = false;
         c.ability = false;
+        c.accept = false;
+        c.decline = false;
     }
 }
 

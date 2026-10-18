@@ -1425,6 +1425,353 @@ def station_preview(floors, faces, caps, lift, tiles):
     return out
 
 
+# --------------------------------------------------------------------------
+# The vault keeper and its gate. The keeper is drawn in near-neutral steel so
+# the game can tint it by the vault's tier; only its eye and core are coloured.
+# --------------------------------------------------------------------------
+
+CLEAR = (0, 0, 0, 0)
+KEEPER_METAL = rgb(150, 156, 172)
+KEEPER_EYE = rgb(235, 70, 255)
+KEEPER_CORE = rgb(255, 120, 255)
+
+
+def canvas(w, h):
+    return [[CLEAR for _ in range(w)] for _ in range(h)]
+
+
+def outlined(px):
+    """Rings every opaque pixel's empty neighbours with the outline colour."""
+    h, w = len(px), len(px[0])
+    out = [row[:] for row in px]
+    for y in range(h):
+        for x in range(w):
+            if px[y][x][3]:
+                continue
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and px[ny][nx][3] and px[ny][nx] != OUTLINE:
+                    out[y][x] = OUTLINE
+                    break
+    return out
+
+
+def fill_ellipse(px, cx, cy, rx, ry, color_at):
+    for y in range(len(px)):
+        for x in range(len(px[0])):
+            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+            if d <= 1.0:
+                c = color_at(x, y, d)
+                if c:
+                    px[y][x] = c
+
+
+def metal_at(base, lx=-0.6, ly=-0.8, cx=0.0, cy=0.0, rx=1.0, ry=1.0, seed=0):
+    """Shades a rounded surface lit from the top left, with a little grain."""
+    def at(x, y, d):
+        nx, ny = (x - cx) / rx, (y - cy) / ry
+        light = -(nx * lx + ny * ly)
+        rim = -34 if d > 0.82 else 0
+        return shade(base, light * 34 + rim + (noise(x, y, seed) - 0.5) * 8)
+    return at
+
+
+def stamp(px, part):
+    """Lays an outlined `part` over `px`, so each piece reads on its own."""
+    for y, row in enumerate(outlined(part)):
+        for x, c in enumerate(row):
+            if c[3]:
+                px[y][x] = c
+
+
+def keeper_body():
+    """The vault keeper, 40x40: a horned, domed guardian with a single great
+    eye, heavy pauldrons and a vault dial in its chest, hovering on a thruster.
+    It has no arms: its two hands float free (see `KEEPER_HAND`)."""
+    n = 40
+    px = canvas(n, n)
+    m = KEEPER_METAL
+
+    # Thruster skirt and its glow, under everything.
+    part = canvas(n, n)
+    for y in range(30, 37):
+        half = 8 - (y - 30)
+        for x in range(20 - half, 20 + half):
+            part[y][x] = shade(m, -50 - (y - 30) * 6 + (16 if x < 20 else 0))
+    for x in range(14, 26, 3):
+        for y in range(31, 34):
+            if part[y][x][3]:
+                part[y][x] = shade(m, -95)
+    for x in range(16, 24):
+        part[36][x] = KEEPER_CORE if 17 < x < 22 else shade(KEEPER_CORE, -90)
+    stamp(px, part)
+    px[38][19] = px[38][20] = shade(KEEPER_CORE, -60)
+
+    # Torso: a broad barrel, darkening toward its underside.
+    part = canvas(n, n)
+    lit = metal_at(m, cx=19.5, cy=22.0, rx=11.0, ry=9.5, seed=71)
+    fill_ellipse(part, 19.5, 22.0, 11.0, 9.5, lambda x, y, d: shade(lit(x, y, d), -max(0, y - 22) * 4))
+    for x in range(9, 31):
+        if part[27][x][3]:
+            part[27][x] = shade(part[27][x], -34)
+    for y in range(13, 31):
+        for x in (13, 26):
+            if part[y][x][3]:
+                part[y][x] = shade(part[y][x], -26)
+    for x, y in ((11, 24), (28, 24), (15, 29), (24, 29)):
+        rivet(part, x, y)
+    # Chest: the vault dial, a ring of spokes around a glowing core.
+    dark = shade(m, -80)
+    fill_ellipse(part, 19.5, 21.5, 4.6, 4.6, lambda x, y, d: dark if d > 0.6 else shade(m, -30))
+    for x, y in ((19, 17), (20, 17), (19, 26), (20, 26), (15, 21), (15, 22), (24, 21), (24, 22)):
+        part[y][x] = shade(m, 36)
+    fill_ellipse(part, 19.5, 21.5, 2.0, 2.0, lambda x, y, d: KEEPER_CORE if d > 0.3 else WHITE)
+    stamp(px, part)
+
+    # Pauldrons: heavy shells over where shoulders would be, amber-pipped.
+    for cx in (7.0, 32.0):
+        part = canvas(n, n)
+        fill_ellipse(part, cx, 15.5, 6.5, 5.5, metal_at(shade(m, 12), cx=cx, cy=15.5, rx=6.5, ry=5.5, seed=72))
+        for x in range(int(cx) - 5, int(cx) + 6):
+            if part[18][x][3]:
+                part[18][x] = shade(m, -56)
+            if part[19][x][3]:
+                part[19][x] = shade(m, -30)
+        for dx in (-3, 0, 3):
+            part[14][int(cx) + dx] = AMBER
+            part[15][int(cx) + dx] = shade(AMBER, -110)
+        stamp(px, part)
+
+    # Horns sweeping up and out from the head.
+    part = canvas(n, n)
+    for side in (-1, 1):
+        for i, (dx, dy) in enumerate(((5, 6), (6, 5), (7, 4), (8, 3), (8, 2), (9, 1))):
+            x = int(19.5 + side * dx + (0.5 if side > 0 else -0.5))
+            part[dy][x] = shade(m, 30 - i * 12)
+            part[dy + 1][x] = shade(m, -30 - i * 6)
+    stamp(px, part)
+
+    # Head: a dome sunk between the pauldrons, its visor a scowling V.
+    part = canvas(n, n)
+    fill_ellipse(part, 19.5, 9.5, 7.0, 6.5, metal_at(shade(m, 6), cx=19.5, cy=9.5, rx=7.0, ry=6.5, seed=73))
+    for x in range(13, 27):
+        brow = abs(x - 19.5) // 3
+        for y in range(int(8 + 2 - brow), int(12 - brow)):
+            if part[y][x][3]:
+                part[y][x] = rgb(22, 18, 30)
+    for x in range(16, 24):
+        part[10][x] = KEEPER_EYE if 16 < x < 23 else shade(KEEPER_EYE, -80)
+    part[9][18] = part[9][19] = part[9][20] = part[9][21] = shade(KEEPER_EYE, -50)
+    part[11][19] = part[11][20] = shade(KEEPER_EYE, -90)
+    part[10][19] = part[10][20] = WHITE
+    for y in range(3, 8):
+        part[y][19] = shade(m, 44)
+        part[y][20] = shade(m, -24)
+    stamp(px, part)
+    return px
+
+
+# One of the keeper's floating hands, drawn as the right hand with its palm
+# facing right (the game turns it to its aim and mirrors it for the left): an
+# armoured cuff, the knuckle plate, and two great claws curled round a palm
+# emitter.
+KEEPER_HAND = (
+    [
+        "................",
+        "......kkkk......",
+        ".....kHHHHkk....",
+        "....kHMMMMHWk...",
+        "...kHMMMMmkkWk..",
+        ".kkkMHMMmk..kWk.",
+        "kCHkMMMMk.kk.k..",
+        "kCMkMMMmkkPPk...",
+        "kCMkMMMmkPwPPk..",
+        "kCmkMMMmkkPPk...",
+        "kCmkMMMMk.kk.k..",
+        ".kkkMHMMmk..kWk.",
+        "...kMMMMMmkkWk..",
+        "....kmMMMMmWk...",
+        ".....kmmmmkk....",
+        "......kkkk......",
+    ],
+    {
+        "H": shade(KEEPER_METAL, 40),
+        "M": KEEPER_METAL,
+        "m": shade(KEEPER_METAL, -50),
+        "W": rgb(232, 236, 248),
+        "C": shade(KEEPER_CORE, -70),
+        "P": KEEPER_CORE,
+    },
+)
+
+
+# The vault stalker: the deck's stalker grown monstrous, drawn like the keeper
+# in near-neutral chitin and bone so the game can tint it by the vault's tier;
+# only its eyes and the crack in its gut glow.
+STALKER_CHITIN = rgb(150, 144, 164)
+STALKER_BONE = rgb(222, 214, 196)
+STALKER_EYE = rgb(140, 255, 120)
+
+
+def thick_curve(px, points, r0, r1, color_at, steps=80):
+    """Sweeps a disc shrinking from `r0` to `r1` along a quadratic bezier."""
+    (ax, ay), (bx, by), (cx, cy) = points
+    for i in range(steps + 1):
+        t = i / steps
+        x = (1 - t) ** 2 * ax + 2 * (1 - t) * t * bx + t * t * cx
+        y = (1 - t) ** 2 * ay + 2 * (1 - t) * t * by + t * t * cy
+        r = r0 + (r1 - r0) * t
+        for py in range(int(y - r) - 1, int(y + r) + 2):
+            for qx in range(int(x - r) - 1, int(x + r) + 2):
+                if 0 <= qx < len(px[0]) and 0 <= py < len(px) and (qx - x) ** 2 + (py - y) ** 2 <= r * r:
+                    px[py][qx] = color_at(qx, py, t, (qx - x) / max(r, 0.5))
+
+
+def stalker_boss():
+    """The vault stalker, 40x40: the deck's stalker grown monstrous. A hunched
+    slab of armoured muscle with plated shoulders, a ridged head, four legs and
+    two great bone scythes, its eyes and the crack down its gut glowing."""
+    n = 40
+    px = canvas(n, n)
+    m = STALKER_CHITIN
+    bone = STALKER_BONE
+
+    # Four thick legs splayed under the body: hip, knee, foot.
+    for side in (-1, 1):
+        for hip, knee, foot in (((4, 27), (9, 32), (8, 38)), ((7, 25), (14, 30), (14, 37))):
+            part = canvas(n, n)
+            pts = [(19.5 + side * hip[0], hip[1]), (19.5 + side * knee[0], knee[1]), (19.5 + side * foot[0], foot[1])]
+            thick_curve(part, pts, 2.2, 1.0, lambda x, y, t, s: shade(m, -40 - t * 30 - s * side * 14))
+            stamp(px, part)
+
+    # Torso and gut: a heavy barrel, plated in bands like the stalker's belly.
+    part = canvas(n, n)
+    lit = metal_at(m, cx=19.5, cy=23.0, rx=9.0, ry=9.0, seed=81)
+    fill_ellipse(part, 19.5, 23.0, 9.0, 9.0, lambda x, y, d: shade(lit(x, y, d), -max(0, y - 23) * 3))
+    for y in (21, 25, 29):
+        for x in range(10, 30):
+            if part[y][x][3]:
+                part[y][x] = shade(part[y][x], -46)
+    for x in range(10, 30):
+        if part[17][x][3]:
+            part[17][x] = shade(part[17][x], -30)
+    # A glowing crack down the middle of the gut.
+    for y, x in ((19, 20), (20, 19), (21, 19), (22, 20), (23, 20), (24, 19), (26, 19), (27, 20)):
+        part[y][x] = STALKER_EYE if y % 3 else shade(STALKER_EYE, -70)
+    stamp(px, part)
+
+    # Scythe arms: a thick forearm off each shoulder, sweeping out and down
+    # into a long hooked blade of bone.
+    for side in (-1, 1):
+        part = canvas(n, n)
+        pts = [(19.5 + side * 11, 15), (19.5 + side * 19, 18), (19.5 + side * 16, 25)]
+        thick_curve(part, pts, 3.2, 2.2, lambda x, y, t, s: shade(m, -10 - t * 30 - s * side * 18))
+        stamp(px, part)
+        part = canvas(n, n)
+        pts = [(19.5 + side * 16, 24), (19.5 + side * 20, 32), (19.5 + side * 11, 38)]
+        thick_curve(part, pts, 2.2, 0.4, lambda x, y, t, s: shade(bone, 20 - t * 40 - s * side * 30))
+        stamp(px, part)
+        # Spikes off the elbow.
+        part = canvas(n, n)
+        for i, (dx, dy) in enumerate(((17, 15), (18, 14), (18, 13))):
+            part[dy][int(19.5 + side * dx + (0.5 if side > 0 else -0.5))] = shade(bone, -i * 20)
+        stamp(px, part)
+
+    # Shoulders: two great humps of muscle under armour plates, spiked.
+    for side in (-1, 1):
+        cx = 19.5 + side * 9.5
+        part = canvas(n, n)
+        fill_ellipse(part, cx, 14.0, 6.5, 5.5, metal_at(shade(m, 10), cx=cx, cy=14.0, rx=6.5, ry=5.5, seed=82))
+        for x in range(int(cx) - 6, int(cx) + 7):
+            if 0 <= x < n and part[16][x][3]:
+                part[16][x] = shade(m, -50)
+        for i, (dx, dy) in enumerate(((2, 9), (3, 8), (4, 7), (5, 6))):
+            part[dy][int(cx + side * dx)] = shade(bone, -i * 18)
+        # Overlapping plates, their edges lit.
+        for x in range(int(cx) - 4, int(cx) + 5):
+            y = 12 + (abs(x - cx) > 3)
+            if part[y][x][3]:
+                part[y][x] = shade(m, -44)
+                part[y - 1][x] = shade(m, 36)
+        stamp(px, part)
+
+    # Head: low and sunk between the shoulders, ridged on top, with two great
+    # eyes and two small ones over its mandibles.
+    part = canvas(n, n)
+    fill_ellipse(part, 19.5, 9.5, 5.5, 5.0, metal_at(shade(m, 4), cx=19.5, cy=9.5, rx=5.5, ry=5.0, seed=83))
+    for y in range(4, 10):
+        part[y][19] = shade(m, 40)
+        part[y][20] = shade(m, -30)
+    # A scowling brow over each great eye.
+    for x, y in ((15, 7), (16, 7), (17, 8), (18, 8), (24, 7), (23, 7), (22, 8), (21, 8)):
+        part[y][x] = rgb(22, 18, 30)
+    for x, y in ((16, 8), (16, 9), (17, 9), (23, 8), (23, 9), (22, 9)):
+        part[y][x] = STALKER_EYE
+    part[9][17] = part[9][22] = WHITE
+    part[10][16] = part[10][17] = part[10][22] = part[10][23] = shade(STALKER_EYE, -90)
+    part[11][18] = part[11][21] = shade(STALKER_EYE, -30)
+    for x in range(16, 24):
+        part[13][x] = rgb(22, 18, 30)
+    stamp(px, part)
+    # Mandibles.
+    part = canvas(n, n)
+    for side in (-1, 1):
+        for i, (dx, dy) in enumerate(((2, 14), (3, 15), (3, 16), (2, 17))):
+            part[dy][int(19.5 + side * dx + (0.5 if side > 0 else -0.5))] = shade(bone, -i * 20)
+    stamp(px, part)
+    return px
+
+
+def gate_tiles():
+    """The vault's gate, 32x16 across two wall tiles: a sealed bulkhead with
+    hazard-striped leaves meeting at a locked seam, and the same frame once
+    open, its leaves drawn back into the walls."""
+    w, h = SIZE * 2, SIZE
+    frame = rgb(46, 50, 64)
+    leaf = rgb(78, 84, 102)
+    sealed = [[shade(frame, (noise(x, y, 81) - 0.5) * 6) for x in range(w)] for y in range(h)]
+    bevel(sealed, 0, 0, w - 1, h - 1, rgb(104, 114, 142), rgb(16, 18, 26))
+    for y in range(2, h - 2):
+        for x in range(2, w - 2):
+            sealed[y][x] = shade(leaf, (noise(x, y, 82) - 0.5) * 6)
+    # Hazard stripes along both edges of the leaves.
+    for y in list(range(2, 5)) + list(range(h - 5, h - 2)):
+        for x in range(2, w - 2):
+            stripe = ((x + y) // 2) % 2 == 0
+            sealed[y][x] = rgb(214, 170, 40) if stripe else rgb(34, 32, 30)
+    bevel(sealed, 2, 2, 15, h - 3, shade(leaf, 26), shade(leaf, -30))
+    bevel(sealed, 16, 2, w - 3, h - 3, shade(leaf, 26), shade(leaf, -30))
+    # The seam and the lock housing over it.
+    for y in range(2, h - 2):
+        sealed[y][15] = rgb(14, 15, 20)
+        sealed[y][16] = rgb(14, 15, 20)
+    for y in range(5, 11):
+        for x in range(12, 20):
+            edge = x in (12, 19) or y in (5, 10)
+            sealed[y][x] = rgb(24, 26, 34) if edge else rgb(56, 60, 76)
+    for x, y in ((14, 7), (17, 7), (14, 8), (17, 8)):
+        sealed[y][x] = rgb(255, 50, 60)
+    sealed[7][15] = sealed[8][16] = rgb(120, 20, 30)
+    sealed[7][16] = sealed[8][15] = rgb(120, 20, 30)
+    # Heavy bolts on each leaf.
+    for x in (5, 9, 22, 26):
+        rivet(sealed, x, 7)
+
+    opened = [[shade(rgb(26, 28, 38), (noise(x, y, 83) - 0.5) * 6) for x in range(w)] for y in range(h)]
+    bevel(opened, 0, 0, w - 1, h - 1, rgb(104, 114, 142), rgb(16, 18, 26))
+    for y in range(1, h - 1):
+        for x in list(range(1, 4)) + list(range(w - 4, w - 1)):
+            opened[y][x] = shade(leaf, -10 + (16 if x in (1, w - 4) else 0))
+        # Floor runners the leaves slide along.
+        opened[y][4] = opened[y][w - 5] = rgb(16, 18, 24)
+    for x in range(4, w - 4):
+        opened[1][x] = rgb(214, 170, 40) if (x // 2) % 2 == 0 else rgb(34, 32, 30)
+        opened[h - 2][x] = rgb(214, 170, 40) if (x // 2) % 2 == 0 else rgb(34, 32, 30)
+    for x in (2, w - 3):
+        opened[7][x] = opened[8][x] = rgb(80, 255, 120)
+    return sealed, opened
+
+
 def shadow():
     px = blank((0, 0, 0, 0))
     cx, cy, rx, ry = 7.5, 13.5, 6.0, 2.0
@@ -1538,6 +1885,16 @@ def main():
         write_png(os.path.join(ROOT, "perks", f"{name}.png"), px)
     write_png(os.path.join(ROOT, "fx", "shock_ring.png"), shock_ring())
 
+    keeper = keeper_body()
+    write_png(os.path.join(ROOT, "boss", "keeper.png"), keeper)
+    hand = from_ascii("hand", *KEEPER_HAND)
+    write_png(os.path.join(ROOT, "boss", "hand.png"), hand)
+    stalker = stalker_boss()
+    write_png(os.path.join(ROOT, "boss", "stalker.png"), stalker)
+    gate, gate_open = gate_tiles()
+    write_png(os.path.join(ROOT, "tiles", "gate.png"), gate)
+    write_png(os.path.join(ROOT, "tiles", "gate_open.png"), gate_open)
+
     title = logo()
     write_png(os.path.join(ROOT, "ui", "logo.png"), title)
 
@@ -1554,6 +1911,7 @@ def main():
     write_png(os.path.join(preview, "station.png"), contact_sheet([station], scale=4))
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
+    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))
     write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
     write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
     write_png(

@@ -20,7 +20,34 @@ Every deck's main room holds a vault, and the deeper it is, the richer:
 | 2 | Gold | 32 | 310 cr | 9,920 cr |
 | 3 | Platinum | 40 | 560 cr | 22,400 cr |
 
-Stand at it and hold E to pull bars out one at a time, about one every 1.2 s.
+Each vault room is sealed off from the rest of the deck behind a gate, and a
+boss waits inside. Step up to the gate and you call the crew
+in: every living crewmate on the deck has to press Y to join you (N turns it
+down, and the call lapses after 20 s). Once all have said yes, the whole crew
+is let in together and the gate locks behind you until the boss is down. You
+can't see the boss from outside its room.
+
+Two kinds of boss take turns down the decks, so every heist meets both:
+
+- **Vault Keeper:** fights with two floating hands. Each hand either sweeps a
+  laser across where you stand, after a warning line shows where it'll burn, or
+  gathers a nova orb in its palm and hurls it, arcing at whoever it passes and
+  bursting on impact. Enraged, both hands attack at once and faster, lasers
+  sweep wider and novas come in threes.
+- **Vault Stalker:** a hulking stalker. Every 3-4 s it crouches and marks up to
+  three pirates, then lunges through them one after another, hitting hard and
+  throwing them aside. It stands spent for a moment after. Spread out, and
+  sidestep once the marks show. Enraged, it lunges sooner and winds up quicker.
+
+A boss has a lot of health, more for a bigger crew, and enrages below half
+health. Each one further down has more health and hits harder, and the last
+deck's is deliberately overtuned. A raised riot shield blocks all of their
+attacks, lasers, orbs, arcs and blasts alike, and stops a lunge dead,
+staggering the stalker. Hacks, Blackout and shock fields don't touch them.
+When a boss falls it drops a bounty, some ammo and a Nano Patch, and the gate
+opens for good.
+
+Only then can the vault be looted. Stand at it and hold E to pull bars out one at a time, about one every 1.2 s.
 Every pirate at the vault pulls on their own, so a full crew empties it far
 faster than one pirate. Firing, using your ability (a laser or riot shield
 held out included) or stepping away starts the bar you're pulling over; a
@@ -48,7 +75,7 @@ About 10 s after the crew reaches a deck, the station may set challenges. Each
 has a goal, lasts for the whole heist, one deck or a set time, and is for the
 whole crew or one class. Completing it earns a reward, for whoever completed
 it or for the whole crew. Open challenges and running rewards show under the
-top-left panel.
+top-left panel. Each disappears once it's completed or failed.
 
 | Challenge | For | Goal | Lasts | Reward |
 |---|---|---|---|---|
@@ -75,7 +102,7 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
 | Two pirates pulling bars out of deck 2's gold vault in lockdown, with guards closing in | The last pirate out takes the crew's pool, plus a bonus for the crewmate who left early |
 | ![Enemies](docs/screenshots/enemies.png) | |
-| The station's guards, under **EXTRAS** in the main menu | |
+| The station's guards and vault bosses, under **EXTRAS** in the main menu | |
 
 ## Run
 
@@ -153,6 +180,7 @@ from the classes still free.
 | 1-4 / wheel | Switch gun |
 | Q | Class ability |
 | E | Take loot; hold at the vault to pull bars |
+| Y / N | Join / turn down a crewmate's call to breach the vault |
 | Enter | Play again (results screen) |
 | Esc | Leave / back |
 

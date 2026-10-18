@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Passive, RICOCHET_CHANCE};
+use crate::boss::Keeper;
 use crate::challenge::Rewards;
 use crate::class::{Boons, Laser, RIOT_COLOR, RiotShield, SUPPLY_CHANCE};
 use crate::combat::{
@@ -527,7 +528,7 @@ fn fire(
     mut noise: ResMut<Noise>,
     mut alarm: ResMut<Alarm>,
     mut players: Query<(&Player, &Health, &Controls, &Transform, &Aim, &mut Arsenal, &mut Perks, &Boons, &Rewards)>,
-    mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (With<Enemy>, Without<Player>)>,
+    mut enemies: Query<(Entity, &Transform, &mut Health, &Hurtbox, &mut Knockback, &Team), (Or<(With<Enemy>, With<Keeper>)>, Without<Player>)>,
     riot_shields: Query<&RiotShield>,
     lasers: Query<&Laser>,
     mut crew_hits: MessageWriter<CrewHit>,

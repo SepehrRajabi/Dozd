@@ -522,17 +522,36 @@ fn move_projectiles(
 }
 
 /// Every riot shield's curve, to test shots against.
-fn shield_outlines<F: bevy::ecs::query::QueryFilter>(riot_shields: &Query<(&RiotShield, &Transform), F>) -> Vec<[Vec2; RIOT_POINTS]> {
+pub(crate) fn shield_outlines<F: bevy::ecs::query::QueryFilter>(riot_shields: &Query<(&RiotShield, &Transform), F>) -> Vec<[Vec2; RIOT_POINTS]> {
     riot_shields.iter().map(|(s, t)| s.outline(t.translation.truncate())).collect()
 }
 
 /// Whether a shot at `pos` is touching any of the shields.
-fn hits_shield(shields: &[[Vec2; RIOT_POINTS]], pos: Vec2) -> bool {
+pub(crate) fn hits_shield(shields: &[[Vec2; RIOT_POINTS]], pos: Vec2) -> bool {
     shields.iter().flat_map(|outline| outline.windows(2)).any(|pair| {
         let (a, b) = (pair[0], pair[1]);
         let t = ((pos - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
         pos.distance(a + (b - a) * t) <= RIOT_THICKNESS
     })
+}
+
+/// Whether the straight line from `from` to `to` passes through any of the
+/// shields: a blast or arc going off at `from` doesn't reach someone at `to`
+/// behind one.
+pub(crate) fn shield_between(shields: &[[Vec2; RIOT_POINTS]], from: Vec2, to: Vec2) -> bool {
+    shields.iter().flat_map(|outline| outline.windows(2)).any(|pair| segments_cross(from, to, pair[0], pair[1]))
+}
+
+/// Whether the segments `a`-`b` and `c`-`d` cross (parallel ones never do).
+fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let (ab, cd) = (b - a, d - c);
+    let denom = ab.perp_dot(cd);
+    if denom.abs() < 1e-6 {
+        return false;
+    }
+    let t = (c - a).perp_dot(cd) / denom;
+    let u = (c - a).perp_dot(ab) / denom;
+    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
 }
 
 /// Hurts every guard within `radius` of `center`, `damage` at the middle
@@ -746,4 +765,21 @@ fn shake_on_local_damage(
         shake.add(0.45);
     }
     *last = Some(total);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shields_block_lines_through_them() {
+        // A shield held facing +x, its curve running up and down through x = 10.
+        let shield = RiotShield { owner: 0, left: 1.0, facing: Vec2::X };
+        let shields = [shield.outline(Vec2::new(10.0, 0.0))];
+        assert!(shield_between(&shields, Vec2::new(40.0, 0.0), Vec2::ZERO), "straight through");
+        assert!(shield_between(&shields, Vec2::new(40.0, 5.0), Vec2::new(-5.0, -5.0)), "slanting through");
+        assert!(!shield_between(&shields, Vec2::new(40.0, 0.0), Vec2::new(20.0, 0.0)), "both in front");
+        assert!(!shield_between(&shields, Vec2::new(40.0, 40.0), Vec2::new(0.0, 40.0)), "past its edge");
+        assert!(!shield_between(&[], Vec2::new(40.0, 0.0), Vec2::ZERO), "no shields");
+    }
 }

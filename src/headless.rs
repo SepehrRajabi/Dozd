@@ -15,6 +15,8 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::abilities::{Active, Passive};
+use crate::boss::{Keeper, KeeperBeam};
+use crate::breach::{Breach, BreachState, GATE_REACH};
 use crate::challenge::{ChallengeLog, Rewards};
 use crate::class::{Loadout, Loadouts, PirateClass};
 use crate::combat::{CrewHit, Health, Team};
@@ -32,7 +34,8 @@ const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_early,dead,still_in,deck,decks,credits,payout,\
                           pool,bonus,bars_silver,bars_gold,bars_platinum,kills,alarm,seconds,pirates,\
-                          ch_offered,ch_completed,ch_failed,reward_secs,pirate_kills";
+                          ch_offered,ch_completed,ch_failed,reward_secs,pirate_kills,\
+                          breaches,keepers,keeper_secs,keeper_deaths";
 /// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
 /// you which columns apply — `ai_state` is enemy-only, `move_x..dash` are
 /// pirate-only, blank on the other kind.
@@ -40,11 +43,22 @@ const TRACE_HEADER: &str =
     "tick,run,seed,kind,entity,x,y,team,health,max_health,ai_state,move_x,move_y,aim_x,aim_y,fire,dash";
 /// Bots only fight enemies this close.
 const ENGAGE: f32 = 140.0;
-/// Bots work a deck's vault for at most this many seconds, so a crew pinned
-/// down beside it still moves on.
+/// Bots work a deck's vault for at most this many seconds after its gate
+/// opens, so a crew pinned down beside it still moves on.
 const LOOT_TIME: f32 = 80.0;
-/// After this long on one deck, bots give up on the lift and make for the pad.
+/// This long after the gate opens (or after arriving, on a deck whose gate they
+/// never got through), bots give up on the lift and make for the pad.
 const DECK_TIME: f32 = 200.0;
+/// After this long on a deck without getting through the vault's gate, bots
+/// leave its vault be and move on.
+const BREACH_TIME: f32 = 120.0;
+/// Locked in with the keeper, bots circle it about this far out.
+const KEEPER_RANGE: f32 = 110.0;
+/// A bot this close to a keeper's laser line steps out of it.
+const BEAM_CLEAR: f32 = 22.0;
+/// After this long without the keeper losing health, bots take it their guns
+/// are dry and keep switching until one bites (the pistol never runs out).
+const STALL_TIME: f32 = 2.5;
 /// Below this share of health a bot makes for the pad for good.
 const HURT: f32 = 0.3;
 /// The crew taking the last pad out gather within this distance of it before
@@ -58,8 +72,9 @@ const LEAVE_EARLY: f32 = 0.15;
 pub enum BotKind {
     /// Stands still. Guards stay idle, so runs only end on the time limit.
     Idle,
-    /// Works each deck's vault (until it's empty or `LOOT_TIME` runs out), then
-    /// rides the lift down together, or takes the pad on the last deck or when
+    /// Makes for each deck's vault gate and breaches it with the crew, circles
+    /// and shoots the keeper inside, dodging its lasers, then works the vault
+    /// (until it's empty or `LOOT_TIME` runs out), then rides the lift down together, or takes the pad on the last deck or when
     /// badly hurt; a few leave early by a pad. Shoots whatever is close and
     /// wanders a little on the way. For smoke tests and benchmarks, not a real
     /// player.
@@ -205,6 +220,21 @@ struct Batch {
     pirate_kills: Vec<(u64, u32)>,
     /// Pirate-seconds this run with a challenge's damage reward running.
     reward_secs: f32,
+    /// Times this run the crew was let in to a keeper.
+    breaches: u32,
+    /// Keepers killed this run.
+    keepers: u32,
+    /// Game seconds this run locked in with a keeper.
+    keeper_secs: f32,
+    /// Pirates who went down this run while locked in with a keeper.
+    keeper_deaths: u32,
+    /// Locked in with a keeper as of the last tick.
+    fighting: bool,
+    /// Pirates down as of the last tick.
+    down: usize,
+    /// Over the whole batch, for the summary.
+    total_breaches: u32,
+    total_keepers: u32,
 }
 
 /// Drives the bots; reseeded every run so a seed replays exactly.
@@ -222,16 +252,28 @@ struct Bot {
     leave_on: Option<u8>,
     /// Badly hurt: making for the pad for good.
     bail: bool,
+    /// Which way it circles the keeper: 1 counterclockwise, -1 clockwise.
+    orbit: f32,
 }
 
-/// Paths across the deck being played, rebuilt with each new deck.
+/// Paths across the deck being played, rebuilt whenever its grid changes (a new
+/// deck, or its vault gate opening).
 #[derive(Default)]
 struct Nav {
+    /// The heist's `(seed, deck)` these timers are for.
+    deck: Option<(u32, u8)>,
     vault: Option<(Vec2, FlowField)>,
+    /// Just outside the vault's gate.
+    gate: Option<(Vec2, FlowField)>,
     lift: Option<Spot>,
     pad: Option<Spot>,
     /// Game seconds on this deck.
     since: f32,
+    /// Game seconds since the vault's gate opened.
+    open_for: Option<f32>,
+    /// The keeper's health last tick, and seconds since it last went down.
+    keeper_hp: Option<f32>,
+    stalled: f32,
 }
 
 /// An area to stand on (the lift or the pad): paths to its tiles, and its middle.
@@ -331,7 +373,7 @@ pub fn run(config: Config) {
     .add_observer(count_kills)
     .add_systems(Startup, start_batch)
     .add_systems(PreUpdate, drive_bots.run_if(in_state(GameState::Playing)))
-    .add_systems(Update, tally_challenges.run_if(in_state(GameState::Playing)))
+    .add_systems(Update, (tally_challenges, tally_breaches).run_if(in_state(GameState::Playing)))
     .add_systems(Last, next_run);
 
     // One small world gains nothing from spreading systems over threads; the
@@ -376,6 +418,33 @@ fn tally_challenges(time: Res<Time>, mut hits: MessageReader<CrewHit>, mut batch
     batch.reward_secs += boosted as f32 * time.delta_secs();
 }
 
+/// Counts the breaches, keepers killed, time locked in and pirates lost there,
+/// for the keeper columns.
+fn tally_breaches(
+    time: Res<Time>,
+    mut batch: ResMut<Batch>,
+    breaches: Query<&Breach>,
+    players: Query<&Health, With<Player>>,
+) {
+    let fighting = breaches.iter().any(|b| b.state == BreachState::Fight);
+    let down = players.iter().filter(|h| h.is_dead()).count();
+    if fighting && !batch.fighting {
+        batch.breaches += 1;
+    }
+    // The keeper going down is what opens the gate; a wipe leaves it locked.
+    if batch.fighting && !fighting && breaches.iter().any(Breach::is_open) {
+        batch.keepers += 1;
+    }
+    if batch.fighting || fighting {
+        batch.keeper_deaths += down.saturating_sub(batch.down) as u32;
+    }
+    if fighting {
+        batch.keeper_secs += time.delta_secs();
+    }
+    batch.fighting = fighting;
+    batch.down = down;
+}
+
 fn drive_bots(
     mut commands: Commands,
     time: Res<Time>,
@@ -387,6 +456,9 @@ fn drive_bots(
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
     vaults: Query<&Vault>,
+    breaches: Query<&Breach>,
+    keepers: Query<(&Transform, &Health), With<Keeper>>,
+    beams: Query<&KeeperBeam>,
     mut nav: Local<Nav>,
 ) {
     for vault in &vaults {
@@ -415,18 +487,42 @@ fn drive_bots(
     }
     let Some(grid) = grid else { return };
     let dt = time.delta_secs();
-    if grid.is_changed() {
-        *nav = Nav {
-            vault: grid.vault.and_then(|v| grid.tile_of(v).map(|tile| (v, FlowField::toward(&grid, vec![tile])))),
-            lift: Spot::find(&grid, 'L'),
-            pad: Spot::find(&grid, '='),
-            since: 0.0,
-        };
+    let breach = breaches.iter().next();
+    let toward = |p: Vec2| grid.tile_of(p).map(|tile| (p, FlowField::toward(&grid, vec![tile])));
+    let deck = Some((heist.seed, heist.deck));
+    let new_deck = nav.deck != deck;
+    if new_deck {
+        *nav = Nav { deck, ..default() };
+    }
+    // The gate opening changes the grid too: the vault only becomes reachable then.
+    if new_deck || grid.is_changed() {
+        nav.vault = grid.vault.and_then(toward);
+        nav.lift = Spot::find(&grid, 'L');
+        nav.pad = Spot::find(&grid, '=');
+        nav.gate = None;
+    }
+    if nav.gate.is_none() {
+        nav.gate = breach.and_then(|b| toward(b.outside));
     }
     nav.since += dt;
+    // A deck without a gate (or before one is in place) plays as if it were open.
+    let state = breach.map_or(BreachState::Open, |b| b.state.clone());
+    if state == BreachState::Open {
+        nav.open_for = Some(nav.open_for.map_or(0.0, |t| t + dt));
+    }
+    let fighting = state == BreachState::Fight;
+    // Heads for the gate (or waits there for the crew's answer) until they're let in.
+    let breaching = matches!(state, BreachState::Sealed | BreachState::Vote { .. }) && nav.since < BREACH_TIME;
     // The whole crew stops looting at once, so they all make for the lift together.
-    let looting = vaults.iter().any(|v| v.bars > 0) && nav.since < LOOT_TIME;
-    let give_up_lift = nav.since >= DECK_TIME;
+    let looting = vaults.iter().any(|v| v.bars > 0) && nav.open_for.is_some_and(|t| t < LOOT_TIME);
+    let give_up_lift = nav.open_for.unwrap_or(nav.since) >= DECK_TIME;
+    let keeper = keepers.iter().find(|(_, h)| !h.is_dead());
+    if let Some((_, hp)) = keeper {
+        nav.stalled = if nav.keeper_hp.is_none_or(|old| hp.current < old) { 0.0 } else { nav.stalled + dt };
+        nav.keeper_hp = Some(hp.current);
+    }
+    let stalled = fighting && nav.stalled >= STALL_TIME;
+    let keeper = keeper.map(|(t, _)| t.translation.truncate());
     // Whether everyone meaning to leave together is at the pad (or has given up waiting).
     let gathered = give_up_lift
         || nav.pad.as_ref().is_none_or(|pad| {
@@ -446,7 +542,8 @@ fn drive_bots(
             let mut roll = Rng::new(config.run_seed(batch.run) ^ (player.slot as u32 + 1).wrapping_mul(0x5EED_1EAF));
             let leave_on = (config.crew > 1 && roll.unit() < LEAVE_EARLY)
                 .then(|| ((roll.unit() * (DECKS - 1) as f32) as u8).min(DECKS - 2));
-            let bot = Bot { heading: Vec2::ZERO, timer: 0.0, wander: false, leave_on, bail: false };
+            let orbit = if player.slot % 2 == 0 { 1.0 } else { -1.0 };
+            let bot = Bot { heading: Vec2::ZERO, timer: 0.0, wander: false, leave_on, bail: false, orbit };
             commands.entity(entity).insert(bot);
             continue;
         };
@@ -464,15 +561,60 @@ fn drive_bots(
                     Vec2::from_angle(rng.unit() * std::f32::consts::TAU)
                 };
                 bot.wander = rng.unit() < 0.1;
+                if rng.unit() < 0.25 {
+                    bot.orbit = -bot.orbit;
+                }
             }
             bot.bail |= health.current < health.max * HURT;
 
-            let target = enemies
+            let nearest = enemies
                 .iter()
                 .filter(|(_, _, h, team, _)| **team == Team::Enemy && !h.is_dead())
                 .map(|(_, t, ..)| t.translation.truncate())
                 .filter(|e| e.distance(pos) <= ENGAGE)
                 .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
+            // Locked in, the keeper is the target from anywhere in its room.
+            let target = if fighting { keeper.or(nearest) } else { nearest };
+
+            if fighting {
+                // Circles the keeper at range, stepping out of any laser line.
+                let mut movement = keeper.map_or(Vec2::ZERO, |k| {
+                    let out = (pos - k).normalize_or(Vec2::X);
+                    let radial = ((KEEPER_RANGE - pos.distance(k)) / 40.0).clamp(-1.0, 1.0);
+                    (out * radial + out.perp() * bot.orbit).normalize_or_zero()
+                });
+                let mut dodging = false;
+                for beam in &beams {
+                    let rel = pos - beam.from;
+                    let along = rel.dot(beam.dir);
+                    let across = beam.dir.perp().dot(rel);
+                    if (0.0..=beam.length + BEAM_CLEAR).contains(&along) && across.abs() < BEAM_CLEAR {
+                        movement = beam.dir.perp() * if across < 0.0 { -1.0 } else { 1.0 };
+                        dodging |= beam.firing || BEAM_CLEAR - across.abs() > 8.0;
+                    }
+                }
+                // Up against a wall: circle the other way.
+                if !dodging && grid.is_solid_at(pos + movement * TILE) {
+                    bot.orbit = -bot.orbit;
+                }
+                let aim = target.unwrap_or(pos + bot.heading * 40.0);
+                break 'input PlayerInput {
+                    movement,
+                    aim,
+                    fire: target.is_some(),
+                    fire_pressed: target.is_some(),
+                    dash: movement != Vec2::ZERO && rng.unit() < if dodging { 0.08 } else { 0.01 },
+                    reload: rng.unit() < 0.002,
+                    slot: (rng.unit() < if stalled { 0.02 } else { 0.004 }).then(|| (rng.unit() * 4.0) as u8 % 4),
+                    cycle: 0,
+                    interact: false,
+                    interact_held: false,
+                    ability: target.is_some() && rng.unit() < 0.02,
+                    accept: true,
+                    decline: false,
+                    restart: false,
+                };
+            }
             let to_vault = |(v, field): &(Vec2, FlowField)| {
                 if v.distance(pos) <= VAULT_REACH * 0.6 {
                     Vec2::ZERO
@@ -482,8 +624,17 @@ fn drive_bots(
             };
             let pad = nav.pad.as_ref();
             let lift = nav.lift.as_ref().filter(|_| !give_up_lift);
+            let to_gate = |(g, field): &(Vec2, FlowField)| {
+                if g.distance(pos) <= GATE_REACH * 0.4 {
+                    Vec2::ZERO
+                } else {
+                    field.step(&grid, pos).unwrap_or((*g - pos).normalize_or_zero())
+                }
+            };
             let goal = if bot.bail {
                 pad.map(|p| p.steer(&grid, pos))
+            } else if breaching {
+                nav.gate.as_ref().map(to_gate)
             } else if looting {
                 nav.vault.as_ref().map(to_vault)
             } else if bot.leave_on == Some(heist.deck) {
@@ -519,6 +670,9 @@ fn drive_bots(
                 interact_held: true,
                 // Engineers drop a sentry now and then mid-fight.
                 ability: target.is_some() && rng.unit() < 0.01,
+                // Always up for breaching the vault with the crew.
+                accept: true,
+                decline: false,
                 restart: false,
             }
         };
@@ -641,6 +795,8 @@ fn next_run(
     let pirate_kills = pirate_kills.join(";");
     let (ch_offered, ch_completed, ch_failed) = (challenges.offered, challenges.completed, challenges.failed);
     let reward_secs = batch.reward_secs;
+    let (breaches, keepers, keeper_secs, keeper_deaths) =
+        (batch.breaches, batch.keepers, batch.keeper_secs, batch.keeper_deaths);
     let mut outcome = Vec::new();
     for (count, label) in [(extracted, "extracted"), (left, "left early"), (dead, "dead"), (active, "still in")] {
         if count > 0 {
@@ -654,7 +810,8 @@ fn next_run(
         println!(
             "{},{},{},{ending},{extracted},{left},{dead},{active},{},{DECKS},{haul},{paid},{},{},\
              {silver},{gold},{platinum},{},{:.1},{seconds:.1},{pirates},\
-             {ch_offered},{ch_completed},{ch_failed},{reward_secs:.1},{pirate_kills}",
+             {ch_offered},{ch_completed},{ch_failed},{reward_secs:.1},{pirate_kills},\
+             {breaches},{keepers},{keeper_secs:.1},{keeper_deaths}",
             config.class.map_or("mixed", PirateClass::name),
             batch.run + 1,
             config.run_seed(batch.run),
@@ -668,7 +825,8 @@ fn next_run(
         let line = format!(
             "run {:>3}  seed {:>10}  {ending:<7}  {:<34}  deck {}/{DECKS}  bars {silver}/{gold}/{platinum}  \
              carried {haul:>5} cr  paid {paid:>5} cr  kills {:>2} ({pirate_kills})  alarm {:.1}  \
-             challenges {ch_completed}/{ch_offered} done, {ch_failed} failed, boost {reward_secs:.0}s  {seconds:>6.1}s",
+             challenges {ch_completed}/{ch_offered} done, {ch_failed} failed, boost {reward_secs:.0}s  \
+             keepers {keepers}/{breaches} in {keeper_secs:.0}s, {keeper_deaths} lost  {seconds:>6.1}s",
             batch.run + 1,
             config.run_seed(batch.run),
             outcome.join(", "),
@@ -689,6 +847,14 @@ fn next_run(
     batch.bars = [0; 3];
     batch.pirate_kills.clear();
     batch.reward_secs = 0.0;
+    batch.total_breaches += breaches;
+    batch.total_keepers += keepers;
+    batch.breaches = 0;
+    batch.keepers = 0;
+    batch.keeper_secs = 0.0;
+    batch.keeper_deaths = 0;
+    batch.fighting = false;
+    batch.down = 0;
     batch.run += 1;
     batch.ticks = 0;
     batch.kills = 0;
@@ -703,9 +869,12 @@ fn next_run(
     let wall = batch.started.map_or(0.0, |s| s.elapsed().as_secs_f64());
     let game = batch.total_ticks as f64 / config.hz as f64;
     let summary = format!(
-        "done: {} run(s), {} with the crew out; {:.0}s of game in {:.2}s ({:.0}x real time, {:.0} ticks/s)",
+        "done: {} run(s), {} with the crew out, {} keeper(s) killed in {} breach(es); \
+         {:.0}s of game in {:.2}s ({:.0}x real time, {:.0} ticks/s)",
         config.runs,
         batch.extracted,
+        batch.total_keepers,
+        batch.total_breaches,
         game,
         wall,
         game / wall.max(1e-9),

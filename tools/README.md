@@ -38,6 +38,10 @@ are not generated from a single source of truth.
 | `ch_failed` | u32 | of those, failed: the crew left the deck, or nobody who could complete it was still in play (dead or out by a pad). `ch_offered - ch_completed - ch_failed` is how many were still open when the run stopped | `0..=ch_offered` |
 | `reward_secs` | f32 | pirate-seconds with a challenge's damage reward running, summed over the crew (one 45 s reward that runs out = `45.0`; it stops early if its holder dies or the run ends) | `0.0..` |
 | `pirate_kills` | string | guards each pirate killed with their own weapons (guns, laser, grenades, novas, arcs: the `CrewHit`s marked `killed` that challenges count), by slot, `;`-separated, e.g. `12;5;7`. Their sum can fall short of `kills`: sentries, hacked guards and perks don't count | |
+| `breaches` | u32 | times the crew was let in through a vault's gate (`Breach` in `src/breach.rs` reaching `Fight`): every living pirate on the deck accepted the call and got locked in with the keeper. At most one per deck | `0..=decks` |
+| `keepers` | u32 | vault keepers (`src/boss.rs`) killed: breaches that ended with the gate opening. `breaches - keepers` is 1 when the crew was wiped (or the run timed out) locked in | `0..=breaches` |
+| `keeper_secs` | f32 | in-game seconds spent locked in with a keeper (`Fight`), summed over the run's breaches | `0.0..=seconds` |
+| `keeper_deaths` | u32 | times a pirate went down while locked in with a keeper (a pirate revived and downed again counts twice) | `0..` |
 
 Settlement rules, for checking rows: early leavers' payout equals their own
 credits; the final group each get `round((pool + bonus) / finishers)`; dead

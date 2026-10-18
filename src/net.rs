@@ -10,6 +10,8 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
+use crate::boss::{Keeper, KeeperBeam, KeeperHand, StalkerLook};
+use crate::breach::Breach;
 use crate::challenge::{Challenge, Rewards};
 use crate::class::{Ability, Boons, Laser, Loadout, PirateClass, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
@@ -153,6 +155,9 @@ pub struct PlayerInput {
     pub interact_held: bool,
     /// Use the class ability (the Engineer's sentry).
     pub ability: bool,
+    /// Y / N: join, or turn down, a crewmate's call to breach the vault.
+    pub accept: bool,
+    pub decline: bool,
     pub restart: bool,
 }
 
@@ -195,6 +200,11 @@ impl Plugin for NetPlugin {
             .replicate::<Looting>()
             .replicate::<Challenge>()
             .replicate::<Rewards>()
+            .replicate::<Breach>()
+            .replicate::<Keeper>()
+            .replicate::<KeeperHand>()
+            .replicate::<KeeperBeam>()
+            .replicate::<StalkerLook>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)

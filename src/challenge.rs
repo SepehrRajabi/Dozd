@@ -24,8 +24,6 @@ use crate::{GameState, Level};
 
 /// Seconds after the crew reaches a deck before its challenges are offered.
 pub const OFFER_DELAY: f32 = 10.0;
-/// Seconds a finished challenge stays up, so the HUD can show how it went.
-pub const LINGER: f32 = 4.0;
 /// Seconds the offer and completion banners stay up.
 const BANNER_SECS: f32 = 5.0;
 const BANNER_COLOR: Color = Color::srgb(1.0, 0.8, 0.3);
@@ -346,8 +344,6 @@ struct Tally {
     streaks: Vec<(u64, Streak)>,
     /// Exact seconds left on a `Span::Ttl`; `Challenge::left` is rounded.
     left: Option<f32>,
-    /// Seconds since it was completed or failed.
-    finished: f32,
 }
 
 /// Still in the heist and able to act.
@@ -497,14 +493,11 @@ fn track_challenges(
     }
 }
 
-/// Clears away challenges `LINGER` seconds after they're done or failed.
-fn clear_finished(mut commands: Commands, time: Res<Time>, mut challenges: Query<(Entity, &Challenge, &mut Tally)>) {
-    for (entity, challenge, mut tally) in &mut challenges {
-        if challenge.is_open() {
-            continue;
-        }
-        tally.finished += time.delta_secs();
-        if tally.finished >= LINGER {
+/// Clears away challenges as soon as they're done or failed; the banner has
+/// already told the crew how it went.
+fn clear_finished(mut commands: Commands, challenges: Query<(Entity, &Challenge)>) {
+    for (entity, challenge) in &challenges {
+        if !challenge.is_open() {
             commands.entity(entity).despawn();
         }
     }
@@ -736,16 +729,14 @@ mod tests {
         assert!(challenge.is_open());
         assert_eq!(challenge.progress, vec![Progress { owner: 0, count: 4, expires: 15.0 }]);
         sim::kill(&mut app, 0, 1);
-        assert_eq!(sim::challenges(&mut app)[0].state, ChallengeState::Done { by: 0 });
+        // Gone the moment it's done; the reward runs on for its 45 s, then ends.
+        assert!(sim::challenges(&mut app).is_empty());
         assert_eq!(sim::log(&app), (1, 1, 0));
         assert!((sim::damage(&mut app, 0) - 1.3).abs() < 1e-6);
         assert_eq!(sim::damage(&mut app, 1), 1.0);
-        // Gone after lingering; the reward runs on for its 45 s, then ends.
-        sim::run_for(&mut app, LINGER + 0.2);
-        assert!(sim::challenges(&mut app).is_empty());
-        sim::run_for(&mut app, 40.0);
+        sim::run_for(&mut app, 43.0);
         assert!(sim::damage(&mut app, 0) > 1.0);
-        sim::run_for(&mut app, 1.0);
+        sim::run_for(&mut app, 2.5);
         assert_eq!(sim::damage(&mut app, 0), 1.0);
     }
 
@@ -769,7 +760,7 @@ mod tests {
         sim::kill(&mut app, 0, 4);
         app.world_mut().resource_mut::<Heist>().deck = 1;
         app.update();
-        assert_eq!(sim::challenges(&mut app)[0].state, ChallengeState::Failed);
+        assert!(sim::challenges(&mut app).is_empty());
         assert_eq!(sim::log(&app), (1, 0, 1));
         sim::run_for(&mut app, OFFER_DELAY);
         let open: Vec<_> = sim::challenges(&mut app).into_iter().filter(Challenge::is_open).collect();
@@ -786,7 +777,8 @@ mod tests {
         sim::kill(&mut app, 0, 3);
         sim::set_player(&mut app, 0, |_, h| h.current = 0.0);
         app.update();
-        assert_eq!(sim::challenges(&mut app)[0].state, ChallengeState::Failed);
+        assert!(sim::challenges(&mut app).is_empty());
+        assert_eq!(sim::log(&app), (1, 0, 1));
 
         // A Gunner who completed it loses the reward on dying.
         let mut app = sim::offered(&[PirateClass::Gunner]);
@@ -803,7 +795,8 @@ mod tests {
         sim::kill(&mut app, 0, 4);
         sim::set_player(&mut app, 0, |_, h| h.current = 0.0);
         sim::kill(&mut app, 1, 5);
-        assert_eq!(sim::challenges(&mut app)[0].state, ChallengeState::Done { by: 1 });
+        assert_eq!(sim::log(&app), (1, 1, 0));
+        assert!(sim::damage(&mut app, 1) > 1.0);
     }
 
     #[test]
@@ -812,7 +805,7 @@ mod tests {
         sim::kill(&mut app, 0, 2);
         sim::set_player(&mut app, 0, |p, _| p.status = PirateStatus::Extracted);
         app.update();
-        assert_eq!(sim::challenges(&mut app)[0].state, ChallengeState::Failed);
+        assert!(sim::challenges(&mut app).is_empty());
         assert_eq!(sim::log(&app), (1, 0, 1));
     }
 

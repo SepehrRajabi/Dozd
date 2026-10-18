@@ -2,6 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod abilities;
+mod boss;
+mod boss_view;
+mod breach;
+mod breach_hud;
 mod challenge;
 mod challenge_hud;
 mod class;
@@ -161,7 +165,7 @@ impl Plugin for GamePlugins {
             drops::DropsPlugin,
             class::ClassPlugin,
             crew::CrewPlugin,
-            (vault::VaultPlugin, challenge::ChallengePlugin),
+            (vault::VaultPlugin, challenge::ChallengePlugin, breach::BreachPlugin, boss::BossPlugin),
         ));
     }
 }
@@ -186,7 +190,12 @@ impl Plugin for ViewPlugins {
             settings::DisplayPlugin,
             hud::HudPlugin,
             crew::CrewViewPlugin,
-            (vault::VaultViewPlugin, challenge_hud::ChallengeViewPlugin),
+            (
+                vault::VaultViewPlugin,
+                challenge_hud::ChallengeViewPlugin,
+                breach_hud::BreachViewPlugin,
+                boss_view::BossViewPlugin,
+            ),
         ));
     }
 }

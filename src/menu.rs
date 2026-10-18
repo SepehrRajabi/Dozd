@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::abilities::{Active, Passive};
+use crate::boss::{KEEPER_COLOR, KeeperKind};
 use crate::class::{LocalLoadout, Loadout, PirateClass};
 use crate::guns::GunKind;
 use crate::crew::Roster;
@@ -660,6 +661,8 @@ fn loadout_cards(parent: &mut ChildSpawnerCommands, assets: &AssetServer) {
 /// One card on the perks or enemies screen.
 struct Entry {
     sprite: &'static str,
+    /// How big its picture draws: a whole multiple of the sprite's pixels.
+    art: f32,
     name: &'static str,
     /// A word on what kind of thing it is, beside the name.
     tag: &'static str,
@@ -669,9 +672,25 @@ struct Entry {
     color: Color,
 }
 
+/// A run of cards on a codex screen, under an optional heading.
+struct Section {
+    heading: Option<&'static str>,
+    entries: Vec<Entry>,
+}
+
+/// A vault guardian's colour on its card.
+fn boss_color(kind: KeeperKind) -> Color {
+    match kind {
+        KeeperKind::Hands => KEEPER_COLOR,
+        // The orange of the marks it lays on its prey.
+        KeeperKind::Stalker => Color::srgb(1.0, 0.4, 0.15),
+    }
+}
+
 fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
     let entries = PerkKind::ALL.map(|perk| Entry {
         sprite: perk.sprite(),
+        art: 64.0,
         name: perk.name(),
         tag: perk.category(),
         note: perk.duration().map_or("INSTANT".into(), |secs| format!("{secs:.0}s")),
@@ -684,18 +703,30 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
         MenuScreen::Perks,
         "PERKS",
         "Found lying around each deck. Walk over one to use it.",
-        &entries,
+        &[Section { heading: None, entries: entries.into() }],
+        128.0,
     );
 }
 
 fn enemies_screen(mut commands: Commands, assets: Res<AssetServer>) {
-    let entries = EnemyKind::ALL.map(|kind| Entry {
+    let guards = EnemyKind::ALL.map(|kind| Entry {
         sprite: kind.sprite(),
+        art: 64.0,
         name: kind.name(),
         tag: kind.role(),
         note: format!("{:.0} HP", kind.health()),
         details: kind.details(),
         color: kind.color(),
+    });
+    // Their health depends on the vault and the crew, so no figure.
+    let bosses = KeeperKind::ALL.map(|kind| Entry {
+        sprite: kind.sprite(),
+        art: 80.0,
+        name: kind.name(),
+        tag: kind.role(),
+        note: String::new(),
+        details: kind.details(),
+        color: boss_color(kind),
     });
     codex_screen(
         &mut commands,
@@ -703,19 +734,28 @@ fn enemies_screen(mut commands: Commands, assets: Res<AssetServer>) {
         MenuScreen::Enemies,
         "ENEMIES",
         "The station's security, and what it throws at you.",
-        &entries,
+        &[
+            Section { heading: None, entries: guards.into() },
+            Section { heading: Some("BOSSES"), entries: bosses.into() },
+        ],
+        100.0,
     );
 }
 
-/// A full-screen grid of cards, each a picture beside its name and what it does.
+/// A full-screen grid of cards, each a picture beside its name and what it
+/// does, in sections; each card is at least `card_height` tall, more if its
+/// text needs it.
 fn codex_screen(
     commands: &mut Commands,
     assets: &AssetServer,
     screen: MenuScreen,
     title: &str,
     subtitle: &str,
-    entries: &[Entry],
+    sections: &[Section],
+    card_height: f32,
 ) {
+    // Every picture gets a column as wide as the biggest, so the text lines up.
+    let art = sections.iter().flat_map(|s| &s.entries).map(|e| e.art).fold(0.0, f32::max);
     commands
         .spawn((
             DespawnOnExit(screen),
@@ -732,62 +772,73 @@ fn codex_screen(
         .with_children(|parent| {
             parent.spawn(label(title, 28.0, GOLD));
             parent.spawn(label(subtitle, 15.0, DIM));
-            parent
-                .spawn(Node {
-                    column_gap: Val::Px(16.0),
-                    row_gap: Val::Px(16.0),
-                    flex_wrap: FlexWrap::Wrap,
-                    justify_content: JustifyContent::Center,
-                    max_width: Val::Px(900.0),
-                    ..default()
-                })
-                .with_children(|grid| {
-                    for entry in entries {
-                        grid.spawn((
-                            Node {
-                                width: Val::Px(420.0),
-                                height: Val::Px(128.0),
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(16.0),
-                                padding: UiRect::all(Val::Px(14.0)),
-                                border: UiRect::all(Val::Px(2.0)),
-                                ..default()
-                            },
-                            BackgroundColor(BUTTON),
-                            BorderColor::all(entry.color.with_alpha(0.5)),
-                        ))
-                        .with_children(|card| {
-                            card.spawn((
-                                ImageNode::new(assets.load(entry.sprite)),
+            for section in sections {
+                if let Some(heading) = section.heading {
+                    parent.spawn(label(heading, 15.0, GOLD));
+                }
+                parent
+                    .spawn(Node {
+                        column_gap: Val::Px(16.0),
+                        row_gap: Val::Px(16.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        justify_content: JustifyContent::Center,
+                        max_width: Val::Px(900.0),
+                        ..default()
+                    })
+                    .with_children(|grid| {
+                        for entry in &section.entries {
+                            grid.spawn((
                                 Node {
-                                    width: Val::Px(64.0),
-                                    height: Val::Px(64.0),
-                                    flex_shrink: 0.0,
+                                    width: Val::Px(420.0),
+                                    min_height: Val::Px(card_height),
+                                    align_items: AlignItems::Center,
+                                    column_gap: Val::Px(16.0),
+                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
+                                    border: UiRect::all(Val::Px(2.0)),
                                     ..default()
                                 },
-                            ));
-                            card.spawn(Node {
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(5.0),
-                                flex_grow: 1.0,
-                                ..default()
-                            })
-                            .with_children(|info| {
-                                info.spawn(Node {
-                                    column_gap: Val::Px(10.0),
-                                    align_items: AlignItems::Baseline,
+                                BackgroundColor(BUTTON),
+                                BorderColor::all(entry.color.with_alpha(0.5)),
+                            ))
+                            .with_children(|card| {
+                                card.spawn(Node {
+                                    width: Val::Px(art),
+                                    justify_content: JustifyContent::Center,
+                                    flex_shrink: 0.0,
                                     ..default()
                                 })
-                                .with_children(|heading| {
-                                    heading.spawn(label(entry.name, 20.0, entry.color));
-                                    heading.spawn(label(entry.tag, 12.0, DIM));
-                                    heading.spawn(label(entry.note.clone(), 14.0, TEXT));
+                                .with_child((
+                                    ImageNode::new(assets.load(entry.sprite)),
+                                    Node {
+                                        width: Val::Px(entry.art),
+                                        height: Val::Px(entry.art),
+                                        flex_shrink: 0.0,
+                                        ..default()
+                                    },
+                                ));
+                                card.spawn(Node {
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(5.0),
+                                    flex_grow: 1.0,
+                                    ..default()
+                                })
+                                .with_children(|info| {
+                                    info.spawn(Node {
+                                        column_gap: Val::Px(10.0),
+                                        align_items: AlignItems::Baseline,
+                                        ..default()
+                                    })
+                                    .with_children(|heading| {
+                                        heading.spawn(label(entry.name, 20.0, entry.color));
+                                        heading.spawn(label(entry.tag, 12.0, DIM));
+                                        heading.spawn(label(entry.note.clone(), 14.0, TEXT));
+                                    });
+                                    info.spawn(label(entry.details, 14.0, TEXT));
                                 });
-                                info.spawn(label(entry.details, 14.0, TEXT));
                             });
-                        });
-                    }
-                });
+                        }
+                    });
+            }
             parent.spawn(button("BACK", MenuCommand::Back));
         });
 }

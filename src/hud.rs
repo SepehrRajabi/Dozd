@@ -46,8 +46,10 @@ pub enum HudSlot {
     Effects,
     /// Top left, under that panel: the challenges in play.
     Challenges,
-    /// Top centre: deck and alarm, the banner, then the leave prompt.
+    /// Top centre: deck and alarm, the vault guardian's health while the crew
+    /// fights it, the banner, then the leave prompt.
     Status,
+    Boss,
     Banner,
     Notice,
     /// Top right: the session, then the rest of the crew.
@@ -345,6 +347,7 @@ fn spawn_layout(mut commands: Commands) {
     ), slot(HudSlot::Challenges)]));
     commands.spawn((Hud, centred(true), children![
         centred_slot(HudSlot::Status),
+        centred_slot(HudSlot::Boss),
         centred_slot(HudSlot::Banner),
         centred_slot(HudSlot::Notice),
     ]));

@@ -1,6 +1,7 @@
 //! Every deck's vault: a stack of bars the crew pulls out one at a time by
 //! holding E beside it. Every pirate at it pulls on their own, so a bigger crew
-//! empties it faster. The deeper the deck, the more precious the bars.
+//! empties it faster. The deeper the deck, the more precious the bars. It sits
+//! in a sealed room whose keeper has to go down first (see `breach.rs`).
 
 use std::collections::HashMap;
 
@@ -8,6 +9,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::breach::Breach;
 use crate::class::{Laser, RiotShield};
 use crate::combat::{FxKind, Health, fx};
 use crate::mission::{Alarm, Banner};
@@ -123,6 +125,7 @@ pub fn spawn_vault(commands: &mut Commands, pos: Vec2, deck: u8) {
 /// Pirates holding E at the vault, hands free, fill their progress; each full
 /// bar goes to whoever pulled it. Letting go, stepping away, firing or using
 /// their ability starts it over. A sentry already down keeps shooting for them.
+/// Nothing comes out until the vault room's gate is open: its keeper is down.
 fn pull_bars(
     mut commands: Commands,
     time: Res<Time>,
@@ -133,10 +136,11 @@ fn pull_bars(
     mut players: Query<(Entity, &mut Player, &Health, &Controls, &Transform, &mut Looting)>,
     lasers: Query<&Laser>,
     riot_shields: Query<&RiotShield>,
+    breaches: Query<&Breach>,
     // Exact seconds pulled so far; `Looting` only carries a rounded copy.
     mut pulled: Local<HashMap<Entity, f32>>,
 ) {
-    let mut vault = vaults.single_mut().ok();
+    let mut vault = vaults.single_mut().ok().filter(|_| breaches.iter().all(Breach::is_open));
     let dt = time.delta_secs();
     for (entity, mut player, health, controls, transform, mut looting) in &mut players {
         let pos = transform.translation.truncate();

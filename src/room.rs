@@ -5,6 +5,8 @@ use std::time::SystemTime;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+use crate::boss::{KeeperKind, spawn_keeper};
+use crate::breach::spawn_breach;
 use crate::challenge::Challenge;
 use crate::combat::{Health, Noise};
 use crate::deckgen::{self, Layout};
@@ -25,6 +27,7 @@ const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 // Layouts come from `deckgen`. Legend:
 // '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
 // 'L' lift down   'u' lift shaft the crew arrived by   'V' vault (2x2, one per deck)
+// 'G' vault gate (2 tiles, the only way into the vault room; open once its keeper is down)
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden, b brute, g herald
 // perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak, 5 recharge
@@ -92,9 +95,35 @@ pub struct RoomGrid {
     pub crew_spawn: Vec2,
     /// Centre of the deck's vault.
     pub vault: Option<Vec2>,
+    /// The vault room's gate.
+    pub gate: GateSpot,
+    /// The vault room's floor, in world space.
+    pub vault_room: Rect,
+    /// Gate tiles let things through (see `breach.rs`, which keeps this in step).
+    gate_open: bool,
+}
+
+/// Where the vault room's gate is, and what's around it, in world space.
+#[derive(Clone, Copy, Debug)]
+pub struct GateSpot {
+    /// Centre of the two gate tiles.
+    pub centre: Vec2,
+    /// The gate runs up and down, in the room's left or right wall.
+    pub vertical: bool,
+    /// Corridor floor just outside, level with `centre`.
+    pub outside: Vec2,
+    /// Vault room floor just inside, level with `centre`.
+    pub inside: Vec2,
+    /// Where the keeper waits, across the vault from the gate.
+    pub keeper: Vec2,
 }
 
 impl RoomGrid {
+    /// Whether `p` is on the vault room's floor.
+    pub fn in_vault_room(&self, p: Vec2) -> bool {
+        self.vault_room.contains(p)
+    }
+
     fn cols(&self) -> usize {
         self.tiles[0].len()
     }
@@ -103,10 +132,10 @@ impl RoomGrid {
         self.tiles.len()
     }
 
-    /// Whether any of the eight surrounding tiles is walkable.
+    /// Whether any of the eight surrounding tiles is floor, the gate included.
     fn touches_floor(&self, col: usize, row: usize) -> bool {
         (row.saturating_sub(1)..=(row + 1).min(self.rows() - 1)).any(|r| {
-            (col.saturating_sub(1)..=(col + 1).min(self.cols() - 1)).any(|c| self.is_open(c, r))
+            (col.saturating_sub(1)..=(col + 1).min(self.cols() - 1)).any(|c| self.is_floor(c, r))
         })
     }
 
@@ -124,7 +153,24 @@ impl RoomGrid {
     }
 
     fn is_open(&self, col: usize, row: usize) -> bool {
+        match self.tiles[row][col] {
+            'G' => self.gate_open,
+            ch => deckgen::is_open(ch),
+        }
+    }
+
+    /// Floor as drawn: like `is_open`, but the gate always counts.
+    fn is_floor(&self, col: usize, row: usize) -> bool {
         deckgen::is_open(self.tiles[row][col])
+    }
+
+    pub fn gate_open(&self) -> bool {
+        self.gate_open
+    }
+
+    /// Opens or shuts the vault gate's tiles.
+    pub fn set_gate_open(&mut self, open: bool) {
+        self.gate_open = open;
     }
 
     pub fn tile_at(&self, p: Vec2) -> Option<char> {
@@ -197,6 +243,8 @@ impl RoomGrid {
 pub struct FlowField {
     dist: Vec<Vec<u16>>,
     targets: Vec<(usize, usize)>,
+    /// Whether the vault gate was open when this was worked out.
+    gate_open: bool,
 }
 
 impl FlowField {
@@ -234,7 +282,7 @@ impl FlowField {
                 }
             }
         }
-        Self { dist, targets }
+        Self { dist, targets, gate_open: grid.gate_open }
     }
 }
 
@@ -250,7 +298,7 @@ fn update_flow_field(
         .collect();
     targets.sort_unstable();
     targets.dedup();
-    if field.targets != targets {
+    if field.targets != targets || field.gate_open != grid.gate_open {
         *field = FlowField::toward(&grid, targets);
     }
 }
@@ -309,8 +357,9 @@ fn sync_deck(
     noise.0.clear();
 
     let grid = build_grid(deckgen::generate(target.0, target.1, DECKS));
+    // `breach.rs` opens the gate once the deck's `Breach` says so.
     if mode.is_authority() {
-        populate(&mut commands, &grid, target.1);
+        populate(&mut commands, &grid, target.0, target.1);
         let mut spot = 0;
         for (player, health, mut transform) in &mut crew {
             let pos = if player.deck == target.1 && player.status == PirateStatus::Active && !health.is_dead() {
@@ -331,12 +380,31 @@ fn sync_deck(
 fn build_grid(layout: Layout) -> RoomGrid {
     let rows = layout.tiles.len();
     let cols = layout.tiles[0].len();
+    let origin = Vec2::new(-(cols as f32 - 1.0) * TILE / 2.0, (rows as f32 - 1.0) * TILE / 2.0);
+    let at = |(col, row): (usize, usize)| origin + Vec2::new(col as f32 * TILE, -(row as f32) * TILE);
+    // The gate's spots sit beside its first tile; shift them half a tile along it.
+    let along = (at(layout.gate[1]) - at(layout.gate[0])) / 2.0;
+    let gate = GateSpot {
+        centre: at(layout.gate[0]) + along,
+        vertical: layout.gate[0].0 == layout.gate[1].0,
+        outside: at(layout.gate_outside) + along,
+        inside: at(layout.gate_inside) + along,
+        keeper: at(layout.keeper) + along,
+    };
     let mut grid = RoomGrid {
         tiles: layout.tiles,
-        origin: Vec2::new(-(cols as f32 - 1.0) * TILE / 2.0, (rows as f32 - 1.0) * TILE / 2.0),
+        origin,
         spawn_points: Vec::new(),
         crew_spawn: Vec2::ZERO,
         vault: None,
+        gate,
+        vault_room: {
+            let (x, y, w, h) = layout.vault_room;
+            // Out to the tile edges, not just their centres.
+            let half = Vec2::splat(TILE / 2.0);
+            Rect::from_corners(at((x, y + h - 1)) - half, at((x + w - 1, y)) + half)
+        },
+        gate_open: false,
     };
     grid.crew_spawn = grid.tile_center(layout.spawn.0, layout.spawn.1);
     // The vault is 2x2 tiles from its top-left one.
@@ -374,9 +442,10 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
     let (grate, hazard, door, vent) = (tile("grate"), tile("hazard"), tile("door"), tile("vent"));
     let shades = [tile("shade_n"), tile("shade_w"), tile("shade_e")];
 
-    // Off the edge of the deck counts as solid.
+    // Off the edge of the deck counts as solid; the gate, open or shut, as floor
+    // (its doors are drawn from the `Breach`).
     let open = |col: isize, row: isize| {
-        col >= 0 && row >= 0 && (col as usize) < grid.cols() && (row as usize) < grid.rows() && grid.is_open(col as usize, row as usize)
+        col >= 0 && row >= 0 && (col as usize) < grid.cols() && (row as usize) < grid.rows() && grid.is_floor(col as usize, row as usize)
     };
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
@@ -395,7 +464,7 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
                     Some(caps[mask].clone())
                 }
                 'D' => Some(door.clone()),
-                ',' => Some(grate.clone()),
+                ',' | 'G' => Some(grate.clone()),
                 '=' => Some(hazard.clone()),
                 'v' => Some(vent.clone()),
                 // A lift is one 2x2 platform; each tile shows its quarter.
@@ -415,7 +484,7 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
 
             // Walls shade the floor beside them.
-            if grid.is_open(col, row) {
+            if grid.is_floor(col, row) {
                 for (shade, (dc, dr)) in shades.iter().zip([(0, -1), (-1, 0), (1, 0)]) {
                     if !open(c + dc, r + dr) {
                         commands.spawn((Level, Sprite::from_image(shade.clone()), Transform::from_translation(pos.extend(0.05))));
@@ -446,12 +515,14 @@ fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
     0
 }
 
-/// Places loot, guards and the vault. Host only; everyone else receives them by
-/// replication.
-fn populate(commands: &mut Commands, grid: &RoomGrid, deck: u8) {
+/// Places loot, guards, the vault, its gate and its keeper. Host only; everyone
+/// else receives them by replication.
+fn populate(commands: &mut Commands, grid: &RoomGrid, seed: u32, deck: u8) {
     if let Some(pos) = grid.vault {
         spawn_vault(commands, pos, deck);
     }
+    spawn_breach(commands, &grid.gate, deck);
+    spawn_keeper(commands, grid.gate.keeper, deck, KeeperKind::pick(seed, deck));
     for (row, line) in grid.tiles.iter().enumerate() {
         for (col, &ch) in line.iter().enumerate() {
             let pos = grid.tile_center(col, row);

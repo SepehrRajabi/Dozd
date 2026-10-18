@@ -1,5 +1,6 @@
 //! Procedural deck layouts: rooms joined by corridors, with loot and guards that
-//! get richer and nastier the deeper the crew goes. Deterministic integer maths
+//! get richer and nastier the deeper the crew goes. The vault room is sealed off
+//! behind a single gate ('G'), the only way in. Deterministic integer maths
 //! only, so every machine builds the same deck from `(seed, deck)`.
 
 use std::cmp::Reverse;
@@ -17,13 +18,26 @@ pub struct Layout {
     pub spawn: (usize, usize),
     /// Top-left tile of the 2x2 vault. Every deck has one.
     pub vault: Option<(usize, usize)>,
+    /// The vault room's two gate tiles, side by side in its wall.
+    pub gate: [(usize, usize); 2],
+    /// The vault room's floor: top-left tile, then width and height in tiles.
+    pub vault_room: (usize, usize, usize, usize),
+    /// Corridor floor just outside `gate[0]`.
+    pub gate_outside: (usize, usize),
+    /// Vault room floor just inside `gate[0]`.
+    pub gate_inside: (usize, usize),
+    /// Where the vault's keeper waits: across the vault from the gate, so the
+    /// crew is let in at a distance from it.
+    pub keeper: (usize, usize),
 }
 
 /// xorshift; `Rng` in main uses floats, which we avoid here.
 struct Gen(u32);
 
 impl Gen {
-    fn new(seed: u32, deck: u8) -> Self {
+    /// `attempt` > 0 rerolls a deck whose first try came out broken.
+    fn new(seed: u32, deck: u8, attempt: u32) -> Self {
+        let seed = seed ^ attempt.wrapping_mul(0x85EB_CA6B);
         let mut rng = Self((seed ^ (deck as u32 + 1).wrapping_mul(0x9E37_79B9)).max(1));
         for _ in 0..8 {
             rng.next();
@@ -74,6 +88,15 @@ impl Rect {
         (self.x + self.w / 2, self.y + self.h / 2)
     }
 
+    /// The room grown by `by` tiles on every side.
+    fn grown(&self, by: usize) -> Rect {
+        Rect { x: self.x - by, y: self.y - by, w: self.w + 2 * by, h: self.h + 2 * by }
+    }
+
+    fn contains(&self, (x, y): (usize, usize)) -> bool {
+        (self.x..self.x + self.w).contains(&x) && (self.y..self.y + self.h).contains(&y)
+    }
+
     fn near(&self, other: &Rect, margin: usize) -> bool {
         self.x < other.x + other.w + margin
             && other.x < self.x + self.w + margin
@@ -102,17 +125,9 @@ fn guard_table(deck: u8) -> [(char, u32); 5] {
     ]
 }
 
-/// Every deck's vault room: big enough to fight in around the vault.
-const VAULT_ROOM: (usize, usize) = (15, 11);
-
-/// Who guards the vault: more, and worse, the deeper it is.
-fn vault_guards(deck: u8) -> &'static [char] {
-    match deck {
-        0 => &['s', 'h'],
-        1 => &['h', 'b', 's'],
-        _ => &['h', 'h', 'b', 's'],
-    }
-}
+/// Every deck's vault room: an arena to fight the keeper in around the vault.
+/// Even sides, so the 2x2 vault sits dead centre.
+const VAULT_ROOM: (usize, usize) = (18, 12);
 
 /// Rooms every deck needs: the vault, the arrival, the lift and the pad.
 const MIN_ROOMS: usize = 4;
@@ -121,16 +136,33 @@ const MIN_ROOMS: usize = 4;
 const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2), ('5', 2)];
 
 pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
-    let mut rng = Gen::new(seed, deck);
+    // A corridor between other rooms can clip the sealed vault room; roll again.
+    (0..)
+        .find_map(|attempt| try_generate(seed, deck, decks, attempt))
+        .expect("some attempt builds a deck")
+}
+
+/// One go at a deck; `None` if the vault room's seal cut the rest of it apart.
+fn try_generate(seed: u32, deck: u8, decks: u8, attempt: u32) -> Option<Layout> {
+    let mut rng = Gen::new(seed, deck, attempt);
     let last = deck + 1 >= decks;
     let mut tiles = vec![vec!['#'; COLS]; ROWS];
 
     // The vault room goes in first, so it always gets its space.
     let rooms = place_rooms(&mut rng, 7 + deck as usize, Some(VAULT_ROOM));
-    for room in &rooms {
+    for room in &rooms[1..] {
         fill(&mut tiles, room.x, room.y, room.w, room.h, '.');
     }
-    connect(&mut rng, &mut tiles, &rooms);
+    let goal = 0;
+    let room = rooms[goal];
+    fill(&mut tiles, room.x, room.y, room.w, room.h, ',');
+    // The other rooms join up among themselves, steering clear of the vault
+    // room, then one corridor runs from its gate to the nearest of them.
+    connect(&mut rng, &mut tiles, &rooms[1..], room.grown(2));
+    let (gate, gate_outside, gate_inside, keeper) = open_gate(&mut tiles, &rooms);
+    if !all_connected(&tiles, rooms[1].center()) {
+        return None;
+    }
 
     // Roles: the crew arrives as far from the vault (room 0) as it gets; the
     // lift down is the farthest walk from there, and the escape pad is somewhere
@@ -142,7 +174,6 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
             Reverse(dist[r][c])
         });
     };
-    let goal = 0;
     let mut others: Vec<usize> = (1..rooms.len()).collect();
     farthest_from(rooms[goal].center(), &mut others);
     let start = others[0];
@@ -170,51 +201,45 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
         let (lx, ly) = rooms[lift].center();
         fill(&mut tiles, lx, ly, 2, 2, 'L');
     }
-    let (gx, gy) = rooms[goal].center();
+    let (gx, gy) = vault_tile(&room);
     let vault = Some((gx, gy));
-    let room = rooms[goal];
-    fill(&mut tiles, room.x, room.y, room.w, room.h, ',');
     fill(&mut tiles, gx, gy, 2, 2, 'V');
 
+    // Nothing but the keeper waits in the vault room: no vents, doors, loot or guards.
     for (i, room) in rooms.iter().enumerate() {
-        if i == start {
+        if i == start || i == goal {
             continue;
         }
         place_door(&mut rng, &mut tiles, room);
         place(&mut rng, &mut tiles, room, 'v', None);
 
-        let (loot, guards): (Vec<char>, Vec<char>) = if i == goal {
-            (Vec::new(), vault_guards(deck).to_vec())
+        let loot_count = if Some(i) == lift || i == pad {
+            rng.range(0, 1)
         } else {
-            let loot_count = if Some(i) == lift || i == pad {
-                rng.range(0, 1)
-            } else {
-                rng.range(1, 2 + deck.min(1) as usize)
-            };
-            let depth = deck as usize;
-            let mut guard_count = rng.range(depth, 2 + depth);
-            if i == pad {
-                // Nobody gets a free extraction.
-                guard_count = guard_count.max(1) + depth;
-            }
-            (
-                (0..loot_count).map(|_| rng.pick(loot_table(deck))).collect(),
-                (0..guard_count).map(|_| rng.pick(&guard_table(deck))).collect(),
-            )
+            rng.range(1, 2 + deck.min(1) as usize)
         };
-        for item in loot {
+        let depth = deck as usize;
+        let mut guard_count = rng.range(depth, 2 + depth);
+        if i == pad {
+            // Nobody gets a free extraction.
+            guard_count = guard_count.max(1) + depth;
+        }
+        for _ in 0..loot_count {
+            let item = rng.pick(loot_table(deck));
             place(&mut rng, &mut tiles, room, item, None);
         }
-        for guard in guards {
+        for _ in 0..guard_count {
+            let guard = rng.pick(&guard_table(deck));
             place(&mut rng, &mut tiles, room, guard, Some(spawn));
         }
     }
 
-    // A couple of perks per deck, never in the arrival room so they're earned.
+    // A couple of perks per deck, never in the arrival room so they're earned,
+    // nor the vault room.
     let perk_count = 2 + deck.min(1) as usize;
     for _ in 0..perk_count {
         let room = loop {
-            let i = rng.range(0, rooms.len() - 1);
+            let i = rng.range(1, rooms.len() - 1);
             if i != start {
                 break rooms[i];
             }
@@ -223,7 +248,71 @@ pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
         place(&mut rng, &mut tiles, &room, perk, None);
     }
 
-    Layout { tiles, spawn, vault }
+    let Rect { x, y, w, h } = rooms[goal];
+    let vault_room = (x, y, w, h);
+    Some(Layout { tiles, spawn, vault, gate, vault_room, gate_outside, gate_inside, keeper })
+}
+
+/// Top-left tile of the 2x2 vault, dead centre in the vault room.
+fn vault_tile(room: &Rect) -> (usize, usize) {
+    (room.x + (room.w - 2) / 2, room.y + (room.h - 2) / 2)
+}
+
+/// Seals the vault room (`rooms[0]`) behind a two-tile gate in the wall facing
+/// the nearest other room, with a corridor from the gate to it. Returns the
+/// gate's tiles, the tiles just outside and inside it, and the keeper's tile.
+fn open_gate(
+    tiles: &mut [Vec<char>],
+    rooms: &[Rect],
+) -> ([(usize, usize); 2], (usize, usize), (usize, usize), (usize, usize)) {
+    let room = rooms[0];
+    let (cx, cy) = room.center();
+    let (tx, ty) = rooms[1..]
+        .iter()
+        .map(Rect::center)
+        .min_by_key(|&(x, y)| x.abs_diff(cx) + y.abs_diff(cy))
+        .expect("rooms besides the vault's");
+    // The gate lines up with the vault: rows `gy..=gy+1` or columns `gx..=gx+1`.
+    let (gx, gy) = vault_tile(&room);
+    let (right, left) = (room.x + room.w, room.x - 1);
+    let (bottom, top) = (room.y + room.h, room.y - 1);
+    // Corridors are carved from their top-left tile, two wide, so one that has
+    // to end next to the gate on its left or top starts a tile further out.
+    let (gate, outside, inside, keeper) = if tx.abs_diff(cx) >= ty.abs_diff(cy) {
+        if tx > cx {
+            carve(tiles, (right + 1, gy), (tx, gy));
+            ([(right, gy), (right, gy + 1)], (right + 1, gy), (right - 1, gy), (room.x + 3, gy))
+        } else {
+            carve(tiles, (tx, gy), (left - 2, gy));
+            ([(left, gy), (left, gy + 1)], (left - 1, gy), (left + 1, gy), (right - 4, gy))
+        }
+    } else if ty > cy {
+        carve(tiles, (gx, bottom + 1), (gx, ty));
+        ([(gx, bottom), (gx + 1, bottom)], (gx, bottom + 1), (gx, bottom - 1), (gx, room.y + 2))
+    } else {
+        carve(tiles, (gx, ty), (gx, top - 2));
+        ([(gx, top), (gx + 1, top)], (gx, top - 1), (gx, top + 1), (gx, bottom - 3))
+    };
+    // Then on to the room itself.
+    let turn = if gate[0].0 == gate[1].0 { (tx, gy) } else { (gx, ty) };
+    carve(tiles, turn, (tx, ty));
+
+    // Re-wall the ring, whatever corridors dug into it, leaving just the gate.
+    let ring = room.grown(1);
+    for (y, row) in tiles.iter_mut().enumerate().skip(ring.y).take(ring.h) {
+        for (x, tile) in row.iter_mut().enumerate().skip(ring.x).take(ring.w) {
+            if !room.contains((x, y)) {
+                *tile = if gate.contains(&(x, y)) { 'G' } else { '#' };
+            }
+        }
+    }
+    (gate, outside, inside, keeper)
+}
+
+/// Every open tile can be walked to from `from`.
+fn all_connected(tiles: &[Vec<char>], from: (usize, usize)) -> bool {
+    let dist = walk_distances(tiles, from);
+    tiles.iter().zip(&dist).all(|(row, d)| row.iter().zip(d).all(|(&ch, &d)| !is_open(ch) || d != u32::MAX))
 }
 
 fn fill(tiles: &mut [Vec<char>], x: usize, y: usize, w: usize, h: usize, ch: char) {
@@ -259,8 +348,9 @@ fn place_rooms(rng: &mut Gen, want: usize, first: Option<(usize, usize)>) -> Vec
 }
 
 /// Joins every room (minimum spanning tree over room centres), plus a couple of
-/// loops so there's more than one way around.
-fn connect(rng: &mut Gen, tiles: &mut [Vec<char>], rooms: &[Rect]) {
+/// loops so there's more than one way around. Corridors bend whichever way keeps
+/// them out of `keep_out`; a loop that can't is left out.
+fn connect(rng: &mut Gen, tiles: &mut [Vec<char>], rooms: &[Rect], keep_out: Rect) {
     let gap = |a: usize, b: usize| {
         let (ax, ay) = rooms[a].center();
         let (bx, by) = rooms[b].center();
@@ -279,6 +369,7 @@ fn connect(rng: &mut Gen, tiles: &mut [Vec<char>], rooms: &[Rect]) {
         joined[b] = true;
         edges.push((a, b));
     }
+    let tree = edges.len();
     for _ in 0..2 {
         let a = rng.range(0, rooms.len() - 1);
         let b = rng.range(0, rooms.len() - 1);
@@ -287,13 +378,30 @@ fn connect(rng: &mut Gen, tiles: &mut [Vec<char>], rooms: &[Rect]) {
         }
     }
 
-    for (a, b) in edges {
+    for (i, (a, b)) in edges.into_iter().enumerate() {
         let (ax, ay) = rooms[a].center();
         let (bx, by) = rooms[b].center();
-        let corner = if rng.chance(50) { (bx, ay) } else { (ax, by) };
+        let mut corners = [(bx, ay), (ax, by)];
+        if rng.chance(50) {
+            corners.swap(0, 1);
+        }
+        let clear = |&corner: &(usize, usize)| {
+            !crosses(&keep_out, (ax, ay), corner) && !crosses(&keep_out, corner, (bx, by))
+        };
+        // The tree has to be dug regardless; if that breaks the deck, it's rerolled.
+        let Some(&corner) = corners.iter().find(|c| clear(c)).or((i < tree).then_some(&corners[0])) else {
+            continue;
+        };
         carve(tiles, (ax, ay), corner);
         carve(tiles, corner, (bx, by));
     }
+}
+
+/// Whether `carve(from, to)` would dig into `rect`.
+fn crosses(rect: &Rect, from: (usize, usize), to: (usize, usize)) -> bool {
+    let (x0, x1) = (from.0.min(to.0), from.0.max(to.0) + 1);
+    let (y0, y1) = (from.1.min(to.1), from.1.max(to.1) + 1);
+    x0 < rect.x + rect.w && rect.x <= x1 && y0 < rect.y + rect.h && rect.y <= y1
 }
 
 /// A straight, two-tile-wide corridor; only digs through solid rock.
@@ -368,19 +476,26 @@ fn place(rng: &mut Gen, tiles: &mut [Vec<char>], room: &Rect, item: char, avoid:
     }
 }
 
+/// Whether a tile can be walked on. The vault gate counts as open here; in play
+/// `RoomGrid` only lets it be while the gate is.
 pub fn is_open(ch: char) -> bool {
     !matches!(ch, '#' | 'D')
 }
 
 /// Four-way walking distance from `from` to every tile (`u32::MAX` if unreachable).
 fn walk_distances(tiles: &[Vec<char>], from: (usize, usize)) -> Vec<Vec<u32>> {
+    walk_distances_by(tiles, from, is_open)
+}
+
+/// `walk_distances`, with `open` saying which tiles can be walked.
+fn walk_distances_by(tiles: &[Vec<char>], from: (usize, usize), open: impl Fn(char) -> bool) -> Vec<Vec<u32>> {
     let mut dist = vec![vec![u32::MAX; COLS]; ROWS];
     let mut queue = VecDeque::from([from]);
     dist[from.1][from.0] = 0;
     while let Some((x, y)) = queue.pop_front() {
         let d = dist[y][x];
         for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
-            if is_open(tiles[ny][nx]) && dist[ny][nx] == u32::MAX {
+            if open(tiles[ny][nx]) && dist[ny][nx] == u32::MAX {
                 dist[ny][nx] = d + 1;
                 queue.push_back((nx, ny));
             }
@@ -455,10 +570,60 @@ mod tests {
     }
 
     #[test]
+    fn the_vault_room_is_sealed_behind_its_gate() {
+        let shut = |c: char| c != 'G' && is_open(c);
+        for seed in 1..300 {
+            for deck in 0..3 {
+                let layout = generate(seed, deck, 3);
+                let tiles = &layout.tiles;
+                let at = |(x, y): (usize, usize)| tiles[y][x];
+                assert_eq!(tiles.iter().flatten().filter(|&&t| t == 'G').count(), 2, "seed {seed} deck {deck}: gate");
+                let [(ax, ay), (bx, by)] = layout.gate;
+                assert!(at((ax, ay)) == 'G' && at((bx, by)) == 'G');
+                assert_eq!(ax.abs_diff(bx) + ay.abs_diff(by), 1, "seed {seed} deck {deck}: gate tiles side by side");
+                for (name, tile) in [("outside", layout.gate_outside), ("inside", layout.gate_inside), ("keeper", layout.keeper)] {
+                    assert!(matches!(at(tile), '.' | ','), "seed {seed} deck {deck}: {name} {tile:?} is {:?}", at(tile));
+                }
+
+                // With the gate shut, the deck splits in two: the vault room, and
+                // everything else, reachable from the arrival point.
+                let outside = walk_distances_by(tiles, layout.spawn, shut);
+                let inside = walk_distances_by(tiles, layout.gate_inside, shut);
+                for (y, row) in tiles.iter().enumerate() {
+                    for (x, &ch) in row.iter().enumerate() {
+                        if !shut(ch) {
+                            continue;
+                        }
+                        let (out, inn) = (outside[y][x] != u32::MAX, inside[y][x] != u32::MAX);
+                        assert!(out != inn, "seed {seed} deck {deck}: ({x},{y}) out {out} in {inn}");
+                        // Only the keeper waits in there.
+                        assert!(!inn || matches!(ch, ',' | 'V'), "seed {seed} deck {deck}: {ch:?} in the vault room");
+                    }
+                }
+                let (vx, vy) = layout.vault.expect("a vault");
+                let (kx, ky) = layout.keeper;
+                assert!(inside[vy][vx] != u32::MAX && inside[ky][kx] != u32::MAX);
+                let (ox, oy) = layout.gate_outside;
+                assert!(outside[oy][ox] != u32::MAX, "seed {seed} deck {deck}: gate cut off");
+                // The keeper waits across the vault from the gate.
+                assert!(inside[ky][kx] > inside[vy][vx], "seed {seed} deck {deck}: keeper by the gate");
+                // The gate is a ring tile around the vault room, so it doesn't touch any
+                // doors or vents.
+                for (x, y) in layout.gate {
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        assert!(!matches!(tiles[ny][nx], 'D' | 'v'), "seed {seed} deck {deck}: by the gate");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn same_seed_same_deck() {
         assert_eq!(generate(42, 1, 3).tiles, generate(42, 1, 3).tiles);
         assert_ne!(generate(42, 1, 3).tiles, generate(43, 1, 3).tiles);
         assert_eq!(generate(42, 2, 3).tiles, generate(42, 2, 3).tiles);
         assert_eq!(generate(42, 2, 3).vault, generate(42, 2, 3).vault);
+        assert_eq!(generate(42, 2, 3).gate, generate(42, 2, 3).gate);
     }
 }
