@@ -114,6 +114,10 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
 | Two pirates pulling bars out of deck 2's gold vault in lockdown, with guards closing in | The last pirate out takes the crew's pool, plus a bonus for the crewmate who left early |
+| ![Breach vote](docs/screenshots/breach.png) | ![Vault Keeper](docs/screenshots/boss_keeper.png) |
+| A crewmate calls the crew into the sealed vault: everyone has to press Y | The Vault Keeper sweeping a laser past the crew |
+| ![Vault Stalker](docs/screenshots/boss_stalker.png) | ![Vault Brute](docs/screenshots/boss_brute.png) |
+| The Vault Stalker winding up: three ways it might lunge, and only it knows which | The Vault Brute roaring guards in, one more appearing at the glowing spot |
 | ![Enemies](docs/screenshots/enemies.png) | |
 | The station's guards and vault bosses, under **EXTRAS** in the main menu | |
 

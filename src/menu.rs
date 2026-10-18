@@ -783,14 +783,15 @@ fn codex_screen(
                         row_gap: Val::Px(16.0),
                         flex_wrap: FlexWrap::Wrap,
                         justify_content: JustifyContent::Center,
-                        max_width: Val::Px(900.0),
+                        // Three cards a row, so it all fits a 720 px tall window.
+                        max_width: Val::Px(1180.0),
                         ..default()
                     })
                     .with_children(|grid| {
                         for entry in &section.entries {
                             grid.spawn((
                                 Node {
-                                    width: Val::Px(420.0),
+                                    width: Val::Px(372.0),
                                     min_height: Val::Px(card_height),
                                     align_items: AlignItems::Center,
                                     column_gap: Val::Px(16.0),
@@ -824,15 +825,18 @@ fn codex_screen(
                                     ..default()
                                 })
                                 .with_children(|info| {
+                                    // Names stay whole; the tag drops below one that's too long.
                                     info.spawn(Node {
                                         column_gap: Val::Px(10.0),
+                                        row_gap: Val::Px(2.0),
+                                        flex_wrap: FlexWrap::Wrap,
                                         align_items: AlignItems::Baseline,
                                         ..default()
                                     })
                                     .with_children(|heading| {
-                                        heading.spawn(label(entry.name, 20.0, entry.color));
-                                        heading.spawn(label(entry.tag, 12.0, DIM));
-                                        heading.spawn(label(entry.note.clone(), 14.0, TEXT));
+                                        heading.spawn((label(entry.name, 20.0, entry.color), TextLayout::no_wrap()));
+                                        heading.spawn((label(entry.tag, 12.0, DIM), TextLayout::no_wrap()));
+                                        heading.spawn((label(entry.note.clone(), 14.0, TEXT), TextLayout::no_wrap()));
                                     });
                                     info.spawn(label(entry.details, 14.0, TEXT));
                                 });
