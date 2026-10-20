@@ -13,10 +13,10 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::class::RiotShield;
+use crate::class::{HACK_COLOR, RiotShield};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_outlines};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
-use crate::enemies::{EnemyKind, Summoned, spawn_enemy};
+use crate::enemies::{EnemyKind, Summoned, spawn_enemy, whiffs};
 use crate::guns::Arsenal;
 use crate::mission::Banner;
 use crate::net::authority;
@@ -192,15 +192,17 @@ const SUMMON_GAP: f32 = 12.0;
 const ENRAGED_SUMMON_GAP: f32 = 9.0;
 /// Seconds it stands roaring, its guards' spots showing, before they appear.
 const ROAR: f32 = 1.2;
-/// Guards each roar calls in for each pirate it can see, up to a crew of
-/// `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged. At most `CAP_PER_PIRATE`
-/// per pirate plus one are alive at once, never fewer than `MIN_CAP` nor more
-/// than `MAX_SUMMONS`: at the cap a roar calls fewer, or none.
+/// Guards each roar calls in: `BASE_SUMMONS`, plus one for each pirate it can
+/// see up to a crew of `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged. At
+/// most `CAP_PER_PIRATE` per pirate plus one are alive at once, never fewer
+/// than `MIN_CAP` nor more than `MAX_SUMMONS`: at the cap a roar calls fewer,
+/// or none.
+const BASE_SUMMONS: usize = 1;
 const SUMMON_CREW: usize = 3;
-const ENRAGED_SUMMONS: usize = 1;
-const CAP_PER_PIRATE: usize = 2;
-const MIN_CAP: usize = 3;
-const MAX_SUMMONS: usize = 6;
+const ENRAGED_SUMMONS: usize = 2;
+const CAP_PER_PIRATE: usize = 3;
+const MIN_CAP: usize = 4;
+const MAX_SUMMONS: usize = 10;
 /// Guards appear this far in from the room's walls, at least `SUMMON_CLEAR`
 /// from every pirate (half that if the crew leaves no such room), and
 /// `SUMMON_SPREAD` from each other.
@@ -338,6 +340,11 @@ pub struct Keeper {
     /// and calls in more guards, more often.
     pub enraged: bool,
 }
+
+/// Host only: a Hacker nearby is jamming the boss, so each of its blows,
+/// beam burns, orb arcs and bursts may whiff (see `enemies::whiffs`).
+#[derive(Component, Default)]
+pub struct KeeperJam(pub bool);
 
 impl Keeper {
     /// Wakes it as `crew` pirates are let in, sizing its health to them.
@@ -519,6 +526,8 @@ struct KeeperOrb {
     arc_timer: f32,
     /// Scales its arcs and burst: its keeper's `Might::power`.
     power: f32,
+    /// Thrown by a jammed keeper: its arcs and burst may whiff.
+    jammed: bool,
 }
 
 /// Host only: the vault stalker's hidden side; what it's doing is its `StalkerLook`.
@@ -559,6 +568,7 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
             Level,
             Replicated,
             Keeper { kind, tier, awake: false, enraged: false },
+            KeeperJam::default(),
             Team::Enemy,
             Health::new(keeper_health(kind, tier, 1), 0.0),
             Hurtbox(KEEPER_HURTBOX),
@@ -888,29 +898,22 @@ fn summon_cap(crew: usize) -> usize {
 /// How many guards a roar calls in facing `crew` pirates, with `alive` of its
 /// summons still up: a lone pirate isn't swamped, and never past the cap.
 fn summon_count(enraged: bool, alive: usize, crew: usize) -> usize {
-    let wanted = crew.clamp(1, SUMMON_CREW) + if enraged { ENRAGED_SUMMONS } else { 0 };
+    let wanted = BASE_SUMMONS + crew.clamp(1, SUMMON_CREW) + if enraged { ENRAGED_SUMMONS } else { 0 };
     wanted.min(summon_cap(crew).saturating_sub(alive))
 }
 
-/// Which guard a roar calls in for a vault of `tier`: mostly drones and
-/// stalkers, with wardens and brutes likelier deeper down.
-fn summon_kind(rng: &mut Rng, tier: VaultTier) -> EnemyKind {
-    // Odds of a drone, a stalker and a warden; the rest are brutes.
-    let (drone, stalker, warden) = match tier {
-        VaultTier::Silver => (0.45, 0.45, 0.1),
-        VaultTier::Gold => (0.35, 0.35, 0.2),
-        VaultTier::Platinum => (0.25, 0.3, 0.25),
-    };
-    let r = rng.unit();
-    if r < drone {
-        EnemyKind::SentryDrone
-    } else if r < drone + stalker {
-        EnemyKind::Stalker
-    } else if r < drone + stalker + warden {
-        EnemyKind::Warden
-    } else {
-        EnemyKind::Brute
+/// Every kind of guard a roar can call in.
+const SUMMON_KINDS: [EnemyKind; 5] =
+    [EnemyKind::SentryDrone, EnemyKind::Stalker, EnemyKind::Warden, EnemyKind::Brute, EnemyKind::Herald];
+
+/// Which guards a roar of `count` calls in: every kind in turn, in a random
+/// order, so a roar of five or more brings one of each.
+fn summon_kinds(rng: &mut Rng, count: usize) -> Vec<EnemyKind> {
+    let mut kinds = SUMMON_KINDS;
+    for i in (1..kinds.len()).rev() {
+        kinds.swap(i, roll(rng, i + 1));
     }
+    kinds.iter().copied().cycle().take(count).collect()
 }
 
 /// Where up to `count` summoned guards appear on the room floor `room`: near
@@ -993,6 +996,8 @@ fn charge(
     damage: f32,
     throw: f32,
     fling: bool,
+    jammed: bool,
+    rng: &mut Rng,
 ) -> Charge {
     let half = Vec2::splat(KEEPER_HALF);
     while left > 0.0 {
@@ -1025,6 +1030,10 @@ fn charge(
                 continue;
             }
             hits.push(entity);
+            if whiffs(rng, jammed) {
+                fx(commands, FxKind::Spark, at, dir.to_angle(), HACK_COLOR);
+                continue;
+            }
             if victim.hurt(damage) {
                 fx(commands, FxKind::Spark, at, dir.to_angle(), KEEPER_COLOR);
                 if let Some(mut victim_knockback) = victim_knockback {
@@ -1046,7 +1055,7 @@ fn drive_keeper(
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
-    mut keepers: Query<(&mut Keeper, &Health, &mut Transform, &mut Knockback, &mut KeeperBrain), Without<KeeperHand>>,
+    mut keepers: Query<(&mut Keeper, &KeeperJam, &Health, &mut Transform, &mut Knockback, &mut KeeperBrain), Without<KeeperHand>>,
     mut hands: Query<(&mut KeeperHand, &mut HandBrain, &mut Transform), Without<Keeper>>,
     mut beams: Query<(&mut KeeperBeam, &mut Transform), (Without<Keeper>, Without<KeeperHand>)>,
     mut crew: Query<
@@ -1055,7 +1064,8 @@ fn drive_keeper(
     >,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<KeeperHand>, Without<KeeperBeam>)>,
 ) {
-    let Ok((mut keeper, health, mut body, mut knockback, mut brain)) = keepers.single_mut() else { return };
+    let Ok((mut keeper, jam, health, mut body, mut knockback, mut brain)) = keepers.single_mut() else { return };
+    let jammed = jam.0;
     let dt = time.delta_secs();
     // Nothing pushes it around.
     if knockback.0 != Vec2::ZERO {
@@ -1232,10 +1242,13 @@ fn drive_keeper(
                             && in_play(team, &health, player)
                             && !hb.burned.iter().any(|(e, _)| *e == entity)
                             && !shield_between(&shields, from, at)
-                            && health.hurt(BEAM_HIT * power)
                         {
                             hb.burned.push((entity, BEAM_TICK));
-                            fx(&mut commands, FxKind::Spark, at, 0.0, KEEPER_COLOR);
+                            if whiffs(&mut rng, jammed) {
+                                fx(&mut commands, FxKind::Spark, at, 0.0, HACK_COLOR);
+                            } else if health.hurt(BEAM_HIT * power) {
+                                fx(&mut commands, FxKind::Spark, at, 0.0, KEEPER_COLOR);
+                            }
                         }
                     }
                     if hb.timer >= hb.fire_time {
@@ -1265,7 +1278,7 @@ fn drive_keeper(
                         commands.spawn((
                             Level,
                             Replicated,
-                            KeeperOrb { velocity: dir * ORB_SPEED, remaining: ORB_RANGE, arc_timer: ORB_ARC_GAP, power },
+                            KeeperOrb { velocity: dir * ORB_SPEED, remaining: ORB_RANGE, arc_timer: ORB_ARC_GAP, power, jammed },
                             ProjectileLook::NovaOrb,
                             Transform::from_translation(from.extend(15.0)).with_scale(Vec3::splat(ORB_SCALE)),
                         ));
@@ -1301,11 +1314,12 @@ fn drive_stalker(
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
-    mut stalkers: Query<(&mut Keeper, &Health, &mut Transform, &mut Knockback, &mut StalkerBrain, &mut StalkerLook)>,
+    mut stalkers: Query<(&mut Keeper, &KeeperJam, &Health, &mut Transform, &mut Knockback, &mut StalkerBrain, &mut StalkerLook)>,
     mut crew: Crew,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
 ) {
-    let Ok((mut keeper, health, mut body, mut knockback, mut brain, mut look)) = stalkers.single_mut() else { return };
+    let Ok((mut keeper, jam, health, mut body, mut knockback, mut brain, mut look)) = stalkers.single_mut() else { return };
+    let jammed = jam.0;
     let dt = time.delta_secs();
     // Nothing pushes it around.
     if knockback.0 != Vec2::ZERO {
@@ -1394,7 +1408,7 @@ fn drive_stalker(
             let legs = routes.first().map_or(0, Vec::len);
             let to = routes.first().and_then(|r| r.get(hit as usize)).copied().unwrap_or(pos);
             let speed = LUNGE_SPEED * dt;
-            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, LUNGE_HIT * power, LUNGE_KNOCKBACK, false) {
+            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, LUNGE_HIT * power, LUNGE_KNOCKBACK, false, jammed, &mut rng) {
                 Charge::Blocked(dir) => {
                     fx(&mut commands, FxKind::Spark, pos + dir * KEEPER_HALF, dir.to_angle(), KEEPER_COLOR);
                     pos = in_room(room, half, grid.slide(pos, -dir * REBOUND, half));
@@ -1428,7 +1442,7 @@ fn drive_stalker(
         StalkerState::Rampage { dash, total, moving: true } => {
             let to = lane.map_or(pos, |l| l[1]);
             let speed = DASH_SPEED * dt;
-            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, DASH_HIT * power, DASH_KNOCKBACK, true) {
+            match charge(&mut commands, &grid, &shields, &mut pos, to, speed, &mut brain.hits, &mut crew, DASH_HIT * power, DASH_KNOCKBACK, true, jammed, &mut rng) {
                 Charge::Blocked(dir) => {
                     // A shield ends the whole rampage.
                     fx(&mut commands, FxKind::Spark, pos + dir * KEEPER_HALF, dir.to_angle(), KEEPER_COLOR);
@@ -1495,12 +1509,13 @@ fn drive_brute(
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
-    mut brutes: Query<(&mut Keeper, &Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
+    mut brutes: Query<(&mut Keeper, &KeeperJam, &Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
     mut crew: Crew,
     summoned: Query<(), With<Summoned>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
 ) {
-    let Ok((mut keeper, health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
+    let Ok((mut keeper, jam, health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
+    let jammed = jam.0;
     let dt = time.delta_secs();
     // Nothing pushes it around.
     if knockback.0 != Vec2::ZERO {
@@ -1594,6 +1609,10 @@ fn drive_brute(
                         fx(&mut commands, FxKind::Spark, spot, (spot - at).to_angle(), KEEPER_COLOR);
                         continue;
                     }
+                    if whiffs(&mut rng, jammed) {
+                        fx(&mut commands, FxKind::Spark, spot, 0.0, HACK_COLOR);
+                        continue;
+                    }
                     if victim.hurt(SLAM_HIT * power) {
                         fx(&mut commands, FxKind::Spark, spot, 0.0, KEEPER_COLOR);
                         if let Some(mut victim_knockback) = victim_knockback {
@@ -1615,8 +1634,9 @@ fn drive_brute(
         BruteState::Summon => {
             if brain.timer >= ROAR {
                 // The cap was checked as the roar began: nothing else calls guards in.
-                for spot in &summons {
-                    let guard = spawn_enemy(&mut commands, summon_kind(&mut rng, keeper.tier), *spot, true);
+                let kinds = summon_kinds(&mut rng, summons.len());
+                for (spot, kind) in summons.iter().zip(kinds) {
+                    let guard = spawn_enemy(&mut commands, kind, *spot, true);
                     commands.entity(guard).insert(Summoned);
                     fx(&mut commands, FxKind::Burst, *spot, 0.0, KEEPER_COLOR);
                 }
@@ -1644,6 +1664,7 @@ fn move_keeper_orbs(
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
+    mut rng: ResMut<Rng>,
     mut orbs: Query<(Entity, &mut KeeperOrb, &mut Transform)>,
     mut crew: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&Player>, Option<&mut Knockback>), Without<KeeperOrb>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<KeeperOrb>, Without<Hurtbox>)>,
@@ -1671,7 +1692,9 @@ fn move_keeper_orbs(
                 .min_by(|a, b| a.2.translation.truncate().distance(pos).total_cmp(&b.2.translation.truncate().distance(pos)));
             if let Some((_, _, t, mut health, ..)) = nearest {
                 let at = t.translation.truncate();
-                if health.hurt(ORB_ARC_DAMAGE * orb.power) {
+                if whiffs(&mut rng, orb.jammed) {
+                    fx(&mut commands, FxKind::Zap(at), pos, 0.0, HACK_COLOR);
+                } else if health.hurt(ORB_ARC_DAMAGE * orb.power) {
                     fx(&mut commands, FxKind::Zap(at), pos, 0.0, KEEPER_COLOR);
                 }
             }
@@ -1696,6 +1719,10 @@ fn move_keeper_orbs(
                         || offset.length() > reach
                         || shield_between(&shields, center, t.translation.truncate())
                     {
+                        continue;
+                    }
+                    if whiffs(&mut rng, orb.jammed) {
+                        fx(&mut commands, FxKind::Spark, t.translation.truncate(), 0.0, HACK_COLOR);
                         continue;
                     }
                     let falloff = 1.0 - 0.5 * offset.length() / reach;
@@ -1946,10 +1973,10 @@ mod tests {
 
     #[test]
     fn roars_never_raise_more_than_the_cap() {
-        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (1, 2), "a lone pirate isn't swamped");
-        assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (3, 4));
-        assert_eq!(summon_count(false, 0, 5), SUMMON_CREW, "a big crew calls no more each roar");
-        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 5, MAX_SUMMONS, MAX_SUMMONS));
+        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (2, 4));
+        assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (4, 6));
+        assert_eq!(summon_count(false, 0, 5), BASE_SUMMONS + SUMMON_CREW, "a big crew calls no more each roar");
+        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 7, MAX_SUMMONS, MAX_SUMMONS));
         assert_eq!(summon_count(true, MAX_SUMMONS - 1, 3), 1, "shrinks near the cap");
         for crew in 0..5 {
             for alive in 0..MAX_SUMMONS + 3 {
@@ -1959,15 +1986,17 @@ mod tests {
             }
         }
         assert_eq!(summon_count(false, MAX_SUMMONS, 3), 0);
-        assert_eq!(summon_count(true, MIN_CAP, 1), 0);
-        // Every kind of guard turns up deep down, and Silver's are lighter.
+        assert_eq!(summon_count(true, summon_cap(1), 1), 0);
+        // A roar brings as many different kinds as it can, and over a fight, all of them.
         let mut rng = Rng::new(3);
-        let deep: Vec<EnemyKind> = (0..400).map(|_| summon_kind(&mut rng, VaultTier::Platinum)).collect();
-        for kind in [EnemyKind::SentryDrone, EnemyKind::Stalker, EnemyKind::Warden, EnemyKind::Brute] {
-            assert!(deep.contains(&kind));
+        for count in 0..12 {
+            let kinds = summon_kinds(&mut rng, count);
+            assert_eq!(kinds.len(), count);
+            for kind in SUMMON_KINDS {
+                let n = kinds.iter().filter(|k| **k == kind).count();
+                assert!(n == count / 5 || n == count / 5 + 1, "{count} guards bring {n} of {kind:?}");
+            }
         }
-        assert!((0..400).all(|_| summon_kind(&mut rng, VaultTier::Silver) != EnemyKind::Brute));
-        assert!(!deep.contains(&EnemyKind::Herald));
     }
 
     #[test]

@@ -66,6 +66,7 @@ impl Plugin for PlayerViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalAim>()
             .init_resource::<TriggerArmed>()
+            .init_resource::<HackAiming>()
             .add_observer(dress_player)
             // The click that started the run is still held: it mustn't fire.
             .add_systems(OnEnter(GameState::Playing), |mut armed: ResMut<TriggerArmed>| armed.0 = false)
@@ -203,6 +204,12 @@ pub struct LocalAim {
 /// button is let go, so the menu click that started it doesn't fire a shot.
 #[derive(Resource, Default)]
 struct TriggerArmed(bool);
+
+/// A Hacker with a hack ready pressed Q: the hack circle follows the
+/// crosshair until a left click lets it go, or Q or a right click calls it off.
+/// The click doesn't fire the gun.
+#[derive(Resource, Default)]
+pub struct HackAiming(pub bool);
 
 impl Default for LocalAim {
     fn default() -> Self {
@@ -422,14 +429,42 @@ fn gather_input(
     scroll: Res<AccumulatedMouseScroll>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    player: Option<Single<&Transform, With<LocalPlayer>>>,
+    player: Option<Single<(&Transform, &Player, &Health, &Ability), With<LocalPlayer>>>,
     mut local_aim: ResMut<LocalAim>,
     mut armed: ResMut<TriggerArmed>,
+    mut hack_aiming: ResMut<HackAiming>,
     mut inputs: MessageWriter<PlayerInput>,
 ) {
     if !mouse.pressed(MouseButton::Left) {
         armed.0 = true;
     }
+    // A hack goes off on the click after Q, not on Q itself.
+    let hack_ready = player.as_ref().is_some_and(|p| {
+        let (_, player, health, ability) = **p;
+        player.active == Some(Active::Hack)
+            && player.status == PirateStatus::Active
+            && !health.is_dead()
+            && ability.cooldown <= 0.0
+    });
+    let mut ability = keys.just_pressed(KeyCode::KeyQ);
+    let mut hack_released = false;
+    if !hack_ready {
+        hack_aiming.0 = false;
+    } else if hack_aiming.0 {
+        if keys.just_pressed(KeyCode::KeyQ) || mouse.just_pressed(MouseButton::Right) {
+            hack_aiming.0 = false;
+        } else if armed.0 && mouse.just_pressed(MouseButton::Left) {
+            hack_aiming.0 = false;
+            hack_released = true;
+            // Holding the button on doesn't fire the gun after the hack.
+            armed.0 = false;
+        }
+        ability = hack_released;
+    } else if ability {
+        hack_aiming.0 = true;
+        ability = false;
+    }
+    let trigger = armed.0 && !hack_aiming.0 && !hack_released;
     let (camera, camera_transform) = *camera;
     if let Some(target) = window
         .cursor_position()
@@ -438,7 +473,7 @@ fn gather_input(
         local_aim.target = target;
     }
     if let Some(player) = player
-        && let Some(dir) = (local_aim.target - player.translation.truncate()).try_normalize()
+        && let Some(dir) = (local_aim.target - player.0.translation.truncate()).try_normalize()
     {
         local_aim.dir = dir;
     }
@@ -454,8 +489,8 @@ fn gather_input(
             axis([KeyCode::KeyS, KeyCode::ArrowDown], [KeyCode::KeyW, KeyCode::ArrowUp]),
         ),
         aim: local_aim.target,
-        fire: armed.0 && mouse.pressed(MouseButton::Left),
-        fire_pressed: armed.0 && mouse.just_pressed(MouseButton::Left),
+        fire: trigger && mouse.pressed(MouseButton::Left),
+        fire_pressed: trigger && mouse.just_pressed(MouseButton::Left),
         dash: keys.just_pressed(KeyCode::Space),
         reload: keys.just_pressed(KeyCode::KeyR),
         slot: SLOTS.iter().position(|&k| keys.just_pressed(k)).map(|i| i as u8),
@@ -469,7 +504,7 @@ fn gather_input(
         },
         interact: keys.just_pressed(KeyCode::KeyE),
         interact_held: keys.pressed(KeyCode::KeyE),
-        ability: keys.just_pressed(KeyCode::KeyQ),
+        ability,
         accept: keys.just_pressed(KeyCode::KeyY),
         decline: keys.just_pressed(KeyCode::KeyN),
         restart: keys.just_pressed(KeyCode::Enter),

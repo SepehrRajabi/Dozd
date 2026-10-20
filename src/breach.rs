@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::boss::Keeper;
 use crate::combat::Health;
+use crate::enemies::Enemy;
 use crate::mission::Banner;
 use crate::net::authority;
 use crate::player::{Controls, PirateStatus, Player, crew_spot};
@@ -22,6 +23,8 @@ pub const GATE_REACH: f32 = 28.0;
 pub const VOTE_TIME: f32 = 20.0;
 /// Room a pirate leaves around themselves when let in, so nobody lands in a wall.
 const LANDING_HALF: Vec2 = Vec2::new(6.0, 4.0);
+/// Room a hacked guard brought in needs: the biggest guard's.
+const HACKED_HALF: Vec2 = Vec2::splat(6.0);
 
 pub struct BreachPlugin;
 
@@ -115,6 +118,7 @@ fn run_breach(
     mut breaches: Query<&mut Breach>,
     mut players: Query<(&Player, &Health, &Controls, &mut Transform)>,
     mut keepers: Query<(&mut Keeper, &mut Health), Without<Player>>,
+    mut guards: Query<(&Enemy, &Health, &mut Transform), (Without<Player>, Without<Keeper>)>,
     // Exact seconds left on the call; `Vote::left` only carries whole ones.
     mut clock: Local<f32>,
     // Pirates near the gate when a call was turned down or lapsed: they can't
@@ -171,6 +175,7 @@ fn run_breach(
             } else if voters.iter().all(|owner| accepted.contains(owner)) {
                 let voters = voters.clone();
                 let_in(&grid, &voters, &mut players);
+                bring_hacked(&grid, &mut guards);
                 let mut name = "VAULT KEEPER";
                 for (mut keeper, mut health) in &mut keepers {
                     keeper.wake(&mut health, voters.len());
@@ -228,6 +233,28 @@ fn let_in(grid: &RoomGrid, voters: &[u64], players: &mut Query<(&Player, &Health
                 break pos;
             }
         };
+        transform.translation = pos.extend(transform.translation.z);
+    }
+}
+
+/// Brings every guard fighting for the crew through the gate behind them, on
+/// open floor in rings past where the crew lands.
+fn bring_hacked(grid: &RoomGrid, guards: &mut Query<(&Enemy, &Health, &mut Transform), (Without<Player>, Without<Keeper>)>) {
+    let inward = (grid.gate.inside - grid.gate.outside).normalize_or_zero();
+    let centre = grid.gate.inside + inward * TILE * 3.0;
+    let mut spots = (0..3).flat_map(|ring| {
+        let radius = TILE * (2.0 + ring as f32);
+        let count = 8 + 4 * ring;
+        (0..count).map(move |i| centre + Vec2::from_angle(std::f32::consts::TAU * i as f32 / count as f32) * radius)
+    });
+    for (enemy, health, mut transform) in guards.iter_mut() {
+        if !enemy.is_hacked() || health.is_dead() || grid.vault_room.contains(transform.translation.truncate()) {
+            continue;
+        }
+        let pos = spots
+            .by_ref()
+            .find(|p| grid.vault_room.contains(*p) && !grid.collides(*p, HACKED_HALF))
+            .unwrap_or(centre);
         transform.translation = pos.extend(transform.translation.z);
     }
 }

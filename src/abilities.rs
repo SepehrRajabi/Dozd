@@ -91,7 +91,7 @@ impl Passive {
             Self::Supply => "Crew shots may cost no ammo",
             Self::Ricochet => "Hits may bounce to others",
             Self::Armor => "80% more shield",
-            Self::Rally => "Crew nearby hit 25% harder",
+            Self::Rally => "You and crew nearby hit 25% harder",
             Self::Jamming => "Guards nearby may miss",
             Self::Healing => "Heals crew nearby",
             Self::Lifesteal => "Crew hits may heal the shooter",

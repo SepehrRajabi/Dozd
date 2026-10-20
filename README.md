@@ -47,14 +47,15 @@ Three kinds of boss take turns down the decks, so every heist meets each once:
   It only fights up close: it plods after you, raises its fists over a spot
   just in front of it, then slams it, hitting everyone in the circle hard.
   Every 12 s (9 s enraged, and once as it enrages) it roars and calls in
-  guards to fight for it, more the bigger the crew; their spots glow while it
-  roars. Summoned guards drop nothing, and they all fall with the Brute.
+  guards to fight for it, a mix of every kind, more the bigger the crew and
+  more again enraged; their spots glow while it roars. Summoned guards drop
+  ammo but never credits, and they all fall with the Brute.
 
 A boss has a lot of health, more for a bigger crew, and enrages below half
 health. Each one further down has more health and hits harder, and the last
 deck's is deliberately overtuned. A raised riot shield blocks all of their
 attacks, lasers, orbs, arcs, blasts and slams alike, and stops a lunge dead,
-staggering the stalker; it ends a rampage too. Hacks, Blackout and shock fields don't touch them.
+staggering the stalker; it ends a rampage too. Hacks, Blackout and shock fields don't touch them, but a Hacker's jamming does: a jammed boss's hits may whiff.
 When a boss falls it drops a bounty, some ammo and a Nano Patch, and the gate
 opens for good.
 
@@ -181,8 +182,8 @@ from the classes still free.
 | --- | --- | --- |
 | Gunner | **Supply:** they and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. **Ricochet:** a bullet that hits a guard has a 30% chance to bounce on into the 2 guards nearest it, for 60% of its damage | **Spare gun:** no Q, but carries a 4th gun. **Laser:** fires a beam for 3 s that cuts through every guard in its path until it reaches a wall, killing even the toughest in under a second (25 s cooldown). It kicks, so the beam shakes off your aim, you walk at under half speed and can't fire your guns while it's on, and guards hear it |
 | Engineer | **Armour:** 80% more shield | **Sentry gun:** drops a gun that shoots guards for 20 s (25 s cooldown). Guards shoot back at it. Q next to it picks it back up, taking time off the cooldown for the time it had left |
-| Bulwark | **Rally:** crewmates within reach deal 25% more damage | **Riot shield:** raises or lowers a shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
-| Hacker | **Jamming:** guards within reach are jammed: 35% of their shots go wide and their blows whiff | **Hack:** turns every guard within a small circle around your crosshair, shown while it's ready, to the crew's side for 20 s (30 s cooldown). **Blackout:** freezes every guard on the deck for 4 s, even ones arriving during it, cutting off whatever attack they were winding up (40 s cooldown) |
+| Bulwark | **Rally:** they and every crewmate within reach deal 25% more damage | **Riot shield:** raises or lowers a shield you carry in front of you, turning as you aim. No shot gets through, from either side, and you can't fire while holding it. It drains while up (10 s from full) and recharges while down (22 s from empty) |
+| Hacker | **Jamming:** guards and vault bosses within reach are jammed: 35% of a guard's shots go wide and its blows whiff, and 35% of a boss's hits whiff | **Hack:** Q brings up a small circle around your crosshair, and a left click turns every guard in it to the crew's side for good, so every hack adds to the guards fighting for you (30 s cooldown). Hacked guards stick with the pirate nearest them, fight whatever comes near the crew, vault bosses included, and follow the crew through the vault gate. Q again or a right click calls it off. **Blackout:** freezes every guard on the deck for 4 s, even ones arriving during it, cutting off whatever attack they were winding up (40 s cooldown) |
 | Doctor | **Field medic:** slowly heals crewmates within reach. **Lifesteal:** they and every crewmate, wherever they are, have a 30% chance for a hit on a guard to heal them half the damage dealt (sentry shots don't count) | **Ward:** wards crewmates nearby and the Doctor against all harm for 4 s (28 s cooldown) |
 
 ## Controls
@@ -195,7 +196,7 @@ from the classes still free.
 | Space | Dash |
 | R | Reload |
 | 1-4 / wheel | Switch gun |
-| Q | Class ability |
+| Q | Class ability (Hack: Q to aim, left click to hack) |
 | E | Take loot; hold at the vault to pull bars |
 | Y / N | Join / turn down a crewmate's call to breach the vault |
 | Enter | Play again (results screen) |

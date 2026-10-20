@@ -7,7 +7,7 @@
 //! crosshair against the station or freezes every guard on the deck, and the Doctor wards the crew nearby against all harm. The Doctor
 //! also slowly patches up any crewmate close by, or lets the whole crew's hits
 //! sometimes heal whoever landed them, the Bulwark's presence makes
-//! the crew around them hit harder, and the Hacker jams the guards around them
+//! the crew around them hit harder, and the Hacker jams the guards and bosses around them
 //! so their attacks sometimes miss.
 
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
-use crate::player::{Aim, Controls, LocalAim, MAX_SHIELD, PirateStatus, Player, move_players};
+use crate::player::{Aim, Controls, HackAiming, LocalAim, MAX_SHIELD, PirateStatus, Player, move_players};
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
@@ -76,7 +76,8 @@ const LASER_KICK: f32 = 0.11;
 pub const LASER_SLOW: f32 = 0.45;
 pub const LASER_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
 
-/// How close a crewmate must be to the Bulwark to be rallied.
+/// How close a crewmate must be to the Bulwark to be rallied. The Bulwark is
+/// always rallied themselves.
 pub const RALLY_RADIUS: f32 = 64.0;
 /// Extra damage a rallied pirate deals, as a share of the gun's.
 pub const RALLY_BOOST: f32 = 0.25;
@@ -104,8 +105,6 @@ pub const RIOT_COLOR: Color = Color::srgb(0.45, 0.85, 1.0);
 /// What it burns down to as its time runs out.
 const RIOT_SPENT: Color = Color::srgb(1.0, 0.3, 0.2);
 
-/// Seconds a hacked guard fights for the crew.
-pub const HACK_LIFE: f32 = 20.0;
 const HACK_COOLDOWN: f32 = 30.0;
 /// How far away a Hacker can reach a guard.
 const HACK_RANGE: f32 = 140.0;
@@ -277,7 +276,8 @@ impl Active {
             Self::Hack => AbilityStats {
                 label: "HACK",
                 cooldown: HACK_COOLDOWN,
-                life: HACK_LIFE,
+                // A hacked guard stays the crew's for good: nothing to time.
+                life: 0.0,
                 color: HACK_COLOR,
             },
             Self::Blackout => AbilityStats {
@@ -564,9 +564,18 @@ fn riot_curve() -> [Vec2; RIOT_POINTS] {
 #[derive(Resource, Default)]
 struct Blackout(f32);
 
-/// The ring around a Hacker's crosshair: who Q would hack.
-#[derive(Component)]
-struct HackReticle;
+/// The ring around a Hacker's crosshair while they aim a hack: who a click
+/// would hack.
+#[derive(Component, Default)]
+struct HackReticle {
+    /// Seconds left showing.
+    left: f32,
+    /// How bright it flashed: brighter if the crosshair was in reach.
+    alpha: f32,
+}
+
+/// Seconds the hack ring shows after Q.
+const HACK_FLASH: f32 = 0.6;
 
 /// A Gunner's laser: a beam from their gun along their aim, thrown about by its
 /// kick, that burns through every guard in it until a wall stops it.
@@ -765,7 +774,7 @@ fn use_abilities(
                         && at.distance(aim.target) <= HACK_RADIUS
                         && grid.line_of_sight(pos, at);
                     if reached {
-                        enemy.hack(HACK_LIFE);
+                        enemy.hack();
                         fx(&mut commands, FxKind::Zap(at), pos, 0.0, HACK_COLOR);
                         fx(&mut commands, FxKind::Burst, at, 0.0, HACK_COLOR);
                         hacked += 1;
@@ -807,11 +816,11 @@ fn use_abilities(
 }
 
 /// Each Doctor patches up the crewmates around them, a little at a time, each
-/// Bulwark rallies them to hit harder, and a Gunner keeps the whole crew, near
-/// or far and themselves included, supplied, so their shots sometimes cost no
-/// ammo. A Doctor with lifesteal reaches the whole crew the same way, so their
-/// hits sometimes heal them (see `steal_life`). Otherwise the Doctor and Bulwark
-/// don't help themselves: their passives need a crew. Records who's getting what in everyone's `Boons`.
+/// Bulwark rallies themselves and the crewmates around them to hit harder, and
+/// a Gunner keeps the whole crew, near or far and themselves included,
+/// supplied, so their shots sometimes cost no ammo. A Doctor with lifesteal
+/// reaches the whole crew the same way, so their hits sometimes heal them (see
+/// `steal_life`). Field medic alone doesn't help its Doctor: it needs a crew. Records who's getting what in everyone's `Boons`.
 fn support_crew(
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -834,8 +843,8 @@ fn support_crew(
         if can_act(player, &health) {
             for (i, &(owner, passive, at)) in supporters.iter().enumerate() {
                 let own = owner == player.owner;
-                // Only supply and lifesteal cover the Gunner or Doctor themselves too.
-                if own && !matches!(passive, Passive::Supply | Passive::Lifesteal) {
+                // Only field medic leaves out the Doctor themselves.
+                if own && passive == Passive::Healing {
                     continue;
                 }
                 let radius = match passive {
@@ -1261,34 +1270,47 @@ fn draw_lasers(
 
 fn spawn_hack_reticle(mut commands: Commands, assets: Res<AssetServer>) {
     commands.spawn((
-        HackReticle,
+        HackReticle::default(),
         Visibility::Hidden,
         Sprite { image: assets.load("sprites/fx/shock_ring.png"), color: HACK_COLOR, ..default() },
         Transform::from_xyz(0.0, 0.0, 49.0).with_scale(Vec3::splat(2.0 * HACK_RADIUS / RING_SIZE)),
     ));
 }
 
-/// Rings a Hacker's crosshair while a hack is ready, so they can see who it
-/// would reach; brighter when the crosshair is within reach.
+/// Rings a Hacker's crosshair while they're aiming a hack (after Q, until
+/// they click), brighter when the crosshair is within reach, then flashes it
+/// out where the hack went off.
 fn draw_hack_reticle(
     time: Res<Time>,
     state: Res<State<GameState>>,
     local_aim: Res<LocalAim>,
-    player: Option<Single<(&Player, &Health, &Ability, &Transform), With<LocalPlayer>>>,
-    mut reticle: Single<(&mut Visibility, &mut Sprite, &mut Transform), (With<HackReticle>, Without<Player>)>,
+    aiming: Res<HackAiming>,
+    player: Option<Single<&Transform, (With<LocalPlayer>, With<Player>)>>,
+    mut reticle: Single<(&mut HackReticle, &mut Visibility, &mut Sprite, &mut Transform), Without<Player>>,
+    mut was_aiming: Local<bool>,
 ) {
-    let (visibility, sprite, transform) = &mut *reticle;
-    let ready = player.as_ref().is_some_and(|p| {
-        let (player, health, ability, _) = **p;
-        player.active == Some(Active::Hack) && ability.cooldown <= 0.0 && can_act(player, health)
-    });
-    let shown = ready && *state.get() == GameState::Playing;
+    let (reticle, visibility, sprite, transform) = &mut *reticle;
+    let playing = *state.get() == GameState::Playing;
+    let in_reach = player.is_some_and(|p| p.translation.truncate().distance(local_aim.target) <= HACK_RANGE + HACK_RADIUS);
+    let peak = if in_reach { 0.45 } else { 0.15 };
+    if aiming.0 {
+        let pulse = 0.05 * (time.elapsed_secs() * 4.0).sin();
+        reticle.left = 0.0;
+        reticle.alpha = peak;
+        sprite.color = HACK_COLOR.with_alpha(if in_reach { 0.35 + pulse } else { 0.12 });
+        transform.translation = local_aim.target.extend(49.0);
+    } else if *was_aiming {
+        // Let go (or called off): it fades where it was.
+        reticle.left = HACK_FLASH;
+    }
+    *was_aiming = aiming.0;
+    reticle.left = (reticle.left - time.delta_secs()).max(0.0);
+    let fading = reticle.left > 0.0;
+    if fading {
+        sprite.color = HACK_COLOR.with_alpha(reticle.alpha * reticle.left / HACK_FLASH);
+    }
+    let shown = playing && (aiming.0 || fading);
     visibility.set_if_neq(if shown { Visibility::Visible } else { Visibility::Hidden });
-    let Some(player) = player.filter(|_| shown) else { return };
-    let in_reach = player.3.translation.truncate().distance(local_aim.target) <= HACK_RANGE + HACK_RADIUS;
-    let pulse = 0.05 * (time.elapsed_secs() * 4.0).sin();
-    sprite.color = HACK_COLOR.with_alpha(if in_reach { 0.35 + pulse } else { 0.12 });
-    transform.translation = local_aim.target.extend(49.0);
 }
 
 /// Gives every pirate a ward bubble, hidden until warded, and each Doctor and
@@ -1414,6 +1436,7 @@ fn spawn_ability_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 
 fn update_ability_hud(
     local: Res<LocalId>,
+    hack_aiming: Res<HackAiming>,
     player: Option<Single<(&Player, &Ability, &Transform), With<LocalPlayer>>>,
     sentries: Query<(&Sentry, &Transform), Without<LocalPlayer>>,
     riot_shields: Query<&RiotShield>,
@@ -1457,6 +1480,8 @@ fn update_ability_hud(
     } else if let Some(left) = active {
         let label = if in_reach { "PICK UP  [Q]".into() } else { format!("ACTIVE {:.0}s", left.ceil()) };
         (left / stats.life, stats.color, label, stats.color)
+    } else if hack_aiming.0 {
+        (1.0, stats.color, "CLICK TO HACK".into(), stats.color)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
         (ready, hud::SPENT, format!("{:.0}s", ability.cooldown.ceil()), dim)

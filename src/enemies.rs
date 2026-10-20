@@ -3,6 +3,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::Passive;
+use crate::boss::{Keeper, KeeperJam};
 use crate::class::{Boons, HACK_COLOR, JAM_MISS, JAM_RADIUS, Sentry};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Team, fx, spawn_projectile};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
@@ -27,6 +28,13 @@ const BRUTE_DAMAGE: f32 = 20.0;
 const STALKER_DAMAGE: f32 = 25.0;
 /// A Herald's rifle shot.
 const HERALD_DAMAGE: f32 = 10.0;
+/// A hacked guard fights only what comes this close to the pirate nearest it,
+/// heads back once it's `LEASH` from them, and with nothing to fight keeps
+/// within `FOLLOW` of them.
+const GUARD_REACH: f32 = 130.0;
+const LEASH: f32 = 110.0;
+const FOLLOW: f32 = 36.0;
+
 /// How long a Herald stands rallying before its phase kicks in. Stunning or
 /// killing it in this window stops it.
 const HERALD_RALLY_TIME: f32 = 1.0;
@@ -282,8 +290,8 @@ pub struct Enemy {
     velocity: Vec2,
     /// Seconds left frozen by a shock field.
     stun: f32,
-    /// Seconds left fighting for the crew after a Hacker turned it.
-    hacked: f32,
+    /// A Hacker turned it: it fights for the crew for good.
+    hacked: bool,
     /// Heard a Herald's war cry: its attacks hit `WAR_CRY_POWER` harder for good.
     empowered: bool,
     /// A Herald's rally, once it has rallied.
@@ -318,7 +326,7 @@ impl Enemy {
             kind: self.kind,
             state: self.state,
             stunned: self.stun > 0.0,
-            hacked: self.hacked > 0.0,
+            hacked: self.hacked,
             empowered: self.empowered,
             frenzied: self.phase == Some(HeraldPhase::Frenzy),
             jammed: self.jammed,
@@ -326,12 +334,12 @@ impl Enemy {
     }
 
     pub fn is_hacked(&self) -> bool {
-        self.hacked > 0.0
+        self.hacked
     }
 
-    /// Turns the enemy against its own side for `secs`.
-    pub fn hack(&mut self, secs: f32) {
-        self.hacked = secs;
+    /// Turns the enemy against its own side, for good.
+    pub fn hack(&mut self) {
+        self.hacked = true;
         self.state = AiState::Hunt;
         self.burst_left = 0;
         self.attack_cooldown = self.attack_cooldown.min(0.5);
@@ -339,8 +347,8 @@ impl Enemy {
 }
 
 /// Host only: called in by a boss (see the Vault Brute in `boss.rs`). Fights
-/// like any other guard, but drops nothing, so the fight can't be farmed, and
-/// goes down with the boss.
+/// like any other guard, but drops only ammo, never credits, so the fight
+/// can't be farmed for loot, and goes down with the boss.
 #[derive(Component)]
 pub struct Summoned;
 
@@ -369,7 +377,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             wander: None,
             velocity: Vec2::ZERO,
             stun: 0.0,
-            hacked: 0.0,
+            hacked: false,
             empowered: false,
             phase: None,
             jammed: false,
@@ -462,14 +470,12 @@ fn think(
         (Without<Enemy>, Or<(With<Player>, With<Sentry>)>),
     >,
     mut enemies: Query<(Entity, &mut Enemy, &Transform, &mut Health, &mut Team)>,
+    mut keepers: Query<(Entity, &Keeper, &Transform, &mut KeeperJam, &mut Health), (Without<Enemy>, Without<Player>, Without<Sentry>)>,
 ) {
     let dt = time.delta_secs();
-    // Hacks wear off, and a turned enemy's shots and wounds follow its side.
-    for (_, mut enemy, _, _, mut team) in &mut enemies {
-        if enemy.hacked > 0.0 {
-            enemy.hacked = (enemy.hacked - dt).max(0.0);
-        }
-        let side = if enemy.hacked > 0.0 { Team::Player } else { Team::Enemy };
+    // A turned enemy's shots and wounds follow its side.
+    for (_, enemy, _, _, mut team) in &mut enemies {
+        let side = if enemy.hacked { Team::Player } else { Team::Enemy };
         if *team != side {
             *team = side;
         }
@@ -490,10 +496,22 @@ fn think(
     let mut station = Vec::new();
     for (entity, enemy, transform, health, _) in &enemies {
         if !health.is_dead() {
-            let side = if enemy.hacked > 0.0 { &mut crew } else { &mut station };
+            let side = if enemy.hacked { &mut crew } else { &mut station };
             side.push((entity, transform.translation.truncate()));
         }
     }
+    // An awake vault boss is fair game for hacked guards too.
+    for (entity, keeper, transform, _, health) in &keepers {
+        if keeper.awake && !health.is_dead() {
+            station.push((entity, transform.translation.truncate()));
+        }
+    }
+    // The pirates hacked guards stay close to and guard.
+    let pirates: Vec<Vec2> = victims
+        .iter()
+        .filter(|(_, _, health, player, ..)| !health.is_dead() && player.is_some_and(|p| p.status == PirateStatus::Active))
+        .map(|(_, t, ..)| t.translation.truncate())
+        .collect();
     let heard = std::mem::take(&mut noise.0);
 
     // Hackers jam the station's guards around them, and count them.
@@ -508,7 +526,7 @@ fn think(
     for (_, mut enemy, transform, health, _) in &mut enemies {
         let pos = transform.translation.truncate();
         let mut jammed = false;
-        if enemy.hacked <= 0.0 && !health.is_dead() {
+        if !enemy.hacked && !health.is_dead() {
             for (i, (_, at)) in jammers.iter().enumerate() {
                 if at.distance(pos) <= JAM_RADIUS {
                     jamming[i] = jamming[i].saturating_add(1);
@@ -518,6 +536,22 @@ fn think(
         }
         if enemy.jammed != jammed {
             enemy.jammed = jammed;
+        }
+    }
+    // Vault bosses too, once they're awake.
+    for (_, keeper, transform, mut jam, _) in &mut keepers {
+        let pos = transform.translation.truncate();
+        let mut jammed = false;
+        if keeper.awake {
+            for (i, (_, at)) in jammers.iter().enumerate() {
+                if at.distance(pos) <= JAM_RADIUS {
+                    jamming[i] = jamming[i].saturating_add(1);
+                    jammed = true;
+                }
+            }
+        }
+        if jam.0 != jammed {
+            jam.0 = jammed;
         }
     }
     for ((hacker, _), count) in jammers.iter().zip(jamming) {
@@ -574,18 +608,22 @@ fn think(
         let power = enemy.power();
         let jammed = enemy.jammed;
 
-        let hacked = enemy.hacked > 0.0;
-        let foes = if hacked { &station } else { &crew };
+        let hacked = enemy.hacked;
+        // A hacked guard sticks with the pirate nearest it: it only fights
+        // what comes within `GUARD_REACH` of them, and never strays past `LEASH`.
+        let leader = pirates.iter().copied().min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
+        let strayed = hacked && leader.is_some_and(|l| l.distance(pos) > LEASH);
         let nearest = |list: &[(Entity, Vec2)]| {
             list.iter()
-                .filter(|(e, _)| *e != entity)
+                .filter(|(e, at)| *e != entity && (!hacked || leader.is_none_or(|l| l.distance(*at) <= GUARD_REACH)))
                 .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
                 .copied()
         };
-        let Some((target_entity, target)) = nearest(foes) else {
-            enemy.velocity = match nearest(&crew) {
-                // A hacked enemy with nothing to fight tags along with the crew.
-                Some((_, leader)) if hacked && leader.distance(pos) > 40.0 => {
+        let foes = if hacked { &station } else { &crew };
+        let Some((target_entity, target)) = nearest(foes).filter(|_| !strayed) else {
+            enemy.velocity = match leader.filter(|_| hacked) {
+                // A hacked enemy with nothing near to fight tags along with the crew.
+                Some(leader) if leader.distance(pos) > FOLLOW => {
                     let dir = (leader - pos).normalize_or_zero();
                     let chase = if grid.line_of_sight(pos, leader) { dir } else { field.step(&grid, pos).unwrap_or(Vec2::ZERO) };
                     chase * stats.speed
@@ -805,6 +843,8 @@ fn think(
     for (victim, damage) in bites {
         if let Ok((.., mut health, _)) = enemies.get_mut(victim) {
             health.hurt(damage);
+        } else if let Ok((.., mut health)) = keepers.get_mut(victim) {
+            health.hurt(damage);
         }
     }
 
@@ -813,7 +853,7 @@ fn think(
     for (cry, for_crew) in cries {
         for (_, mut enemy, transform, health, _) in &mut enemies {
             let at = transform.translation.truncate();
-            let ally = (enemy.hacked > 0.0) == for_crew;
+            let ally = (enemy.hacked) == for_crew;
             if enemy.empowered || !ally || health.is_dead() || at.distance(cry) > HERALD_REACH {
                 continue;
             }
@@ -837,7 +877,7 @@ fn think(
 }
 
 /// Whether a guard's blow misses, if a Hacker is jamming it.
-fn whiffs(rng: &mut Rng, jammed: bool) -> bool {
+pub(crate) fn whiffs(rng: &mut Rng, jammed: bool) -> bool {
     jammed && rng.unit() < JAM_MISS
 }
 
@@ -969,18 +1009,13 @@ fn enemy_deaths(
             let stats = enemy.kind.stats();
             let pos = transform.translation.truncate();
             fx(&mut commands, FxKind::Burst, pos, 0.0, stats.death_color);
-            if summoned {
-                // A boss's summons leave nothing behind.
-                commands.entity(entity).despawn();
-                continue;
-            }
-
             let (lo, hi) = stats.bounty;
             let credits = lo + (rng.unit() * (hi - lo) as f32).round() as u32;
             // Each drop is its own roll, so a body may leave nothing at all.
             let ammo_rolls = if matches!(enemy.kind, EnemyKind::Warden | EnemyKind::Brute) { 2 } else { 1 };
             let mut drops = Vec::new();
-            if rng.unit() < CREDIT_DROP_CHANCE {
+            // A boss's summons leave only ammo behind.
+            if !summoned && rng.unit() < CREDIT_DROP_CHANCE {
                 drops.push(EnemyDrop::Credits(credits));
             }
             for _ in 0..ammo_rolls {
