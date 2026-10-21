@@ -172,19 +172,27 @@ const DASH_KNOCKBACK: f32 = 330.0;
 
 /// The vault brute's plodding pace: slower than the stalker prowls, faster
 /// than a regular brute. It stops closing in once a pirate is this close.
-const PLOD_SPEED: f32 = 32.0;
-const PLOD_NEAR: f32 = 22.0;
-/// It raises its fists once a pirate it can see is this close, locking its
-/// slam `SLAM_AHEAD` in front of it, toward them.
-const SLAM_TRIGGER: f32 = 34.0;
-const SLAM_AHEAD: f32 = 16.0;
-/// Seconds its fists are raised before they come down.
+const PLOD_SPEED: f32 = 40.0;
+const PLOD_NEAR: f32 = 26.0;
+/// It starts a flurry of `SLAMS` once a pirate it can see is this close, each
+/// landing `SLAM_AHEAD` from it in a random direction, at least `SLAM_TURN`
+/// radians round from the one before.
+const SLAM_TRIGGER: f32 = 40.0;
+const SLAM_AHEAD: f32 = 20.0;
+pub const SLAMS: u8 = 3;
+const SLAM_TURN: f32 = 1.0;
+/// Seconds its fists are raised before the first slam comes down, and before
+/// each one after.
 const SLAM_WIND_UP: f32 = 0.8;
 const ENRAGED_SLAM_WIND_UP: f32 = 0.65;
-/// The slam's damage to everyone within `BRUTE_SLAM_RADIUS` of where it
-/// lands, how hard it throws them, and the seconds it's stuck afterwards.
+const FOLLOW_WIND_UP: f32 = 0.5;
+const ENRAGED_FOLLOW_WIND_UP: f32 = 0.42;
+/// Each slam's damage to everyone within `BRUTE_SLAM_RADIUS` of where it
+/// lands and how hard it throws them; the seconds it pauses between slams,
+/// and is stuck after the last.
 const SLAM_HIT: f32 = 55.0;
 const SLAM_KNOCKBACK: f32 = 300.0;
+const SLAM_BEAT: f32 = 0.25;
 const SLAM_RECOVER: f32 = 1.0;
 /// Seconds after waking before its first roar, then between roars.
 const FIRST_SUMMON: f32 = 2.0;
@@ -447,17 +455,29 @@ pub struct StalkerLook {
 pub enum BruteState {
     /// Plodding after the nearest pirate.
     Plod,
-    /// Fists raised over `BruteLook::at`, about to slam them down: everyone
-    /// within `BRUTE_SLAM_RADIUS` of it when they land is hit.
-    WindUp,
-    /// Just slammed: stuck a moment, open to punishment.
-    Recover,
+    /// Fists raised over `BruteLook::at` for the `blow`th of its `SLAMS`
+    /// slams, about to bring them down: everyone within `BRUTE_SLAM_RADIUS`
+    /// of it when they land is hit.
+    WindUp { blow: u8 },
+    /// Just landed the `blow`th slam: a beat before the next, or, after the
+    /// last, stuck a moment, open to punishment.
+    Recover { blow: u8 },
     /// Roaring, calling in guards: they appear at `BruteLook::summons` when it ends.
     Summon,
 }
 
 /// How far from `BruteLook::at` a Vault Brute's slam reaches.
-pub const BRUTE_SLAM_RADIUS: f32 = 26.0;
+pub const BRUTE_SLAM_RADIUS: f32 = 32.0;
+
+/// Seconds a Vault Brute's fists stay raised before its `blow`th slam.
+pub fn slam_wind_up(blow: u8, enraged: bool) -> f32 {
+    match (blow, enraged) {
+        (0, false) => SLAM_WIND_UP,
+        (0, true) => ENRAGED_SLAM_WIND_UP,
+        (_, false) => FOLLOW_WIND_UP,
+        (_, true) => ENRAGED_FOLLOW_WIND_UP,
+    }
+}
 
 /// Beside a Vault Brute's `Keeper`: what it's doing, where its slam lands,
 /// and where the guards it's calling in will appear. Replicated.
@@ -889,10 +909,15 @@ fn clip_lane(grid: &RoomGrid, half: Vec2, from: Vec2, lane: [Vec2; 2]) -> [Vec2;
     })
 }
 
-/// Where the vault brute's slam from `pos` at a pirate at `target` lands: a
-/// little in front of it, toward them.
-fn slam_spot(pos: Vec2, target: Vec2) -> Vec2 {
-    pos + (target - pos).normalize_or(Vec2::NEG_Y) * SLAM_AHEAD
+/// Where the vault brute's slam from `pos` lands, struck `angle` radians round.
+fn slam_spot(pos: Vec2, angle: f32) -> Vec2 {
+    pos + Vec2::from_angle(angle) * SLAM_AHEAD
+}
+
+/// A random way round for the next slam, at least `SLAM_TURN` from `last`'s.
+fn slam_angle(rng: &mut Rng, last: Option<f32>) -> f32 {
+    let Some(last) = last else { return rng.unit() * std::f32::consts::TAU };
+    last + SLAM_TURN + rng.unit() * (std::f32::consts::TAU - 2.0 * SLAM_TURN)
 }
 
 /// Whether a slam landing at `at` reaches someone at `victim` with a hurtbox of `hurtbox`.
@@ -1591,8 +1616,8 @@ fn drive_brute(
                     let dist = target.distance(pos);
                     if dist <= SLAM_TRIGGER {
                         // Locked in now: whoever steps out of reach in time is missed.
-                        state = BruteState::WindUp;
-                        at = in_room(room, Vec2::ZERO, slam_spot(pos, target)).round();
+                        state = BruteState::WindUp { blow: 0 };
+                        at = in_room(room, Vec2::ZERO, slam_spot(pos, slam_angle(&mut rng, None))).round();
                         brain.timer = 0.0;
                         brain.velocity = Vec2::ZERO;
                     } else if dist > PLOD_NEAR {
@@ -1605,8 +1630,8 @@ fn drive_brute(
                 }
             }
         }
-        BruteState::WindUp => {
-            if brain.timer >= if enraged { ENRAGED_SLAM_WIND_UP } else { SLAM_WIND_UP } {
+        BruteState::WindUp { blow } => {
+            if brain.timer >= slam_wind_up(blow, enraged) {
                 // Down come the fists, on everyone in reach a raised shield doesn't cover.
                 let shields = shield_outlines(&riot_shields);
                 let held = raised_shields(&riot_shields);
@@ -1632,11 +1657,20 @@ fn drive_brute(
                     }
                 }
                 fx(&mut commands, FxKind::Explosion, at, 0.0, KEEPER_COLOR);
-                state = BruteState::Recover;
+                state = BruteState::Recover { blow };
                 brain.timer = 0.0;
             }
         }
-        BruteState::Recover => {
+        BruteState::Recover { blow } if blow + 1 < SLAMS => {
+            if brain.timer >= SLAM_BEAT {
+                // The next slam, somewhere else round it.
+                let last = (at - pos).to_angle();
+                state = BruteState::WindUp { blow: blow + 1 };
+                at = in_room(room, Vec2::ZERO, slam_spot(pos, slam_angle(&mut rng, Some(last)))).round();
+                brain.timer = 0.0;
+            }
+        }
+        BruteState::Recover { .. } => {
             if brain.timer >= SLAM_RECOVER {
                 state = BruteState::Plod;
                 brain.timer = 0.0;
@@ -1971,17 +2005,24 @@ mod tests {
     }
 
     #[test]
-    fn slams_land_in_front_and_reach_only_so_far() {
+    fn slams_land_round_it_and_reach_only_so_far() {
         let pos = Vec2::new(100.0, 100.0);
-        let at = slam_spot(pos, Vec2::new(130.0, 100.0));
-        assert_eq!(at, pos + Vec2::new(SLAM_AHEAD, 0.0), "a little in front, toward them");
-        assert_eq!(slam_spot(pos, pos), pos + Vec2::NEG_Y * SLAM_AHEAD, "right on top of it: still somewhere");
+        let at = slam_spot(pos, 0.0);
+        assert!(at.distance(pos + Vec2::new(SLAM_AHEAD, 0.0)) < 1e-3, "SLAM_AHEAD out, the way it struck");
         assert!(slam_reaches(at, at + Vec2::new(BRUTE_SLAM_RADIUS + 5.0, 0.0), 5.0));
         assert!(!slam_reaches(at, at + Vec2::new(BRUTE_SLAM_RADIUS + 6.0, 0.0), 5.0));
-        // Whoever close enough to set it off stands where the slam lands, unless they step out.
-        let target = pos + Vec2::new(SLAM_TRIGGER, 0.0);
-        assert!(slam_reaches(slam_spot(pos, target), target, 0.0));
-        assert!(!slam_reaches(slam_spot(pos, target), pos - Vec2::new(SLAM_AHEAD, 0.0), 4.0), "it doesn't reach behind it");
+        // Whoever set it off, on the far side of the slam, is clear of it.
+        let behind = pos - Vec2::new(SLAM_TRIGGER, 0.0);
+        assert!(!slam_reaches(at, behind, 6.0), "it doesn't reach behind it");
+        // Each slam swings well round from the one before.
+        let mut rng = Rng::new(9);
+        let mut last = slam_angle(&mut rng, None);
+        for _ in 0..200 {
+            let next = slam_angle(&mut rng, Some(last));
+            let turn = Vec2::from_angle(next).angle_to(Vec2::from_angle(last)).abs();
+            assert!(turn >= SLAM_TURN - 1e-3, "turned only {turn}");
+            last = next;
+        }
     }
 
     #[test]

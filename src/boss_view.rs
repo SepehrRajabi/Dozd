@@ -6,7 +6,8 @@
 use bevy::prelude::*;
 
 use crate::boss::{
-    BRUTE_SLAM_RADIUS, BruteLook, KeeperKind, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, StalkerLook, StalkerState,
+    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, SLAMS, StalkerLook,
+    StalkerState, slam_wind_up,
 };
 use crate::combat::{Fade, Health, Shake};
 use crate::hud::{self, HudSlot, Meter};
@@ -43,11 +44,9 @@ const GHOST_GAP: f32 = 0.025;
 const GHOST_LIFE: f32 = 0.22;
 /// The brute's roar and the spots its guards will appear at: an alarm amber.
 const SUMMON_COLOR: Color = Color::srgb(1.0, 0.75, 0.2);
-/// Roughly how long the brute's fists stay raised (and, enraged, how long),
-/// and how long it roars, for its slam disc and summoning sigils to fill over;
-/// and how long the slam's flash lingers once it lands.
-const SLAM_LOOK: f32 = 0.8;
-const ENRAGED_SLAM_LOOK: f32 = 0.65;
+/// Roughly how long the brute roars, for its summoning sigils to fill over,
+/// and how long a slam's flash lingers once it lands. Its slam discs fill over
+/// `slam_wind_up`.
 const ROAR_LOOK: f32 = 1.2;
 const SLAM_FLASH: f32 = 0.3;
 /// How many summoning sigils one roar can show at once.
@@ -556,23 +555,26 @@ fn animate_brute(
                     let breath = (t * 2.4).sin();
                     (IDLE[(breath > 0.0) as usize], mood, fury, 0.85 + 0.1 * breath)
                 }
-                BruteState::WindUp => {
+                BruteState::WindUp { blow } => {
                     if toward.abs() > 2.0 {
                         flip_to = toward.signum();
                     }
-                    if since < RAISE_HOLD {
+                    // Between slams the fists swing straight back up.
+                    let raise = if blow == 0 { RAISE_HOLD } else { RAISE_HOLD * 0.5 };
+                    if since < raise {
                         (RAISE, mood, fury, 1.0)
                     } else {
                         // Straining: shaking harder the longer it holds.
-                        let strain = ((since - RAISE_HOLD) * 3.0).min(1.5);
+                        let strain = ((since - raise) * 3.0).min(1.5);
                         offset = strain * Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
                         let color = if blink { tint.mix(&Srgba::WHITE, 0.45) } else { mood };
                         let glow = if blink { Color::WHITE } else { ENRAGED_COLOR };
                         (OVERHEAD, color, glow, 1.0)
                     }
                 }
-                BruteState::Recover => {
-                    if since < SLAM_HOLD {
+                BruteState::Recover { blow } => {
+                    // Mid-flurry it stays down over its fists until the next.
+                    if since < SLAM_HOLD || blow + 1 < SLAMS {
                         // Leaning into the blow, toward where it landed.
                         offset = (brute.at - pos).normalize_or_zero() * 2.0;
                         (SLAM, tint.mix(&Srgba::WHITE, 0.2), Color::WHITE, 1.0)
@@ -1149,8 +1151,7 @@ fn draw_brute(
             continue;
         }
         let length = match brute.state {
-            BruteState::WindUp if keeper.enraged => ENRAGED_SLAM_LOOK,
-            BruteState::WindUp => SLAM_LOOK,
+            BruteState::WindUp { blow } => slam_wind_up(blow, keeper.enraged),
             BruteState::Summon => ROAR_LOOK,
             _ => 1.0,
         };
@@ -1166,7 +1167,7 @@ fn draw_brute(
         };
         let full = BRUTE_SLAM_RADIUS;
         let look = match (plan.state, *part) {
-            (BruteState::WindUp, _) => {
+            (BruteState::WindUp { .. }, _) => {
                 let p = plan.progress;
                 let pulse = 0.5 + 0.5 * (t * (10.0 + 22.0 * p)).sin();
                 let hot = Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, 0.6 * p * p);
@@ -1177,7 +1178,7 @@ fn draw_brute(
                 }
             }
             // The flash where it landed, fading.
-            (BruteState::Recover, SlamPart::Fill | SlamPart::Edge) if plan.since < SLAM_FLASH => {
+            (BruteState::Recover { .. }, SlamPart::Fill | SlamPart::Edge) if plan.since < SLAM_FLASH => {
                 let fade = 1.0 - plan.since / SLAM_FLASH;
                 let color = Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, fade);
                 let radius = if *part == SlamPart::Edge { full * (1.0 + 0.25 * (1.0 - fade)) } else { full };

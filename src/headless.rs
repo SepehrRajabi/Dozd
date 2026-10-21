@@ -604,7 +604,7 @@ fn drive_bots(
     let keeper = keepers.iter().find(|(_, h, ..)| !h.is_dead());
     // Against the Vault Brute: where it is, and where a raised slam will land.
     let brute = keeper.filter(|(_, _, k, _)| k.kind == KeeperKind::Brute).map(|(t, _, _, look)| {
-        let slam = look.filter(|l| l.state == BruteState::WindUp).map(|l| l.at);
+        let slam = look.filter(|l| matches!(l.state, BruteState::WindUp { .. })).map(|l| l.at);
         (t.translation.truncate(), slam)
     });
     let guards: Vec<Vec2> = enemies
