@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use crate::boss::{
-    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, StalkerLook, StalkerState,
+    BRUTE_SLAM_RADIUS, BruteLook, KeeperKind, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, StalkerLook, StalkerState,
 };
 use crate::combat::{Fade, Health, Shake};
 use crate::hud::{self, HudSlot, Meter};
@@ -62,6 +62,31 @@ const PALM: f32 = 4.0;
 const BAR_WIDTH: f32 = 420.0;
 /// Half the height of a guardian's body sprite.
 const BODY_HALF: f32 = 20.0;
+/// One frame of the brute's sheet (`brute_sheet.png` and `brute_glow.png`),
+/// and how far up it sits so its feet stand where the other guardians' do.
+const BRUTE_FRAME: UVec2 = UVec2::new(56, 52);
+const BRUTE_LIFT: f32 = 5.0;
+/// The sheet's frames, in order (see `BRUTE_POSES` in `tools/gen_assets.py`).
+const IDLE: [usize; 2] = [0, 1];
+const WALK: [usize; 4] = [2, 3, 4, 5];
+const RAISE: usize = 6;
+const OVERHEAD: usize = 7;
+const SLAM: usize = 8;
+const SPENT: [usize; 2] = [9, 10];
+const ROAR: [usize; 2] = [11, 12];
+const BRUTE_FRAMES: u32 = 13;
+/// Walk frames a second at full plod, and the speed below which it stands.
+const WALK_RATE: f32 = 7.0;
+const STANDING: f32 = 4.0;
+/// How long it holds its fists at its shoulders before locking them overhead,
+/// how long the slam frame holds, and how long it throws its head back
+/// before bellowing.
+const RAISE_HOLD: f32 = 0.22;
+const SLAM_HOLD: f32 = 0.22;
+const ROAR_HOLD: f32 = 0.2;
+/// What its eyes and furnace burn: a hot orange, at rest.
+const BRUTE_GLOW: Color = Color::srgb(1.0, 0.5, 0.18);
+const DUST_COLOR: Color = Color::srgba(0.75, 0.7, 0.65, 0.8);
 
 pub struct BossViewPlugin;
 
@@ -74,6 +99,7 @@ impl Plugin for BossViewPlugin {
             .add_observer(dress_marks)
             .add_observer(dress_lane)
             .add_observer(dress_brute)
+            .add_observer(dress_brute_body)
             .add_systems(Startup, spawn_boss_bar)
             .add_systems(
                 Update,
@@ -82,6 +108,7 @@ impl Plugin for BossViewPlugin {
                     (
                         hide_boss,
                         draw_keeper,
+                        animate_brute,
                         draw_hands,
                         draw_beams,
                         draw_marks,
@@ -103,8 +130,28 @@ impl Plugin for BossViewPlugin {
 struct BossSeen(bool);
 
 /// The keeper's body sprite, a child so it can bob without moving the keeper.
+/// The brute's is a `BruteSprite` instead.
 #[derive(Component)]
 struct KeeperSprite;
+
+/// The brute's body: a frame of its sheet, picked by what it's doing.
+#[derive(Component, Default)]
+struct BruteSprite {
+    /// Where its body was last frame, to tell how fast it's plodding.
+    last: Option<Vec2>,
+    /// How far through its walk cycle, in frames.
+    stride: f32,
+    /// The frame showing, to catch each foot coming down.
+    frame: usize,
+    /// Which way it faces: 1 right, -1 left.
+    facing: f32,
+    clock: StateClock<BruteState>,
+}
+
+/// What burns on the brute (eyes, furnace, maw): the frame matching its
+/// body's, on top, coloured by its mood.
+#[derive(Component)]
+struct BruteGlow;
 
 /// A hand's sprite, a child so it can turn to its aim and kick back.
 #[derive(Component)]
@@ -274,7 +321,29 @@ fn dress_keeper(add: On<Add, Keeper>, mut commands: Commands, assets: Res<AssetS
             Sprite::from_image(assets.load("sprites/shadow.png")),
             Transform::from_xyz(0.0, -9.0, -0.1).with_scale(Vec3::new(3.2, 2.4, 1.0)),
         ));
-        parent.spawn((KeeperSprite, Sprite::from_image(assets.load(keeper.kind.sprite()))));
+        if keeper.kind != KeeperKind::Brute {
+            parent.spawn((KeeperSprite, Sprite::from_image(assets.load(keeper.kind.sprite()))));
+        }
+    });
+}
+
+/// Gives the brute its animated body and glow, from its sheets.
+fn dress_brute_body(
+    add: On<Add, BruteLook>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    let layout = layouts.add(TextureAtlasLayout::from_grid(BRUTE_FRAME, BRUTE_FRAMES, 1, None, None));
+    let atlas = |image: &str| Sprite::from_atlas_image(assets.load(image.to_string()), TextureAtlas { layout: layout.clone(), index: 0 });
+    commands.entity(add.entity).with_children(|parent| {
+        parent
+            .spawn((
+                BruteSprite { facing: 1.0, ..default() },
+                atlas("sprites/boss/brute_sheet.png"),
+                Transform::from_xyz(0.0, BRUTE_LIFT, 0.0),
+            ))
+            .with_child((BruteGlow, atlas("sprites/boss/brute_glow.png"), Transform::from_xyz(0.0, 0.0, 0.1)));
     });
 }
 
@@ -351,19 +420,17 @@ fn seethe(tint: Srgba, t: f32) -> Srgba {
 /// as it lunges and slumps, dull, when spent. Before a rampage it rears up
 /// tall, shaking and flashing; rampaging it stretches along its lane as it
 /// dashes and squashes, coiled and blinking, braced against each wall. The
-/// brute stomps heavily; raising its fists it stretches up tall, trembling and
-/// flashing; after a slam it slumps, squashed and dull; roaring it swells and
-/// shakes, glowing amber.
+/// brute is animated by `animate_brute`.
 #[allow(clippy::type_complexity)]
 fn draw_keeper(
     time: Res<Time>,
-    keepers: Query<(&Keeper, &Health, Option<&StalkerLook>, Option<&BruteLook>, &Transform), Without<KeeperSprite>>,
+    keepers: Query<(&Keeper, &Health, Option<&StalkerLook>, &Transform), Without<KeeperSprite>>,
     mut sprites: Query<(&ChildOf, &mut Sprite, &mut Transform), With<KeeperSprite>>,
 ) {
     let t = time.elapsed_secs();
     let blink = (t * 30.0).sin() > 0.0;
     for (parent, mut sprite, mut transform) in &mut sprites {
-        let Ok((keeper, health, look, brute, body)) = keepers.get(parent.parent()) else { continue };
+        let Ok((keeper, health, look, body)) = keepers.get(parent.parent()) else { continue };
         let tint = Srgba::from(tier_tint(keeper.tier));
         // Squashing keeps its feet where they were.
         let squash = |scale: Vec2| Vec2::new(0.0, BODY_HALF * (scale.y - 1.0));
@@ -425,42 +492,6 @@ fn draw_keeper(
                     (color, step, Vec2::ONE)
                 }
             }
-        } else if let Some(brute) = brute {
-            match brute.state {
-                BruteState::Plod => {
-                    // Heavy stomps: up off each foot, squashing as it lands.
-                    let lift = (t * 3.5).sin().abs();
-                    let scale = Vec2::new(1.0 + 0.05 * (1.0 - lift), 1.0 - 0.05 * (1.0 - lift));
-                    let sway = Vec2::new(0.6 * (t * 3.5).cos(), 2.0 * lift);
-                    let color = if keeper.enraged { seethe(tint, t) } else { tint };
-                    (color, squash(scale) + sway, scale)
-                }
-                BruteState::WindUp => {
-                    // Fists raised over its head, straining.
-                    let scale = Vec2::new(0.9, 1.18);
-                    let tremble = Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
-                    let color = if blink {
-                        Srgba::from(MARK_COLOR)
-                    } else if keeper.enraged {
-                        seethe(tint, t)
-                    } else {
-                        tint.mix(&Srgba::WHITE, 0.4)
-                    };
-                    (color, squash(scale) + tremble, scale)
-                }
-                BruteState::Recover => {
-                    let scale = Vec2::new(1.14, 0.84 + 0.02 * (t * 2.0).sin());
-                    (times(tint, Srgba::from(RECOVER_COLOR)), squash(scale), scale)
-                }
-                BruteState::Summon => {
-                    // Roaring: chest swelling, shaking with it.
-                    let swell = 1.1 + 0.04 * (t * 18.0).sin();
-                    let scale = Vec2::new(swell, swell);
-                    let shake = 1.2 * Vec2::new((t * 53.0).sin(), (t * 41.0).cos() * 0.5);
-                    let heat = 0.45 + 0.25 * (t * 12.0).sin();
-                    (tint.mix(&Srgba::from(SUMMON_COLOR), heat), squash(scale) + shake, scale)
-                }
-            }
         } else if keeper.enraged {
             (seethe(tint, t), Vec2::new(0.0, 2.5 * (t * 3.4).sin()), Vec2::ONE)
         } else {
@@ -470,6 +501,137 @@ fn draw_keeper(
         transform.translation.x = offset.x.round();
         transform.translation.y = offset.y.round();
         transform.scale = scale.extend(1.0);
+    }
+}
+
+/// Plays the brute's sheet. Asleep it breathes, hunched and dim. It stands
+/// breathing, or knuckle-drags along in a heavy stomp that kicks up dust and
+/// shakes the floor with each foot; turning to face where it's going. Winding
+/// up it rears, fists climbing to its shoulders, then locks them overhead,
+/// trembling and flashing; the slam folds it over its fists, leaning into the
+/// blow, and it stays slumped over its knuckles, heaving and dull, while spent.
+/// Roaring it throws its head back, then bellows, arms flung wide, chest
+/// blazing amber. Its eyes and furnace burn orange, red once enraged.
+#[allow(clippy::type_complexity)]
+fn animate_brute(
+    mut commands: Commands,
+    time: Res<Time>,
+    seen: Res<BossSeen>,
+    mut shake: ResMut<Shake>,
+    mut rng: Local<Rng>,
+    brutes: Query<(&Keeper, &Health, &BruteLook, &Transform), Without<BruteSprite>>,
+    mut bodies: Query<(Entity, &ChildOf, &mut BruteSprite, &mut Sprite, &mut Transform), Without<BruteGlow>>,
+    mut glows: Query<(&ChildOf, &mut Sprite), (With<BruteGlow>, Without<BruteSprite>)>,
+) {
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let blink = (t * 30.0).sin() > 0.0;
+    let mut shown = Vec::new();
+    for (entity, parent, mut anim, mut sprite, mut transform) in &mut bodies {
+        let Ok((keeper, health, brute, body)) = brutes.get(parent.parent()) else { continue };
+        let pos = body.translation.truncate();
+        let speed = anim.last.map_or(0.0, |last| last.distance(pos) / dt.max(1e-4));
+        let heading = anim.last.map_or(0.0, |last| pos.x - last.x);
+        anim.last = Some(pos);
+        let since = anim.clock.tick(brute.state, dt);
+        let tint = Srgba::from(tier_tint(keeper.tier));
+        let mut offset = Vec2::ZERO;
+        let mut flip_to = if heading.abs() > 0.05 { heading.signum() } else { anim.facing };
+
+        let (frame, color, glow, burn) = if health.is_dead() {
+            (SPENT[1], dim(tint, 0.4), BRUTE_GLOW, 0.0)
+        } else if !keeper.awake {
+            let breath = (t * 0.8).sin();
+            (IDLE[(breath > 0.0) as usize], dim(tint, 0.5 + 0.06 * breath), BRUTE_GLOW, 0.3 + 0.1 * breath)
+        } else {
+            let mood = if keeper.enraged { seethe(tint, t) } else { tint };
+            let fury = if keeper.enraged { Color::from(seethe(Srgba::from(BRUTE_GLOW), t)) } else { BRUTE_GLOW };
+            let toward = brute.at.x - pos.x;
+            match brute.state {
+                BruteState::Plod if speed > STANDING => {
+                    anim.stride += dt * WALK_RATE * (speed / 32.0).clamp(0.6, 1.6);
+                    (WALK[anim.stride as usize % WALK.len()], mood, fury, 0.9)
+                }
+                BruteState::Plod => {
+                    let breath = (t * 2.4).sin();
+                    (IDLE[(breath > 0.0) as usize], mood, fury, 0.85 + 0.1 * breath)
+                }
+                BruteState::WindUp => {
+                    if toward.abs() > 2.0 {
+                        flip_to = toward.signum();
+                    }
+                    if since < RAISE_HOLD {
+                        (RAISE, mood, fury, 1.0)
+                    } else {
+                        // Straining: shaking harder the longer it holds.
+                        let strain = ((since - RAISE_HOLD) * 3.0).min(1.5);
+                        offset = strain * Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
+                        let color = if blink { tint.mix(&Srgba::WHITE, 0.45) } else { mood };
+                        let glow = if blink { Color::WHITE } else { ENRAGED_COLOR };
+                        (OVERHEAD, color, glow, 1.0)
+                    }
+                }
+                BruteState::Recover => {
+                    if since < SLAM_HOLD {
+                        // Leaning into the blow, toward where it landed.
+                        offset = (brute.at - pos).normalize_or_zero() * 2.0;
+                        (SLAM, tint.mix(&Srgba::WHITE, 0.2), Color::WHITE, 1.0)
+                    } else {
+                        let heave = (t * 3.2).sin();
+                        (SPENT[(heave > 0.0) as usize], times(tint, Srgba::from(RECOVER_COLOR)), BRUTE_GLOW, 0.35 + 0.1 * heave)
+                    }
+                }
+                BruteState::Summon => {
+                    let heat = 0.5 + 0.5 * (t * 14.0).sin();
+                    let color = tint.mix(&Srgba::from(SUMMON_COLOR), 0.2 + 0.25 * heat);
+                    if since < ROAR_HOLD {
+                        (ROAR[0], color, SUMMON_COLOR, 0.9)
+                    } else {
+                        offset = 1.2 * Vec2::new((t * 53.0).sin(), (t * 41.0).cos() * 0.5);
+                        (ROAR[((t * 7.0) as usize) % 2], color, SUMMON_COLOR, 0.8 + 0.2 * heat)
+                    }
+                }
+            }
+        };
+
+        // Each foot coming down kicks up dust and thumps the floor.
+        let landed = frame != anim.frame && (frame == WALK[1] || frame == WALK[3]);
+        if landed && seen.0 {
+            shake.0 = shake.0.max(0.12);
+            let side = if frame == WALK[1] { -1.0 } else { 1.0 } * anim.facing;
+            for _ in 0..4 {
+                let at = pos + Vec2::new(side * 8.0 + rng.signed() * 4.0, -19.0 + rng.signed() * 1.5);
+                commands.spawn((
+                    Level,
+                    Fade { age: 0.0, life: 0.3 + rng.unit() * 0.2 },
+                    Sprite::from_color(DUST_COLOR, Vec2::splat(1.0 + rng.unit().round())),
+                    Transform::from_translation(at.round().extend(7.5)),
+                ));
+            }
+        }
+        if frame == SLAM && anim.frame != SLAM && seen.0 {
+            shake.0 = shake.0.max(0.55);
+        }
+        anim.frame = frame;
+        anim.facing = flip_to;
+
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = frame;
+        }
+        sprite.flip_x = anim.facing < 0.0;
+        sprite.color = if health.flash > 0.0 { HIT_COLOR } else { color.into() };
+        transform.translation.x = offset.x.round();
+        transform.translation.y = (BRUTE_LIFT + offset.y).round();
+        let glow = Srgba::from(glow);
+        shown.push((entity, frame, anim.facing < 0.0, glow.with_alpha(glow.alpha * burn)));
+    }
+    for (parent, mut sprite) in &mut glows {
+        let Some(&(_, frame, flip, color)) = shown.iter().find(|(e, ..)| *e == parent.parent()) else { continue };
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = frame;
+        }
+        sprite.flip_x = flip;
+        sprite.color = color.into();
     }
 }
 

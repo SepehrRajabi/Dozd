@@ -14,9 +14,9 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::class::{HACK_COLOR, RiotShield};
-use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_outlines};
+use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_covers, shield_outlines};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
-use crate::enemies::{EnemyKind, Summoned, spawn_enemy, whiffs};
+use crate::enemies::{EnemyKind, Summoned, spawn_summoned, whiffs};
 use crate::guns::Arsenal;
 use crate::mission::Banner;
 use crate::net::authority;
@@ -194,14 +194,14 @@ const ENRAGED_SUMMON_GAP: f32 = 9.0;
 const ROAR: f32 = 1.2;
 /// Guards each roar calls in: `BASE_SUMMONS`, plus one for each pirate it can
 /// see up to a crew of `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged. At
-/// most `CAP_PER_PIRATE` per pirate plus one are alive at once, never fewer
+/// most `CAP_PER_PIRATE` per pirate are alive at once, never fewer
 /// than `MIN_CAP` nor more than `MAX_SUMMONS`: at the cap a roar calls fewer,
 /// or none.
 const BASE_SUMMONS: usize = 1;
 const SUMMON_CREW: usize = 3;
 const ENRAGED_SUMMONS: usize = 2;
 const CAP_PER_PIRATE: usize = 3;
-const MIN_CAP: usize = 4;
+const MIN_CAP: usize = 3;
 const MAX_SUMMONS: usize = 10;
 /// Guards appear this far in from the room's walls, at least `SUMMON_CLEAR`
 /// from every pirate (half that if the crew leaves no such room), and
@@ -620,6 +620,16 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
     }
 }
 
+/// Which way each pirate holding a riot shield up faces it, by owner.
+fn raised_shields<F: bevy::ecs::query::QueryFilter>(riot_shields: &Query<(&RiotShield, &Transform), F>) -> Vec<(u64, Vec2)> {
+    riot_shields.iter().map(|(shield, _)| (shield.owner, shield.facing)).collect()
+}
+
+/// Whether `player`, at `at`, holds a shield up toward a blow from `from`.
+fn covered(held: &[(u64, Vec2)], player: Option<&Player>, at: Vec2, from: Vec2) -> bool {
+    player.is_some_and(|p| held.iter().any(|&(owner, facing)| owner == p.owner && shield_covers(facing, at, from)))
+}
+
 /// A pirate (or sentry) on the crew's side, alive and in play.
 fn in_play(team: &Team, health: &Health, player: Option<&Player>) -> bool {
     *team == Team::Player && !health.is_dead() && player.is_none_or(|p| p.status == PirateStatus::Active)
@@ -892,7 +902,7 @@ fn slam_reaches(at: Vec2, victim: Vec2, hurtbox: f32) -> bool {
 
 /// The most of its guards alive at once, facing `crew` pirates.
 fn summon_cap(crew: usize) -> usize {
-    (CAP_PER_PIRATE * crew + 1).clamp(MIN_CAP, MAX_SUMMONS)
+    (CAP_PER_PIRATE * crew).clamp(MIN_CAP, MAX_SUMMONS)
 }
 
 /// How many guards a roar calls in facing `crew` pirates, with `alive` of its
@@ -1599,13 +1609,14 @@ fn drive_brute(
             if brain.timer >= if enraged { ENRAGED_SLAM_WIND_UP } else { SLAM_WIND_UP } {
                 // Down come the fists, on everyone in reach a raised shield doesn't cover.
                 let shields = shield_outlines(&riot_shields);
+                let held = raised_shields(&riot_shields);
                 let ahead = (at - pos).normalize_or(Vec2::NEG_Y);
                 for (_, team, hurtbox, t, mut victim, player, victim_knockback) in crew.iter_mut() {
                     let spot = t.translation.truncate();
                     if !in_play(team, &victim, player) || !slam_reaches(at, spot, hurtbox.0) {
                         continue;
                     }
-                    if shield_between(&shields, at, spot) {
+                    if shield_between(&shields, at, spot) || covered(&held, player, spot, pos) {
                         fx(&mut commands, FxKind::Spark, spot, (spot - at).to_angle(), KEEPER_COLOR);
                         continue;
                     }
@@ -1636,8 +1647,7 @@ fn drive_brute(
                 // The cap was checked as the roar began: nothing else calls guards in.
                 let kinds = summon_kinds(&mut rng, summons.len());
                 for (spot, kind) in summons.iter().zip(kinds) {
-                    let guard = spawn_enemy(&mut commands, kind, *spot, true);
-                    commands.entity(guard).insert(Summoned);
+                    spawn_summoned(&mut commands, kind, *spot);
                     fx(&mut commands, FxKind::Burst, *spot, 0.0, KEEPER_COLOR);
                 }
                 state = BruteState::Plod;
@@ -1672,6 +1682,7 @@ fn move_keeper_orbs(
     const MAX_STEP: f32 = 3.0;
     let dt = time.delta_secs();
     let shields = shield_outlines(&riot_shields);
+    let held = raised_shields(&riot_shields);
     'orbs: for (entity, mut orb, mut transform) in &mut orbs {
         transform.rotate_z(dt * 5.0);
 
@@ -1688,6 +1699,7 @@ fn move_keeper_orbs(
                         && at.distance(pos) <= ORB_ARC_REACH
                         && grid.line_of_sight(pos, at)
                         && !shield_between(&shields, pos, at)
+                        && !covered(&held, *player, at, pos)
                 })
                 .min_by(|a, b| a.2.translation.truncate().distance(pos).total_cmp(&b.2.translation.truncate().distance(pos)));
             if let Some((_, _, t, mut health, ..)) = nearest {
@@ -1718,6 +1730,7 @@ fn move_keeper_orbs(
                     if !in_play(team, &health, player)
                         || offset.length() > reach
                         || shield_between(&shields, center, t.translation.truncate())
+                        || covered(&held, player, t.translation.truncate(), center)
                     {
                         continue;
                     }
@@ -1973,11 +1986,11 @@ mod tests {
 
     #[test]
     fn roars_never_raise_more_than_the_cap() {
-        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (2, 4));
+        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (2, MIN_CAP), "a lone pirate isn't swamped");
         assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (4, 6));
         assert_eq!(summon_count(false, 0, 5), BASE_SUMMONS + SUMMON_CREW, "a big crew calls no more each roar");
-        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 7, MAX_SUMMONS, MAX_SUMMONS));
-        assert_eq!(summon_count(true, MAX_SUMMONS - 1, 3), 1, "shrinks near the cap");
+        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 6, 9, MAX_SUMMONS));
+        assert_eq!(summon_count(true, summon_cap(3) - 1, 3), 1, "shrinks near the cap");
         for crew in 0..5 {
             for alive in 0..MAX_SUMMONS + 3 {
                 for enraged in [false, true] {

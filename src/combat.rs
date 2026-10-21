@@ -543,6 +543,17 @@ pub(crate) fn shield_between(shields: &[[Vec2; RIOT_POINTS]], from: Vec2, to: Ve
 }
 
 /// Whether the segments `a`-`b` and `c`-`d` cross (parallel ones never do).
+/// How far round from straight ahead a raised shield covers its holder from
+/// blasts, as the cosine of the angle: anything in front of them.
+const SHIELD_COVER: f32 = 0.2;
+
+/// Whether a shield raised `facing` covers the pirate holding it, at
+/// `holder`, from a blast or blow coming from `from`. A blast landing by the
+/// shield's edge can reach round it, so `shield_between` alone isn't enough.
+pub(crate) fn shield_covers(facing: Vec2, holder: Vec2, from: Vec2) -> bool {
+    (from - holder).normalize_or_zero().dot(facing) > SHIELD_COVER
+}
+
 fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     let (ab, cd) = (b - a, d - c);
     let denom = ab.perp_dot(cd);
@@ -781,5 +792,10 @@ mod tests {
         assert!(!shield_between(&shields, Vec2::new(40.0, 0.0), Vec2::new(20.0, 0.0)), "both in front");
         assert!(!shield_between(&shields, Vec2::new(40.0, 40.0), Vec2::new(0.0, 40.0)), "past its edge");
         assert!(!shield_between(&[], Vec2::new(40.0, 0.0), Vec2::ZERO), "no shields");
+        // A blast by the shield's edge reaches round it, but still lands in front of its holder.
+        let edge = Vec2::new(4.0, 16.0);
+        assert!(!shield_between(&shields, edge, Vec2::ZERO));
+        assert!(shield_covers(Vec2::X, Vec2::ZERO, edge), "in front, off to the side");
+        assert!(!shield_covers(Vec2::X, Vec2::ZERO, Vec2::new(-10.0, 3.0)), "behind them");
     }
 }

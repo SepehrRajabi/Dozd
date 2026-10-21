@@ -362,6 +362,18 @@ struct HealthBar {
 struct PowerRing;
 
 pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool) -> Entity {
+    spawn_guard(commands, kind, pos, alerted, false)
+}
+
+/// Spawns a guard a boss called in: hunting at once, enraged as if it had
+/// heard a Herald's war cry, and `Summoned`.
+pub fn spawn_summoned(commands: &mut Commands, kind: EnemyKind, pos: Vec2) -> Entity {
+    let guard = spawn_guard(commands, kind, pos, true, true);
+    commands.entity(guard).insert(Summoned);
+    guard
+}
+
+fn spawn_guard(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted: bool, empowered: bool) -> Entity {
     let stats = kind.stats();
     let state = if alerted { AiState::Hunt } else { AiState::Idle };
     let enemy = Enemy {
@@ -378,7 +390,7 @@ pub fn spawn_enemy(commands: &mut Commands, kind: EnemyKind, pos: Vec2, alerted:
             velocity: Vec2::ZERO,
             stun: 0.0,
             hacked: false,
-            empowered: false,
+            empowered,
             phase: None,
             jammed: false,
         };

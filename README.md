@@ -47,14 +47,14 @@ Three kinds of boss take turns down the decks, so every heist meets each once:
   It only fights up close: it plods after you, raises its fists over a spot
   just in front of it, then slams it, hitting everyone in the circle hard.
   Every 12 s (9 s enraged, and once as it enrages) it roars and calls in
-  guards to fight for it, a mix of every kind, more the bigger the crew and
+  guards to fight for it, a mix of every kind, all enraged as if by a Herald's war cry, more the bigger the crew and
   more again enraged; their spots glow while it roars. Summoned guards drop
   ammo but never credits, and they all fall with the Brute.
 
 A boss has a lot of health, more for a bigger crew, and enrages below half
 health. Each one further down has more health and hits harder, and the last
 deck's is deliberately overtuned. A raised riot shield blocks all of their
-attacks, lasers, orbs, arcs, blasts and slams alike, and stops a lunge dead,
+attacks, lasers, orbs, arcs, blasts and slams alike (a blast in front of its holder never reaches round it), and stops a lunge dead,
 staggering the stalker; it ends a rampage too. Hacks, Blackout and shock fields don't touch them, but a Hacker's jamming does: a jammed boss's hits may whiff.
 When a boss falls it drops a bounty, some ammo and a Nano Patch, and the gate
 opens for good.

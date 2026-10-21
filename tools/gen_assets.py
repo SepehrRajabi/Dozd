@@ -4,6 +4,7 @@
 Run from the repo root:  python3 tools/gen_assets.py
 """
 
+import math
 import os
 import struct
 import zlib
@@ -1730,126 +1731,278 @@ BRUTE_PLATE = rgb(150, 156, 172)
 BRUTE_EYE = rgb(255, 120, 40)
 
 
+BRUTE_DARK = rgb(22, 18, 30)
+# Each frame of the vault brute's sheet, and where its feet stand.
+BRUTE_W, BRUTE_H = 56, 52
+BRUTE_CX = 27.5
+BRUTE_GROUND = 49
+
+
+def brute_disc(px, cx, cy, rx, ry, color_at):
+    for y in range(max(0, int(cy - ry) - 1), min(len(px), int(cy + ry) + 2)):
+        for x in range(max(0, int(cx - rx) - 1), min(len(px[0]), int(cx + rx) + 2)):
+            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+            if d <= 1.0:
+                c = color_at(x, y, d)
+                if c:
+                    px[y][x] = c
+
+
+def brute_limb(px, a, b, r0, r1, color_at):
+    """A tapered capsule from `a` to `b`."""
+    (ax, ay), (bx, by) = a, b
+    steps = max(8, int(math.hypot(bx - ax, by - ay) * 3))
+    for i in range(steps + 1):
+        t = i / steps
+        x, y = ax + (bx - ax) * t, ay + (by - ay) * t
+        r = r0 + (r1 - r0) * t
+        for py in range(int(y - r) - 1, int(y + r) + 2):
+            for qx in range(int(x - r) - 1, int(x + r) + 2):
+                if 0 <= qx < len(px[0]) and 0 <= py < len(px) and (qx - x) ** 2 + (py - y) ** 2 <= r * r:
+                    px[py][qx] = color_at(qx, py, t, (qx - x) / max(r, 0.5), (py - y) / max(r, 0.5))
+
+
+def brute_hide_at(base, seed):
+    def at(x, y, t, sx, sy):
+        light = -(sx * -0.6 + sy * -0.8)
+        rim = -30 if sx * sx + sy * sy > 0.7 else 0
+        return shade(base, light * 30 + rim + (noise(x, y, seed) - 0.5) * 10)
+    return at
+
+
+def brute_pose(name, by=0, sway=0, head=(0, 0), jaw=0, arms=None, feet=((0, 0), (0, 0)), furnace=0.6, eyes=1.0, hunch=0):
+    return dict(name=name, by=by, sway=sway, head=head, jaw=jaw, arms=arms, feet=feet, furnace=furnace, eyes=eyes, hunch=hunch)
+
+
+# Each arm: (elbow, fist) offsets from the frame's centre line, for the left
+# (-1) side; the right is mirrored unless given. Fist "flat" ones rest on knuckles.
+def brute_arms(le, lf, re=None, rf=None):
+    re = re or (-le[0], le[1])
+    rf = rf or (-lf[0], lf[1])
+    return {-1: (le, lf), 1: (re, rf)}
+
+
+BRUTE_HANG = brute_arms((-17, 27), (-16, 41))
+BRUTE_POSES = [
+    brute_pose("idle_a", arms=BRUTE_HANG),
+    brute_pose("idle_b", by=1, arms=brute_arms((-17, 28), (-16, 41)), furnace=0.7),
+    # A knuckle-dragging stomp: one side lifts, the other bears down.
+    brute_pose("walk_a", by=-1, sway=-1, arms=brute_arms((-17, 28), (-15, 43), (17, 25), (17, 36)), feet=((0, 0), (1, 3))),
+    brute_pose("walk_b", by=1, arms=brute_arms((-17, 28), (-16, 42)), feet=((0, 0), (0, 0))),
+    brute_pose("walk_c", by=-1, sway=1, arms=brute_arms((-17, 25), (-17, 36), (17, 28), (15, 43)), feet=((-1, 3), (0, 0))),
+    brute_pose("walk_d", by=1, arms=brute_arms((-17, 28), (-16, 42)), feet=((0, 0), (0, 0))),
+    # Rearing up, fists climbing past its head, then locked together overhead.
+    brute_pose("raise", by=-2, head=(0, 0), arms=brute_arms((-19, 17), (-14, 11)), furnace=0.6, eyes=1.0),
+    brute_pose("overhead", by=-3, head=(0, 1), arms=brute_arms((-16, 14), (-2.5, 9)), furnace=0.75, eyes=1.0),
+    # The slam: folded forward over fists driven into the floor.
+    brute_pose("slam", by=4, head=(0, 0), arms=brute_arms((-13, 32), (-5, 44)), feet=((-2, 0), (2, 0)), furnace=0.9, hunch=2),
+    # Spent: hunched over its knuckles, heaving.
+    brute_pose("spent_a", by=3, head=(0, 1), arms=brute_arms((-18, 32), (-15, 44)), feet=((-1, 0), (1, 0)), furnace=0.15, eyes=0.45, hunch=2),
+    brute_pose("spent_b", by=4, head=(0, 2), arms=brute_arms((-18, 33), (-15, 44)), feet=((-1, 0), (1, 0)), furnace=0.1, eyes=0.35, hunch=2),
+    # Roaring: head thrown back, jaw wide, arms flung out, chest blazing.
+    brute_pose("roar_a", by=-1, head=(0, -2), jaw=1, arms=brute_arms((-20, 20), (-23, 28)), furnace=0.9),
+    brute_pose("roar_b", by=-2, head=(0, -3), jaw=2, arms=brute_arms((-21, 14), (-23, 9)), furnace=1.0),
+]
+
+
+def brute_frame(p):
+    """One frame of the vault brute: a hunched juggernaut, all shoulders and
+    forearms, its small head sunk low between them behind a jaw grille, a
+    furnace grate glowing in its chest and broken shackles on its wrists.
+    Returns the body and its glow (eyes, furnace, maw) as separate layers."""
+    px = canvas(BRUTE_W, BRUTE_H)
+    glow = canvas(BRUTE_W, BRUTE_H)
+    hide, plate = BRUTE_HIDE, BRUTE_PLATE
+    by, sx = p["by"], p["sway"]
+    cx = BRUTE_CX + sx
+    hips_y = 33 + by * 0.6
+    sh_y = 19 + by
+
+    def emit(x, y, level):
+        if 0 <= x < BRUTE_W and 0 <= y < BRUTE_H and level > 0:
+            a = int(255 * max(0.0, min(1.0, level)))
+            if a > glow[y][x][3]:
+                glow[y][x] = (255, 255, 255, a)
+
+    # Legs: short, bowed pillars in heavy plated boots.
+    for i, side in enumerate((-1, 1)):
+        fdx, lift = p["feet"][i]
+        hip = (BRUTE_CX + side * 6, hips_y)
+        foot = (BRUTE_CX + side * 8 + fdx, BRUTE_GROUND - 3 - lift)
+        part = canvas(BRUTE_W, BRUTE_H)
+        brute_limb(part, hip, (foot[0], foot[1] - 1), 4.2, 3.6, brute_hide_at(shade(hide, -28), 11 + i))
+        # Knee plate.
+        kx, ky = (hip[0] + foot[0]) / 2, (hip[1] + foot[1]) / 2
+        brute_disc(part, kx, ky, 2.6, 2.2, lambda x, y, d: shade(plate, 20 - d * 40))
+        brute_disc(part, foot[0], foot[1] + 0.5, 5.0, 2.8, lambda x, y, d: shade(plate, -6 - (y - foot[1]) * 14))
+        for x in range(int(foot[0] - 4), int(foot[0] + 5)):
+            y = int(foot[1] - 2)
+            if 0 <= y < BRUTE_H and part[y][x][3]:
+                part[y][x] = shade(plate, 36)
+        stamp(px, part)
+
+    # Torso: a huge hump of shoulders tapering to a heavy gut.
+    part = canvas(BRUTE_W, BRUTE_H)
+    lit = brute_hide_at(hide, 21)
+    brute_disc(part, cx, hips_y - 4, 10.0, 7.0, lambda x, y, d: lit(x, y, 0, (x - cx) / 10, (y - hips_y + 4) / 7 - 0.3))
+    brute_disc(part, cx, sh_y + 1 + p["hunch"], 14.0, 8.0, lambda x, y, d: lit(x, y, 0, (x - cx) / 14, (y - sh_y) / 8.0))
+    # The hump of muscle its head sinks into.
+    ty = sh_y - 4 + p["hunch"]
+    brute_disc(part, cx, ty, 9.0, 4.5, lambda x, y, d: lit(x, y, 0, (x - cx) / 9, (y - ty) / 4.5 - 0.4))
+    # Pecs either side of the furnace.
+    for side in (-1, 1):
+        for x in range(int(cx + side * 3), int(cx + side * 11), side):
+            y = int(sh_y + 8 + p["hunch"] - abs(x - cx) * 0.25)
+            if part[y][x][3]:
+                part[y][x] = shade(part[y][x], -30)
+    # Belt of riveted plate.
+    for x in range(BRUTE_W):
+        for y in (int(hips_y), int(hips_y) + 1):
+            if part[y][x][3]:
+                part[y][x] = shade(plate, -18 if y == int(hips_y) else -48)
+    for x in range(int(cx - 8), int(cx + 9), 4):
+        if part[int(hips_y)][x][3]:
+            part[int(hips_y)][x] = shade(plate, 50)
+    stamp(px, part)
+
+    # The furnace: a riveted grate in its chest, slits glowing through.
+    part = canvas(BRUTE_W, BRUTE_H)
+    gy = sh_y + 6 + p["hunch"]
+    fur = metal_at(shade(plate, 4), cx=cx, cy=gy, rx=7.0, ry=5.0, seed=31)
+    brute_disc(part, cx, gy, 7.0, 5.0, fur)
+    for k, dy in enumerate((-2, 0, 2)):
+        half = 4 - (k != 1)
+        for x in range(int(cx - half), int(cx + half + 1)):
+            y = int(gy + dy)
+            part[y][x] = BRUTE_DARK
+            emit(x, y, p["furnace"] * (0.75 + 0.25 * (abs(x - cx) < 2)))
+    for x, y in ((cx - 5.5, gy - 2), (cx + 5.5, gy - 2), (cx - 5.5, gy + 2), (cx + 5.5, gy + 2)):
+        part[int(y)][int(x)] = shade(plate, 50)
+    stamp(px, part)
+
+    # Head: small and low, pushed forward between the shoulders, a heavy
+    # brow over two burning eyes and a grilled jaw that drops to roar.
+    hx, hy = cx + p["head"][0], sh_y - 4 + p["head"][1] + p["hunch"]
+    part = canvas(BRUTE_W, BRUTE_H)
+    helm = metal_at(shade(plate, -4), cx=hx, cy=hy, rx=5.5, ry=5.0, seed=41)
+    brute_disc(part, hx, hy, 5.5, 5.0, helm)
+    jaw = p["jaw"]
+    # Jaw grille below, hanging open by `jaw`.
+    jy = hy + 3 + jaw
+    brute_disc(part, hx, jy, 4.5, 2.6, lambda x, y, d: shade(plate, -20 - d * 20))
+    for x in range(int(hx - 3), int(hx + 4)):
+        if (x - int(hx)) % 2 == 0:
+            part[int(jy)][x] = shade(plate, -70)
+    if jaw:
+        for y in range(int(hy + 2), int(jy)):
+            for x in range(int(hx - 3), int(hx + 4)):
+                part[y][x] = BRUTE_DARK
+                if abs(x - hx) < 2.5:
+                    emit(x, y, 0.35 + 0.15 * jaw)
+        # Teeth along the gap.
+        for x in range(int(hx - 3), int(hx + 4), 2):
+            part[int(hy + 2)][x] = shade(WHITE, -40)
+            part[int(jy) - 1][x + 1] = shade(WHITE, -70)
+    # Brow and eyes.
+    ey = int(hy)
+    for x in range(int(hx - 4), int(hx + 5)):
+        part[ey - 1][x] = shade(plate, -64)
+    for x in range(int(hx - 4), int(hx + 5)):
+        part[ey][x] = BRUTE_DARK
+    for side in (-1, 1):
+        ex = int(hx + side * 2 - (side < 0))
+        for x in (ex, ex + 1):
+            part[ey][x] = BRUTE_EYE
+            emit(x, ey, p["eyes"])
+        emit(ex + (side > 0), ey - 1, p["eyes"] * 0.5)
+    # Crest.
+    for y in range(int(hy - 5), int(hy - 1)):
+        part[y][int(hx)] = shade(plate, 44)
+        part[y][int(hx) + 1] = shade(plate, -24)
+    stamp(px, part)
+
+    # Arms, then the pauldrons over their tops, then the fists in front of all.
+    fists = []
+    overhead = False
+    for side in (-1, 1):
+        (ex, ey2), (fx, fy) = p["arms"][side]
+        sh = (cx + side * 12, sh_y + 1 + p["hunch"])
+        el = (BRUTE_CX + ex, ey2 + by * 0.5)
+        fi = (BRUTE_CX + fx, fy + (by * 0.5 if fy < 40 else 0))
+        overhead |= fi[1] < hy
+        part = canvas(BRUTE_W, BRUTE_H)
+        brute_limb(part, sh, el, 4.0, 3.4, brute_hide_at(shade(hide, -6), 51 + side))
+        # Forearms like barrels, swelling toward the wrist.
+        brute_limb(part, el, fi, 3.8, 4.8, brute_hide_at(shade(hide, 4), 61 + side))
+        stamp(px, part)
+        fists.append((side, el, fi))
+
+    for side in (-1, 1):
+        pcx = cx + side * 13
+        pcy = sh_y + p["hunch"]
+        part = canvas(BRUTE_W, BRUTE_H)
+        brute_disc(part, pcx, pcy, 6.0, 4.4, metal_at(shade(plate, 10), cx=pcx, cy=pcy, rx=6.0, ry=4.4, seed=71))
+        # Banded: two overlapping plates.
+        for x in range(int(pcx) - 6, int(pcx) + 7):
+            for y, amount in ((int(pcy + 1), -56), (int(pcy + 2), -20)):
+                if 0 <= x < BRUTE_W and part[y][x][3]:
+                    part[y][x] = shade(plate, amount)
+        # A row of rivets and two horn-spikes off the top.
+        for k in (-3, 3):
+            x, y = int(pcx + k), int(pcy - 1)
+            part[y][x] = shade(plate, 60)
+        # One stubby horn-spike off the outer edge.
+        x = int(pcx + side * 3)
+        for j in range(3):
+            y = int(pcy - 4 - j)
+            if 0 <= y < BRUTE_H and 0 <= x < BRUTE_W:
+                part[y][x] = shade(plate, 44 - j * 20)
+        stamp(px, part)
+
+    for side, el, fi in fists:
+        part = canvas(BRUTE_W, BRUTE_H)
+        fx, fy = fi
+        # Shackle cuff with a broken chain.
+        wx, wy = (el[0] + fx * 2) / 3, (el[1] + fy * 2) / 3
+        brute_disc(part, wx, wy, 4.4, 2.2, lambda x, y, d: shade(plate, 40 - (y - wy) * 20))
+        fist = metal_at(shade(plate, 10), cx=fx, cy=fy, rx=5.2, ry=4.6, seed=81 + side)
+        brute_disc(part, fx, fy, 5.2, 4.6, fist)
+        # Knuckle plates across the bottom.
+        ky = int(fy + 2)
+        for x in range(int(fx - 4), int(fx + 5)):
+            if 0 <= ky < BRUTE_H and part[ky][x][3]:
+                part[ky][x] = shade(plate, -62)
+        for dx in (-3, -1, 1, 3):
+            x, y = int(fx + dx), int(fy + 1)
+            if 0 <= y < BRUTE_H:
+                part[y][x] = shade(plate, 56)
+        stamp(px, part)
+        # Chain links dangling from the cuff (none when overhead).
+        if fy > wy - 1 and not overhead:
+            for k in range(2):
+                lx, ly = int(wx - side * (3 + k)), int(wy + 2 + k * 2)
+                if 0 <= ly < BRUTE_H and 0 <= lx < BRUTE_W and not px[ly][lx][3]:
+                    px[ly][lx] = shade(plate, 30 - k * 20)
+
+    return px, glow
+
+
 def brute_boss():
-    """The vault brute, 40x40: the deck's brute grown monstrous. A slab of
-    muscle on stumpy armoured legs, a plated chest and a studded belt, huge
-    spiked pauldrons, arms like pillars ending in great steel gauntlets, and a
-    small helmeted head sunk between its shoulders, its visor glowing."""
-    n = 40
-    px = canvas(n, n)
-    hide = BRUTE_HIDE
-    m = BRUTE_PLATE
-
-    # Two stumpy legs in heavy boots.
-    for side in (-1, 1):
-        cx = 19.5 + side * 5
-        part = canvas(n, n)
-        for y in range(28, 35):
-            for x in range(int(cx - 3), int(cx + 4)):
-                part[y][x] = shade(hide, -40 - (y - 28) * 3 - (side * (x - cx)) * 4)
-        for y in range(34, 39):
-            for x in range(int(cx - 4 + (side > 0)), int(cx + 4 + (side > 0))):
-                part[y][x] = shade(m, -10 - (y - 34) * 12)
-        for x in range(int(cx - 3), int(cx + 4)):
-            part[34][x] = shade(m, 30)
-        stamp(px, part)
-
-    # Torso: a broad slab of muscle under a chest plate.
-    part = canvas(n, n)
-    lit = metal_at(hide, cx=19.5, cy=21.0, rx=10.5, ry=9.0, seed=91)
-    fill_ellipse(part, 19.5, 21.0, 10.5, 9.0, lambda x, y, d: shade(lit(x, y, d), -max(0, y - 21) * 3))
-    # Abs, lit like the brute's, below the plate.
-    for y in (24, 27):
-        for x in range(15, 25):
-            if part[y][x][3]:
-                part[y][x] = shade(part[y][x], -40)
-    for y in range(23, 29):
-        if part[y][19][3]:
-            part[y][19] = shade(part[y][19], -36)
-    # The chest plate, riveted, with a scowling ridge.
-    plate = metal_at(shade(m, 8), cx=19.5, cy=17.0, rx=7.5, ry=4.5, seed=92)
-    fill_ellipse(part, 19.5, 17.0, 7.5, 4.5, plate)
-    for x in range(13, 27):
-        part[20][x] = shade(m, -60) if part[20][x][3] else part[20][x]
-    for x, y in ((14, 17), (24, 17)):
-        rivet(part, x, y)
-    for y in range(14, 20):
-        part[y][19] = shade(m, 40)
-        part[y][20] = shade(m, -24)
-    # The belt, studded with glowing amber.
-    for x in range(10, 30):
-        for y in (28, 29):
-            if part[y][x][3]:
-                part[y][x] = shade(m, -50 if y == 29 else -20)
-    for x in (13, 17, 22, 26):
-        part[28][x] = AMBER
-    part[28][19] = part[28][20] = part[29][19] = part[29][20] = shade(AMBER, 30)
-    stamp(px, part)
-
-    # Arms like pillars off each shoulder, down to great steel gauntlets.
-    for side in (-1, 1):
-        part = canvas(n, n)
-        pts = [(19.5 + side * 12, 14), (19.5 + side * 16, 20), (19.5 + side * 15, 26)]
-        thick_curve(part, pts, 3.6, 3.0, lambda x, y, t, s: shade(hide, -10 - t * 30 - s * side * 18))
-        # Bracers round the forearm.
-        for y in (23, 24):
-            for x in range(n):
-                if part[y][x][3]:
-                    part[y][x] = shade(m, 10 if y == 23 else -30)
-        stamp(px, part)
-        part = canvas(n, n)
-        fx = 19.5 + side * 15
-        fill_ellipse(part, fx, 30.0, 4.6, 4.2, metal_at(shade(m, 16), cx=fx, cy=30.0, rx=4.6, ry=4.2, seed=93))
-        # Knuckle ridges and spikes across the fist.
-        for x in range(int(fx - 3), int(fx + 4)):
-            if part[32][x][3]:
-                part[32][x] = shade(m, -60)
-        for dx in (-2, 0, 2):
-            part[33][int(fx + dx)] = shade(m, 50)
-            part[34][int(fx + dx)] = shade(m, -20)
-        stamp(px, part)
-
-    # Pauldrons: huge plated shells over the shoulders, ringed with spikes.
-    for side in (-1, 1):
-        cx = 19.5 + side * 10.5
-        part = canvas(n, n)
-        fill_ellipse(part, cx, 13.0, 7.0, 5.5, metal_at(shade(m, 12), cx=cx, cy=13.0, rx=7.0, ry=5.5, seed=94))
-        for x in range(int(cx) - 6, int(cx) + 7):
-            if 0 <= x < n and part[16][x][3]:
-                part[16][x] = shade(m, -56)
-            if 0 <= x < n and part[17][x][3]:
-                part[17][x] = shade(m, -30)
-        for x in range(int(cx) - 4, int(cx) + 5):
-            y = 11 + (abs(x - cx) > 3)
-            if part[y][x][3]:
-                part[y][x] = shade(m, -44)
-                part[y - 1][x] = shade(m, 36)
-        for i, (dx, dy) in enumerate(((1, 7), (3, 6), (5, 7), (7, 9))):
-            x = int(cx + side * dx)
-            part[dy][x] = shade(m, 50 - i * 14)
-            part[dy - 1][x] = shade(m, 20 - i * 14)
-        stamp(px, part)
-
-    # Head: a small helmet sunk low between the pauldrons, a glowing visor slit
-    # under a heavy brow, and a crest down its middle.
-    part = canvas(n, n)
-    fill_ellipse(part, 19.5, 9.0, 4.8, 4.8, metal_at(shade(m, 4), cx=19.5, cy=9.0, rx=4.8, ry=4.8, seed=95))
-    for x in range(15, 25):
-        part[8][x] = rgb(22, 18, 30)
-        part[9][x] = rgb(22, 18, 30)
-    for x in range(16, 24):
-        part[9][x] = BRUTE_EYE if 16 < x < 23 else shade(BRUTE_EYE, -80)
-    part[9][18] = part[9][21] = WHITE
-    # A brow scowling down to the middle.
-    for x, y in ((15, 7), (16, 7), (23, 7), (24, 7), (19, 9), (20, 9)):
-        part[y][x] = rgb(22, 18, 30)
-    for x in range(17, 23):
-        part[12][x] = shade(m, -60)
-    for y in range(4, 8):
-        part[y][19] = shade(m, 44)
-        part[y][20] = shade(m, -24)
-    stamp(px, part)
-    return px
+    """The vault brute's animation sheet, one row of `BRUTE_POSES` frames,
+    and its glow: the same frames holding only what burns (eyes, furnace,
+    maw), for the game to colour by mood. Also a square portrait, the first
+    frame, for the menus."""
+    frames = [brute_frame(p) for p in BRUTE_POSES]
+    sheet = canvas(BRUTE_W * len(frames), BRUTE_H)
+    glow = canvas(BRUTE_W * len(frames), BRUTE_H)
+    for i, (body, light) in enumerate(frames):
+        for y in range(BRUTE_H):
+            for x in range(BRUTE_W):
+                sheet[y][i * BRUTE_W + x] = body[y][x]
+                glow[y][i * BRUTE_W + x] = light[y][x]
+    pad = (BRUTE_W - BRUTE_H) // 2
+    portrait = [[CLEAR] * BRUTE_W for _ in range(pad)] + [row[:] for row in frames[0][0]] + [[CLEAR] * BRUTE_W for _ in range(BRUTE_W - BRUTE_H - pad)]
+    return portrait, sheet, glow, [f[0] for f in frames]
 
 
 def gate_tiles():
@@ -2021,8 +2174,10 @@ def main():
     write_png(os.path.join(ROOT, "boss", "hand.png"), hand)
     stalker = stalker_boss()
     write_png(os.path.join(ROOT, "boss", "stalker.png"), stalker)
-    brute = brute_boss()
+    brute, brute_sheet, brute_glow, brute_frames = brute_boss()
     write_png(os.path.join(ROOT, "boss", "brute.png"), brute)
+    write_png(os.path.join(ROOT, "boss", "brute_sheet.png"), brute_sheet)
+    write_png(os.path.join(ROOT, "boss", "brute_glow.png"), brute_glow)
     gate, gate_open = gate_tiles()
     write_png(os.path.join(ROOT, "tiles", "gate.png"), gate)
     write_png(os.path.join(ROOT, "tiles", "gate_open.png"), gate_open)
@@ -2043,7 +2198,8 @@ def main():
     write_png(os.path.join(preview, "station.png"), contact_sheet([station], scale=4))
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
-    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, brute, gate, gate_open]))
+    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))
+    write_png(os.path.join(preview, "brute.png"), contact_sheet(brute_frames, scale=4))
     write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
     write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
     write_png(
