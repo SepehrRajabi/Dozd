@@ -321,6 +321,44 @@ SENTRY_GUN = [
     "............",
 ]
 
+# The Doctor's leech mine: a squat steel puck, its pink cross dim until armed,
+# and the glow the game blinks over the cross once it is.
+MINE_METAL = {
+    "S": rgb(132, 138, 158),
+    "M": rgb(82, 86, 104),
+    "m": rgb(46, 46, 62),
+    "d": rgb(34, 34, 46),
+    "P": rgb(214, 84, 112),
+    "L": rgb(255, 176, 192),
+    "r": rgb(150, 56, 82),
+}
+
+MINE = [
+    "............",
+    "...kkkkkk...",
+    ".kkSSSSSSkk.",
+    "kSMmmLPmmMSk",
+    "kMmLPPPPPmMk",
+    "kMmPPPPPPmMk",
+    "kMMmmPPmmMMk",
+    "kdMMMMMMMMdk",
+    "kddddddddddk",
+    ".kdrddddrdk.",
+    "..kkkkkkkk..",
+    "............",
+]
+
+# White so the game can tint it, soft at the edges.
+MINE_LIGHT = [
+    "..ww..",
+    ".wWWw.",
+    "wWWWWw",
+    "wWWWWw",
+    ".wWWw.",
+    "..ww..",
+]
+MINE_GLOW = {"w": rgb(255, 255, 255, 110), "W": WHITE}
+
 
 # --------------------------------------------------------------------------
 # Guns: 16x8, barrel pointing right, grip toward the left-centre.
@@ -1828,6 +1866,7 @@ def floor_lips():
 
 # How often each look turns up; keep these in step with `draw_deck` in room.rs.
 FLOOR_WEIGHTS = [34, 14, 14, 10, 22, 6]
+FLOOR_ACCENT = 5
 GRATE_WEIGHTS = [35, 30, 10, 25]
 FACE_WEIGHTS = [26, 18, 14, 8, 6, 10, 8, 6, 4]
 FACE_SPILLS = {3: "spill_lamp", 4: "spill_screen"}
@@ -1862,12 +1901,14 @@ def tile_pick(col, row, salt, weights):
     return 0
 
 
-def panel_pick(col, row, salt, weights):
+def panel_pick(col, row, salt, weights, accent=None):
     """Which 2x2 panel a tile belongs to, and which quarter of it it shows.
-    Panels near each other mostly match, so an area reads as fitted out alike."""
+    Panels near each other mostly match, so an area reads as fitted out alike;
+    an `accent` look only turns up here and there."""
     bc, br = col // 2, row // 2
     area = tile_pick(bc // 3, br // 3, salt, weights)
-    look = area if tile_hash(bc, br, salt + 1) % 100 < 60 else tile_pick(bc, br, salt + 2, weights)
+    keep = area != accent and tile_hash(bc, br, salt + 1) % 100 < 60
+    look = area if keep else tile_pick(bc, br, salt + 2, weights)
     return f"{look}_{2 * (row % 2) + col % 2}"
 
 
@@ -1934,7 +1975,7 @@ def station_preview(sets, shared):
                 elif ch == "L":
                     tile = tiles[f"lift_{(plan[r - 1][c] == 'L') * 2 + (plan[r][c - 1] == 'L')}"]
                 else:
-                    tile = tiles["floor_" + panel_pick(c, r, 1, FLOOR_WEIGHTS)]
+                    tile = tiles["floor_" + panel_pick(c, r, 1, FLOOR_WEIGHTS, FLOOR_ACCENT)]
                 blend(img, tile, c * SIZE, r * SIZE)
                 if ch == "." and tile_hash(c, r, 4) % 100 < DECAL_CHANCE:
                     blend(img, shared["decal_" + DECALS[tile_pick(c, r, 5, DECAL_WEIGHTS[deck])]], c * SIZE, r * SIZE)
@@ -2635,6 +2676,10 @@ def main():
     write_png(os.path.join(ROOT, "sentry.png"), sentry)
     sentry_gun = from_ascii("sentry_gun", SENTRY_GUN, SENTRY_METAL, width=12, height=6)
     write_png(os.path.join(ROOT, "sentry_gun.png"), sentry_gun)
+    mine = from_ascii("mine", MINE, MINE_METAL, width=12, height=12)
+    write_png(os.path.join(ROOT, "mine.png"), mine)
+    mine_light = from_ascii("mine_light", MINE_LIGHT, MINE_GLOW, width=6, height=6)
+    write_png(os.path.join(ROOT, "mine_light.png"), mine_light)
 
     sets = []
     for deck, theme in enumerate(DECK_THEMES):
@@ -2711,7 +2756,7 @@ def main():
     write_png(os.path.join(preview, "loot.png"), contact_sheet(list(loot.values())))
     write_png(
         os.path.join(preview, "player_tiles.png"),
-        contact_sheet([player, engineer, bulwark, hacker, doctor, sentry]),
+        contact_sheet([player, engineer, bulwark, hacker, doctor, sentry, mine, mine_light]),
     )
     write_png(os.path.join(preview, "station.png"), contact_sheet(station_preview(sets, shared), scale=2))
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))

@@ -26,6 +26,9 @@ pub enum Passive {
     Ricochet,
     /// Engineer: a heavier shield.
     Armor,
+    /// Engineer: every crew ability, theirs included, recharges faster, and
+    /// sentries fire faster; a little more shield.
+    Overclock,
     /// Bulwark: crewmates nearby hit harder.
     Rally,
     /// Hacker: guards nearby sometimes miss.
@@ -52,11 +55,21 @@ pub enum Active {
     Blackout,
     /// Doctor: wards the crew nearby against all harm.
     Ward,
+    /// Doctor: plants a mine that blasts guards nearby and heals the crew.
+    LeechMine,
 }
 
 impl Passive {
-    pub const ALL: [Passive; 7] =
-        [Self::Supply, Self::Ricochet, Self::Armor, Self::Rally, Self::Jamming, Self::Healing, Self::Lifesteal];
+    pub const ALL: [Passive; 8] = [
+        Self::Supply,
+        Self::Ricochet,
+        Self::Armor,
+        Self::Overclock,
+        Self::Rally,
+        Self::Jamming,
+        Self::Healing,
+        Self::Lifesteal,
+    ];
 
     /// By its code name, e.g. `ricochet`, as saved and typed on the command line.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -66,7 +79,7 @@ impl Passive {
     pub fn class(self) -> PirateClass {
         match self {
             Self::Supply | Self::Ricochet => PirateClass::Gunner,
-            Self::Armor => PirateClass::Engineer,
+            Self::Armor | Self::Overclock => PirateClass::Engineer,
             Self::Rally => PirateClass::Bulwark,
             Self::Jamming => PirateClass::Hacker,
             Self::Healing | Self::Lifesteal => PirateClass::Doctor,
@@ -78,6 +91,7 @@ impl Passive {
             Self::Supply => "SUPPLY",
             Self::Ricochet => "RICOCHET",
             Self::Armor => "ARMOUR",
+            Self::Overclock => "OVERCLOCK",
             Self::Rally => "RALLY",
             Self::Jamming => "JAMMING",
             Self::Healing => "FIELD MEDIC",
@@ -91,17 +105,26 @@ impl Passive {
             Self::Supply => "Crew shots may cost no ammo",
             Self::Ricochet => "Hits may bounce to others",
             Self::Armor => "80% more shield",
-            Self::Rally => "You and crew nearby hit 25% harder",
+            Self::Overclock => "Crew cooldowns -35%, +shield",
+            Self::Rally => "You and crew near: +25% dmg",
             Self::Jamming => "Guards nearby may miss",
             Self::Healing => "Heals crew nearby",
-            Self::Lifesteal => "Crew hits may heal the shooter",
+            Self::Lifesteal => "Crew hits may heal shooters",
         }
     }
 }
 
 impl Active {
-    pub const ALL: [Active; 7] =
-        [Self::SpareGun, Self::Laser, Self::Sentry, Self::RiotShield, Self::Hack, Self::Blackout, Self::Ward];
+    pub const ALL: [Active; 8] = [
+        Self::SpareGun,
+        Self::Laser,
+        Self::Sentry,
+        Self::RiotShield,
+        Self::Hack,
+        Self::Blackout,
+        Self::Ward,
+        Self::LeechMine,
+    ];
 
     /// By its code name, e.g. `riotshield`, as saved and typed on the command line.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -114,7 +137,7 @@ impl Active {
             Self::Sentry => PirateClass::Engineer,
             Self::RiotShield => PirateClass::Bulwark,
             Self::Hack | Self::Blackout => PirateClass::Hacker,
-            Self::Ward => PirateClass::Doctor,
+            Self::Ward | Self::LeechMine => PirateClass::Doctor,
         }
     }
 
@@ -127,6 +150,7 @@ impl Active {
             Self::Hack => "HACK",
             Self::Blackout => "BLACKOUT",
             Self::Ward => "WARD",
+            Self::LeechMine => "LEECH MINE",
         }
     }
 
@@ -135,11 +159,12 @@ impl Active {
         match self {
             Self::SpareGun => "No Q: carry a 4th gun",
             Self::Laser => "Q: a lethal beam, with kick",
-            Self::Sentry => "Q: drop a gun that shoots guards",
+            Self::Sentry => "Q: drop a guard-shooting gun",
             Self::RiotShield => "Q: raise a bulletproof shield",
             Self::Hack => "Q: turn guards near the aim",
             Self::Blackout => "Q: freeze every guard on deck",
             Self::Ward => "Q: shield the crew from harm",
+            Self::LeechMine => "Q: a mine that heals the crew",
         }
     }
 }

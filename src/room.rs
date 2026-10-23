@@ -434,6 +434,8 @@ fn build_grid(layout: Layout) -> RoomGrid {
 const DECK_LOOKS: u8 = 3;
 // How often each look turns up; keep these in step with tools/gen_assets.py.
 const FLOOR_WEIGHTS: [u32; 6] = [34, 14, 14, 10, 22, 6];
+/// The plate with loading-bay paint: a floor's accent.
+const FLOOR_ACCENT: usize = 5;
 const GRATE_WEIGHTS: [u32; 4] = [35, 30, 10, 25];
 const FACE_WEIGHTS: [u32; 9] = [26, 18, 14, 8, 6, 10, 8, 6, 4];
 /// Wall faces that light the floor below them: the lamp and the terminal.
@@ -514,7 +516,7 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
                     overlay(&mut commands, &door_glow, pos - Vec2::new(0.0, TILE * 1.5), 0.06);
                     door.clone()
                 }
-                ',' | 'G' => grates[panel(col, row, 2, &GRATE_WEIGHTS)][quarter].clone(),
+                ',' | 'G' => grates[panel(col, row, 2, &GRATE_WEIGHTS, None)][quarter].clone(),
                 '=' => hazard.clone(),
                 'v' => vent.clone(),
                 // A lift is one 2x2 platform; each tile shows its quarter.
@@ -522,7 +524,7 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
                     let same = |c: isize, r: isize| open(c, r) && grid.tiles[r as usize][c as usize] == ch;
                     lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize].clone()
                 }
-                _ => floors[panel(col, row, 1, &FLOOR_WEIGHTS)][quarter].clone(),
+                _ => floors[panel(col, row, 1, &FLOOR_WEIGHTS, Some(FLOOR_ACCENT))][quarter].clone(),
             };
             let sprite = match ch {
                 // The shaft the crew rode in on is dimmed: it doesn't go anywhere.
@@ -580,11 +582,13 @@ fn variant(col: usize, row: usize, salt: u32, weights: &[u32]) -> usize {
 }
 
 /// Which look the 2x2 panel holding a tile has. Panels near each other mostly
-/// match, so an area reads as fitted out alike rather than as patchwork.
-fn panel(col: usize, row: usize, salt: u32, weights: &[u32]) -> usize {
+/// match, so an area reads as fitted out alike rather than as patchwork; an
+/// `accent` look only turns up here and there, never across a whole area.
+fn panel(col: usize, row: usize, salt: u32, weights: &[u32], accent: Option<usize>) -> usize {
     let (pc, pr) = (col / 2, row / 2);
-    if hash(pc, pr, salt + 1) % 100 < 60 {
-        variant(pc / 3, pr / 3, salt, weights)
+    let area = variant(pc / 3, pr / 3, salt, weights);
+    if Some(area) != accent && hash(pc, pr, salt + 1) % 100 < 60 {
+        area
     } else {
         variant(pc, pr, salt + 2, weights)
     }

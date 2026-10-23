@@ -19,6 +19,7 @@ mod headless;
 mod hud;
 mod loot;
 mod menu;
+mod mine_view;
 mod mission;
 mod net;
 mod perks;
@@ -195,6 +196,7 @@ impl Plugin for ViewPlugins {
                 challenge_hud::ChallengeViewPlugin,
                 breach_hud::BreachViewPlugin,
                 boss_view::BossViewPlugin,
+                mine_view::MineViewPlugin,
             ),
         ));
     }

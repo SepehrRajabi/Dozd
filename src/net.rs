@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::boss::{BruteLook, Keeper, KeeperBeam, KeeperHand, StalkerLook};
 use crate::breach::Breach;
 use crate::challenge::{Challenge, Rewards};
-use crate::class::{Ability, Boons, Laser, Loadout, PirateClass, RiotShield, Sentry};
+use crate::class::{Ability, Boons, Laser, LeechMine, Loadout, PirateClass, RiotShield, Sentry};
 use crate::combat::{Fx, Health, ProjectileLook};
 use crate::crew::{Link, Roster};
 use crate::drops::EnemyDrop;
@@ -191,6 +191,7 @@ impl Plugin for NetPlugin {
             .replicate::<MissionStatus>()
             .replicate::<Ability>()
             .replicate::<Sentry>()
+            .replicate::<LeechMine>()
             .replicate::<RiotShield>()
             .replicate::<Laser>()
             .replicate::<Link>()

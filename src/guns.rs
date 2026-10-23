@@ -651,7 +651,7 @@ fn fire(
                         let Ok((_, t, mut h, _, mut knockback, _)) = enemies.get_mut(target) else { continue };
                         let pos = t.translation.truncate();
                         if let Some(dealt) = h.hurt_for(share) {
-                            crew_hits.write(CrewHit { owner: player.owner, dealt, killed: h.is_dead() });
+                            crew_hits.write(CrewHit { owner: player.owner, dealt, killed: h.is_dead(), drains: true });
                             knockback.0 += (pos - origin).normalize_or_zero() * stats.knockback;
                             fx(&mut commands, FxKind::Zap(pos), muzzle, 0.0, stats.color);
                         }

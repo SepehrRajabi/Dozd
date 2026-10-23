@@ -673,7 +673,7 @@ mod tests {
         /// Kills by `owner`, all landing on the next frame.
         pub fn kill(app: &mut App, owner: u64, kills: u32) {
             for _ in 0..kills {
-                app.world_mut().write_message(CrewHit { owner, dealt: 10.0, killed: true });
+                app.world_mut().write_message(CrewHit { owner, dealt: 10.0, killed: true, drains: true });
             }
             app.update();
         }

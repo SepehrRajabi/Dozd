@@ -1,10 +1,12 @@
 //! Pirate classes and loadouts. Each pirate picks a class and their guns in the
 //! menu; the host spawns them with it. The Gunner carries an extra gun or fires
 //! a lethal laser on Q, and keeps the whole crew supplied, so their shots
-//! sometimes cost no ammo, and the Engineer wears heavier armour; the others
+//! sometimes cost no ammo, and the Engineer wears heavier armour or overclocks
+//! the crew, so every ability recharges sooner; the others
 //! have an ability on Q: the Engineer drops a sentry gun, the Bulwark
 //! carries a bulletproof riot shield, the Hacker turns the guards around their
-//! crosshair against the station or freezes every guard on the deck, and the Doctor wards the crew nearby against all harm. The Doctor
+//! crosshair against the station or freezes every guard on the deck, and the Doctor wards the crew nearby against all harm
+//! or plants a leech mine that blasts the guards who trip it and heals the whole crew. The Doctor
 //! also slowly patches up any crewmate close by, or lets the whole crew's hits
 //! sometimes heal whoever landed them, the Bulwark's presence makes
 //! the crew around them hit harder, and the Hacker jams the guards and bosses around them
@@ -55,6 +57,11 @@ const SENTRY_PICKUP: f32 = 16.0;
 const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
+/// How much an Engineer's overclock cuts every crew ability's cooldown, wherever
+/// they are, the Engineer's own included.
+pub const OVERCLOCK_CUT: f32 = 0.35;
+/// Extra shield an overclocking Engineer still carries: lighter than full armour.
+pub const OVERCLOCK_ARMOR: f32 = 0.25;
 
 /// Odds a shot by a Gunner or any crewmate of theirs, wherever they are, costs no ammo.
 pub const SUPPLY_CHANCE: f32 = 0.3;
@@ -129,7 +136,25 @@ pub const WARD_LIFE: f32 = 4.0;
 const WARD_COOLDOWN: f32 = 28.0;
 /// How close crewmates must be to share the Doctor's ward.
 const WARD_RADIUS: f32 = 80.0;
-const MEDIC_COLOR: Color = Color::srgb(1.0, 0.45, 0.55);
+pub const MEDIC_COLOR: Color = Color::srgb(1.0, 0.45, 0.55);
+/// Seconds from planting a leech mine until the next one is ready.
+const MINE_COOLDOWN: f32 = 14.0;
+/// Seconds a freshly planted leech mine takes to arm.
+pub const MINE_ARM: f32 = 0.8;
+/// How close a guard must come, past its hurtbox, to set a leech mine off.
+pub const MINE_TRIGGER: f32 = 28.0;
+/// How far a leech mine's blast reaches, past each guard's hurtbox.
+pub const MINE_RADIUS: f32 = 52.0;
+/// Damage at the middle of a leech mine's blast, halving toward its edge.
+pub const MINE_DAMAGE: f32 = 110.0;
+/// The share of it a boss takes: built to stop a guard, not a keeper.
+pub const MINE_BOSS_SHARE: f32 = 0.5;
+/// How hard a leech mine's blast throws guards outward.
+const MINE_KNOCKBACK: f32 = 160.0;
+/// Share of a leech mine's damage dealt that heals each pirate in the crew.
+pub const MINE_HEAL_SHARE: f32 = 0.4;
+/// Live leech mines a Doctor can have down at once: one more replaces the oldest.
+pub const MINE_MAX: usize = 3;
 /// The shock ring sprite's width, to scale it to a radius.
 const RING_SIZE: f32 = 113.0;
 
@@ -143,7 +168,16 @@ impl Plugin for ClassPlugin {
             .add_systems(OnExit(GameState::Playing), |mut blackout: ResMut<Blackout>| blackout.0 = 0.0)
             .add_systems(
                 Update,
-                (use_abilities, run_blackout, run_sentries, carry_riot_shields, fire_lasers, support_crew, steal_life)
+                (
+                    use_abilities,
+                    run_blackout,
+                    run_sentries,
+                    run_leech_mines,
+                    carry_riot_shields,
+                    fire_lasers,
+                    support_crew,
+                    steal_life,
+                )
                     .chain()
                     .after(move_players)
                     .run_if(in_state(GameState::Playing))
@@ -244,6 +278,7 @@ impl Passive {
     pub fn shield(self) -> f32 {
         match self {
             Self::Armor => MAX_SHIELD * (1.0 + ENGINEER_ARMOR),
+            Self::Overclock => MAX_SHIELD * (1.0 + OVERCLOCK_ARMOR),
             _ => MAX_SHIELD,
         }
     }
@@ -290,6 +325,13 @@ impl Active {
                 label: "WARD",
                 cooldown: WARD_COOLDOWN,
                 life: WARD_LIFE,
+                color: MEDIC_COLOR,
+            },
+            Self::LeechMine => AbilityStats {
+                label: "MINE",
+                cooldown: MINE_COOLDOWN,
+                // A mine waits for a guard however long it takes: nothing to time.
+                life: 0.0,
                 color: MEDIC_COLOR,
             },
         })
@@ -465,7 +507,11 @@ pub struct Boons {
     /// A Doctor with lifesteal is in the crew: their hits on guards heal them
     /// `LIFESTEAL_SHARE` of the damage dealt `LIFESTEAL_CHANCE` of the time.
     pub leeching: bool,
-    /// For a Doctor, Bulwark or Gunner: how many crewmates their passive reaches.
+    /// An Engineer with overclock is in the crew: their ability recharges,
+    /// and their sentry fires, `OVERCLOCK_CUT` sooner (see `cooldown_rate`).
+    pub overclocked: bool,
+    /// For a Doctor, Bulwark, Gunner or overclocking Engineer: how many
+    /// crewmates their passive reaches.
     pub aura: u8,
     /// For a Hacker: how many guards they're jamming.
     pub jamming: u8,
@@ -480,6 +526,11 @@ impl Boons {
         let rally = if self.rallied { 1.0 + RALLY_BOOST } else { 1.0 };
         let cry = if self.empowered { WAR_CRY_POWER } else { 1.0 };
         rally * cry
+    }
+
+    /// How many seconds of cooldown their ability sheds each second.
+    pub fn cooldown_rate(self) -> f32 {
+        if self.overclocked { 1.0 / (1.0 - OVERCLOCK_CUT) } else { 1.0 }
     }
 }
 
@@ -501,11 +552,15 @@ pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String,
     if boons.leeching {
         effects.push((format!("LIFESTEAL {:.0}%", LIFESTEAL_CHANCE * 100.0), MEDIC_COLOR));
     }
+    if boons.overclocked {
+        effects.push((format!("OVERCLOCK -{:.0}% CD", OVERCLOCK_CUT * 100.0), SENTRY_COLOR));
+    }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
     }
     match passive {
         Passive::Armor => effects.push((format!("ARMOR +{:.0}%", ENGINEER_ARMOR * 100.0), SENTRY_COLOR)),
+        Passive::Overclock => effects.push((format!("ARMOR +{:.0}%", OVERCLOCK_ARMOR * 100.0), SENTRY_COLOR)),
         Passive::Ricochet => effects.push((format!("RICOCHET {:.0}%", RICOCHET_CHANCE * 100.0), GUNNER_COLOR)),
         _ => {}
     }
@@ -602,6 +657,22 @@ struct LaserPart {
 #[derive(Component)]
 struct LaserImpact;
 
+/// A Doctor's leech mine, planted on the floor. Once armed, the first hostile
+/// guard or boss to come within `MINE_TRIGGER` sets it off: it blasts every
+/// hostile in `MINE_RADIUS` and heals the whole crew, the Doctor included, a
+/// share of the damage it dealt.
+#[derive(Component, Serialize, Deserialize, Clone)]
+pub struct LeechMine {
+    /// `Player::owner` of the Doctor who planted it.
+    pub owner: u64,
+    /// Seconds left before it's armed; armed at zero.
+    pub arm: f32,
+}
+
+/// Host only: when a leech mine was planted, so a Doctor's oldest goes first.
+#[derive(Component)]
+struct PlantedAt(f32);
+
 /// An Engineer's sentry gun. Shoots the closest enemy it can see until its time
 /// runs out or it's destroyed.
 #[derive(Component, Serialize, Deserialize, Clone)]
@@ -665,17 +736,20 @@ fn use_abilities(
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut blackout: ResMut<Blackout>,
-    mut players: Query<(&Player, &mut Health, &Controls, &Transform, &Aim, &mut Ability)>,
+    mut players: Query<(&Player, &mut Health, &Controls, &Transform, &Aim, &mut Ability, &Boons)>,
     sentries: Query<(Entity, &Sentry, &Transform), Without<Player>>,
     riot_shields: Query<(Entity, &RiotShield)>,
+    mines: Query<(Entity, &LeechMine, &PlantedAt)>,
     mut enemies: Query<(&mut Enemy, &Transform, &Health), Without<Player>>,
 ) {
     let dt = time.delta_secs();
     // Where Doctors raised a ward this frame; the crew around them is warded below.
     let mut wards = Vec::new();
-    for (player, health, controls, transform, aim, mut ability) in &mut players {
+    for (player, health, controls, transform, aim, mut ability, boons) in &mut players {
         let health = &*health;
-        ability.cooldown = (ability.cooldown - dt).max(0.0);
+        // Overclock speeds up the recharge, not the effect.
+        let rate = boons.cooldown_rate();
+        ability.cooldown = (ability.cooldown - dt * rate).max(0.0);
         ability.active = (ability.active - dt).max(0.0);
         let Some(active) = player.active else { continue };
         let Some(stats) = active.stats() else { continue };
@@ -685,7 +759,7 @@ fn use_abilities(
         if active == Active::RiotShield {
             let raised = riot_shields.iter().find(|(_, s)| s.owner == player.owner).map(|(e, _)| e);
             if raised.is_none() {
-                ability.charge = (ability.charge + dt * RIOT_LIFE / RIOT_RECHARGE).min(RIOT_LIFE);
+                ability.charge = (ability.charge + dt * rate * RIOT_LIFE / RIOT_RECHARGE).min(RIOT_LIFE);
             }
             if !controls.ability || !can_act(player, health) {
                 continue;
@@ -728,6 +802,29 @@ fn use_abilities(
         match active {
             // Handled above, or nothing on Q.
             Active::RiotShield | Active::SpareGun => {}
+            Active::LeechMine => {
+                // A few down at once: one more takes up the oldest.
+                let mut own: Vec<(Entity, f32)> = mines
+                    .iter()
+                    .filter(|(_, m, _)| m.owner == player.owner)
+                    .map(|(e, _, at)| (e, at.0))
+                    .collect();
+                if own.len() >= MINE_MAX {
+                    own.sort_by(|a, b| a.1.total_cmp(&b.1));
+                    for &(entity, _) in &own[..=own.len() - MINE_MAX] {
+                        commands.entity(entity).despawn();
+                    }
+                }
+                commands.spawn((
+                    Level,
+                    Replicated,
+                    LeechMine { owner: player.owner, arm: MINE_ARM },
+                    PlantedAt(time.elapsed_secs()),
+                    // On the floor, under everyone's feet.
+                    Transform::from_translation(pos.extend(1.5)),
+                ));
+                fx(&mut commands, FxKind::Burst, pos, 0.0, MEDIC_COLOR);
+            }
             Active::Laser => {
                 let laser = Laser { owner: player.owner, left: LASER_LIFE, dir: aim.dir, length: 0.0, age: 0.0 };
                 let from = muzzle(pos, aim.dir);
@@ -820,7 +917,8 @@ fn use_abilities(
 /// a Gunner keeps the whole crew, near or far and themselves included,
 /// supplied, so their shots sometimes cost no ammo. A Doctor with lifesteal
 /// reaches the whole crew the same way, so their hits sometimes heal them (see
-/// `steal_life`). Field medic alone doesn't help its Doctor: it needs a crew. Records who's getting what in everyone's `Boons`.
+/// `steal_life`), and an Engineer with overclock speeds every crew ability's
+/// recharge, theirs included, wherever they are. Field medic alone doesn't help its Doctor: it needs a crew. Records who's getting what in everyone's `Boons`.
 fn support_crew(
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -828,7 +926,7 @@ fn support_crew(
 ) {
     let supporters: Vec<(u64, Passive, Vec2)> = players
         .iter()
-        .filter(|(p, h, ..)| matches!(p.passive, Passive::Healing | Passive::Rally | Passive::Supply | Passive::Lifesteal) && can_act(p, h))
+        .filter(|(p, h, ..)| matches!(p.passive, Passive::Healing | Passive::Rally | Passive::Supply | Passive::Lifesteal | Passive::Overclock) && can_act(p, h))
         .map(|(p, _, t, _)| (p.owner, p.passive, t.translation.truncate()))
         .collect();
     // Who each supporter reaches, by index into `supporters`.
@@ -840,6 +938,7 @@ fn support_crew(
         let mut rallied = false;
         let mut supplied = false;
         let mut leeching = false;
+        let mut overclocked = false;
         if can_act(player, &health) {
             for (i, &(owner, passive, at)) in supporters.iter().enumerate() {
                 let own = owner == player.owner;
@@ -850,7 +949,7 @@ fn support_crew(
                 let radius = match passive {
                     Passive::Healing => Some(HEAL_RADIUS),
                     Passive::Rally => Some(RALLY_RADIUS),
-                    // Supply and lifesteal reach everyone.
+                    // Supply, lifesteal and overclock reach everyone.
                     _ => None,
                 };
                 if radius.is_some_and(|r| at.distance(pos) > r || !grid.line_of_sight(at, pos)) {
@@ -863,6 +962,7 @@ fn support_crew(
                     Passive::Healing => medics += 1,
                     Passive::Rally => rallied = true,
                     Passive::Lifesteal => leeching = true,
+                    Passive::Overclock => overclocked = true,
                     _ => supplied = true,
                 }
             }
@@ -872,7 +972,7 @@ fn support_crew(
         if healing {
             health.heal(HEAL_RATE * medics as f32 * dt);
         }
-        let current = Boons { healing, rallied, supplied, leeching, ..*boons };
+        let current = Boons { healing, rallied, supplied, leeching, overclocked, ..*boons };
         boons.set_if_neq(current);
     }
     for (player, _, _, mut boons) in &mut players {
@@ -888,13 +988,14 @@ fn support_crew(
 
 /// Each crew hit on a guard heals whoever landed it, if a Doctor with lifesteal
 /// is in the crew, `LIFESTEAL_SHARE` of the damage dealt `LIFESTEAL_CHANCE` of
-/// the time. Hull only.
+/// the time. Hull only. Leech mine blasts don't count: they heal the crew
+/// already.
 fn steal_life(
     mut hits: MessageReader<CrewHit>,
     mut rng: ResMut<Rng>,
     mut players: Query<(&Player, &mut Health, &Boons)>,
 ) {
-    for hit in hits.read() {
+    for hit in hits.read().filter(|hit| hit.drains) {
         let Some((_, mut health, _)) = players
             .iter_mut()
             .find(|(p, h, b)| p.owner == hit.owner && b.leeching && can_act(p, h))
@@ -1018,7 +1119,7 @@ fn fire_lasers(
                 && let Some(dealt) = health.hurt_for(damage)
             {
                 knockback.0 += dir * 400.0 * dt;
-                crew_hits.write(CrewHit { owner: laser.owner, dealt, killed: health.is_dead() });
+                crew_hits.write(CrewHit { owner: laser.owner, dealt, killed: health.is_dead(), drains: true });
             }
         }
         // As loud as any gun, the whole time it fires.
@@ -1036,9 +1137,12 @@ fn run_sentries(
     mut alarm: ResMut<Alarm>,
     mut sentries: Query<(Entity, &mut Sentry, &Health, &Transform)>,
     enemies: Query<(&Transform, &Health, &Hurtbox, &Team), Or<(With<Enemy>, With<Keeper>)>>,
+    crew: Query<(&Player, &Boons)>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut sentry, health, transform) in &mut sentries {
+        // An overclocked crew's sentries fire faster too.
+        let rate = crew.iter().find(|(p, _)| p.owner == sentry.owner).map_or(1.0, |(_, b)| b.cooldown_rate());
         let pos = transform.translation.truncate();
         sentry.left -= dt;
         if sentry.left <= 0.0 || health.is_dead() {
@@ -1047,7 +1151,7 @@ fn run_sentries(
             continue;
         }
 
-        sentry.reload = (sentry.reload - dt).max(0.0);
+        sentry.reload = (sentry.reload - dt * rate).max(0.0);
         let pivot = pos + SENTRY_PIVOT;
         let target = enemies
             .iter()
@@ -1091,6 +1195,79 @@ fn run_sentries(
         // Gunfire is gunfire: guards hear a sentry like any pirate.
         noise.0.push(pivot);
         alarm.alert();
+    }
+}
+
+/// Arms each leech mine, and sets it off once a hostile guard or awake boss
+/// it can see comes close: it blasts every hostile it can see in reach, and
+/// heals the whole crew, wherever they are, `MINE_HEAL_SHARE` of the damage
+/// it dealt.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn run_leech_mines(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut noise: ResMut<Noise>,
+    mut crew_hits: MessageWriter<CrewHit>,
+    mut mines: Query<(Entity, &mut LeechMine, &Transform)>,
+    mut enemies: Query<(&Enemy, &Transform, &mut Health, &Hurtbox, Option<&mut Knockback>), (Without<Keeper>, Without<Player>)>,
+    mut keepers: Query<(&Keeper, &Transform, &mut Health, &Hurtbox), (Without<Enemy>, Without<Player>)>,
+    mut players: Query<(&Player, &mut Health, &Transform), (Without<Enemy>, Without<Keeper>)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut mine, transform) in &mut mines {
+        if mine.arm > 0.0 {
+            mine.arm = (mine.arm - dt).max(0.0);
+            continue;
+        }
+        let pos = transform.translation.truncate();
+        let in_reach = |t: &Transform, hurtbox: &Hurtbox, reach: f32| {
+            let at = t.translation.truncate();
+            at.distance(pos) <= reach + hurtbox.0 && grid.line_of_sight(pos, at)
+        };
+        let tripped = enemies
+            .iter()
+            .any(|(e, t, h, hurtbox, _)| !e.is_hacked() && !h.is_dead() && in_reach(t, hurtbox, MINE_TRIGGER))
+            || keepers
+                .iter()
+                .any(|(k, t, h, hurtbox)| k.awake && !h.is_dead() && in_reach(t, hurtbox, MINE_TRIGGER));
+        if !tripped {
+            continue;
+        }
+
+        // Like any blast: full damage at the middle, halving toward the edge.
+        let falloff = |t: &Transform, hurtbox: &Hurtbox| {
+            let reach = MINE_RADIUS + hurtbox.0;
+            let offset = t.translation.truncate() - pos;
+            in_reach(t, hurtbox, MINE_RADIUS).then(|| (offset, 1.0 - 0.5 * offset.length() / reach))
+        };
+        let mut total = 0.0;
+        for (enemy, t, mut health, hurtbox, knockback) in &mut enemies {
+            let Some((offset, falloff)) = falloff(t, hurtbox).filter(|_| !enemy.is_hacked()) else { continue };
+            let Some(dealt) = health.hurt_for(MINE_DAMAGE * falloff) else { continue };
+            total += dealt;
+            crew_hits.write(CrewHit { owner: mine.owner, dealt, killed: health.is_dead(), drains: false });
+            if let Some(mut knockback) = knockback {
+                knockback.0 += offset.normalize_or(Vec2::X) * MINE_KNOCKBACK * falloff;
+            }
+        }
+        for (keeper, t, mut health, hurtbox) in &mut keepers {
+            let Some((_, falloff)) = falloff(t, hurtbox).filter(|_| keeper.awake) else { continue };
+            let Some(dealt) = health.hurt_for(MINE_DAMAGE * MINE_BOSS_SHARE * falloff) else { continue };
+            total += dealt;
+            crew_hits.write(CrewHit { owner: mine.owner, dealt, killed: health.is_dead(), drains: false });
+        }
+        if total > 0.0 {
+            for (player, mut health, t) in &mut players {
+                if can_act(player, &health) {
+                    health.heal(total * MINE_HEAL_SHARE);
+                    fx(&mut commands, FxKind::Burst, t.translation.truncate(), 0.0, MEDIC_COLOR);
+                }
+            }
+        }
+        noise.0.push(pos);
+        fx(&mut commands, FxKind::Explosion, pos, 0.0, MEDIC_COLOR);
+        commands.entity(entity).despawn();
     }
 }
 
@@ -1437,7 +1614,7 @@ fn spawn_ability_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 fn update_ability_hud(
     local: Res<LocalId>,
     hack_aiming: Res<HackAiming>,
-    player: Option<Single<(&Player, &Ability, &Transform), With<LocalPlayer>>>,
+    player: Option<Single<(&Player, &Ability, &Boons, &Transform), With<LocalPlayer>>>,
     sentries: Query<(&Sentry, &Transform), Without<LocalPlayer>>,
     riot_shields: Query<&RiotShield>,
     mut panel: Single<&mut Node, (With<AbilityPanel>, Without<AbilityFill>)>,
@@ -1451,7 +1628,7 @@ fn update_ability_hud(
         panel.display = display;
     }
     let (Some(player), Some(stats)) = (player, stats) else { return };
-    let (player, ability, transform) = *player;
+    let (player, ability, boons, transform) = *player;
     if name.0 != stats.label {
         name.0 = stats.label.into();
     }
@@ -1484,7 +1661,9 @@ fn update_ability_hud(
         (1.0, stats.color, "CLICK TO HACK".into(), stats.color)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
-        (ready, hud::SPENT, format!("{:.0}s", ability.cooldown.ceil()), dim)
+        // Overclocked, the cooldown drains faster than the clock: show real seconds.
+        let left = ability.cooldown / boons.cooldown_rate();
+        (ready, hud::SPENT, format!("{:.0}s", left.ceil()), dim)
     } else {
         (1.0, stats.color, "READY  [Q]".into(), Color::WHITE)
     };
@@ -1498,7 +1677,115 @@ fn update_ability_hud(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
     use super::*;
+    use crate::enemies::{EnemyKind, spawn_enemy};
+    use crate::net::{HOST_ID, NetMode, StartSession};
+    use crate::player::CrewSize;
+    use crate::room::NextSeed;
+    use crate::GamePlugins;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn overclock_cuts_cooldowns() {
+        let plain = Boons::default();
+        assert_eq!(plain.cooldown_rate(), 1.0);
+        let overclocked = Boons { overclocked: true, ..plain };
+        // A cooldown takes 65% as long.
+        let secs = 20.0 / overclocked.cooldown_rate();
+        assert!((secs - 20.0 * (1.0 - OVERCLOCK_CUT)).abs() < 1e-4);
+    }
+
+    /// A host running a solo session with an overclocking Engineer and a
+    /// Doctor carrying leech mines, both warded so stray guards can't hurt them.
+    fn engineer_and_doctor() -> App {
+        let mut app = App::new();
+        let engineer = Loadout { passive: Passive::Overclock, ..Loadout::new(PirateClass::Engineer) };
+        let doctor = Loadout { active: Some(Active::LeechMine), ..Loadout::new(PirateClass::Doctor) };
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(DT)))
+            .add_plugins(GamePlugins)
+            .insert_resource(CrewSize(2))
+            .insert_resource(Loadouts([(HOST_ID, engineer), (HOST_ID + 1, doctor)].into_iter().collect()))
+            .insert_resource(NextSeed(7))
+            .insert_resource(Rng::new(7));
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+        let mut pirates = app.world_mut().query::<&mut Health>();
+        for mut health in pirates.iter_mut(app.world_mut()) {
+            health.warded = 1000.0;
+        }
+        app
+    }
+
+    /// The Doctor's pirate, by query.
+    fn doctor_mut(app: &mut App) -> (Mut<'_, Health>, Mut<'_, Ability>, Mut<'_, Controls>, Boons, Vec2) {
+        let mut pirates = app.world_mut().query::<(&Player, &mut Health, &mut Ability, &mut Controls, &Boons, &Transform)>();
+        let (_, health, ability, controls, boons, transform) = pirates
+            .iter_mut(app.world_mut())
+            .find(|(p, ..)| p.active == Some(Active::LeechMine))
+            .expect("a Doctor");
+        (health, ability, controls, *boons, transform.translation.truncate())
+    }
+
+    #[test]
+    fn overclock_reaches_the_crew() {
+        let mut app = engineer_and_doctor();
+        app.update();
+        let (_, mut ability, _, boons, _) = doctor_mut(&mut app);
+        assert!(boons.overclocked, "overclock reaches the Doctor");
+        ability.cooldown = 10.0;
+        for _ in 0..60 {
+            app.update();
+        }
+        let (_, ability, ..) = doctor_mut(&mut app);
+        let expected = 10.0 - 1.0 / (1.0 - OVERCLOCK_CUT);
+        assert!((ability.cooldown - expected).abs() < 0.05, "cooldown {} after a second, expected {expected}", ability.cooldown);
+    }
+
+    #[test]
+    fn leech_mine_blasts_guards_and_heals_crew() {
+        let mut app = engineer_and_doctor();
+        let (mut health, _, mut controls, _, at) = doctor_mut(&mut app);
+        health.current -= 60.0;
+        controls.ability = true;
+        app.update();
+        doctor_mut(&mut app).2.ability = false;
+        let mut mines = app.world_mut().query::<(&LeechMine, &Transform)>();
+        let (mine, transform) = mines.single(app.world()).expect("one mine down");
+        assert!(mine.arm > MINE_ARM - 2.0 * DT, "not armed yet");
+        let spot = transform.translation.truncate();
+        assert!(spot.distance(at) < 4.0, "planted at the Doctor's feet");
+
+        // Armed, and nothing near it yet.
+        for _ in 0..(MINE_ARM / DT) as usize + 2 {
+            app.update();
+        }
+        assert_eq!(mines.single(app.world()).unwrap().0.arm, 0.0);
+
+        let warden = spawn_enemy(&mut app.world_mut().commands(), EnemyKind::Warden, spot + Vec2::X * 6.0, false);
+        app.world_mut().flush();
+        app.world_mut().get_mut::<Enemy>(warden).unwrap().stun(10.0);
+        let mut guards = app.world_mut().query_filtered::<&Health, With<Enemy>>();
+        let before: f32 = guards.iter(app.world()).map(|h| h.current + h.shield).sum();
+        let hull = doctor_mut(&mut app).0.current;
+        app.update();
+
+        assert!(mines.iter(app.world()).next().is_none(), "the mine went off");
+        let after: f32 = guards.iter(app.world()).map(|h| h.current + h.shield).sum();
+        let dealt = before - after;
+        assert!(dealt > MINE_DAMAGE * 0.5, "dealt {dealt}");
+        let healed = doctor_mut(&mut app).0.current - hull;
+        assert!((healed - dealt * MINE_HEAL_SHARE).abs() < 0.01, "healed {healed} of {dealt} dealt");
+    }
 
     #[test]
     fn loadouts_respect_slots() {
