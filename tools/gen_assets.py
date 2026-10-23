@@ -8,6 +8,7 @@ import math
 import os
 import struct
 import zlib
+from types import SimpleNamespace
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "assets", "sprites")
 SIZE = 16
@@ -1047,27 +1048,14 @@ def blank(color):
 
 
 # --------------------------------------------------------------------------
-# Station tiles. Seen from above and a little south: walls show a front face
-# where the floor below meets them and a dark cap elsewhere. Floors come in a
-# few plate variants the game mixes so the deck doesn't look stamped out.
+# Shared steel: the vault, its gate and the station helpers below.
 # --------------------------------------------------------------------------
 
 STEEL = rgb(58, 64, 82)
-STEEL_HI = rgb(74, 81, 102)
-STEEL_LO = rgb(40, 44, 59)
 SEAM = rgb(28, 31, 42)
 RIVET = rgb(120, 130, 156)
-CAP = rgb(30, 34, 47)
-CAP_RIM = rgb(104, 114, 142)
-FACE = rgb(52, 58, 76)
-FACE_HI = rgb(74, 82, 104)
-FACE_LO = rgb(34, 38, 51)
 CYAN = rgb(80, 230, 255)
 AMBER = rgb(255, 176, 50)
-
-
-def mottled(base, seed, amount=7):
-    return [[shade(base, (noise(x, y, seed) - 0.5) * amount) for x in range(SIZE)] for y in range(SIZE)]
 
 
 def bevel(px, x0, y0, x1, y1, hi, lo):
@@ -1084,230 +1072,6 @@ def rivet(px, x, y):
     px[y][x] = RIVET
     px[y + 1][x + 1] = SEAM
     px[y][x + 1] = shade(RIVET, -40)
-
-
-def floor_plate(seed):
-    px = mottled(STEEL, seed)
-    bevel(px, 0, 0, SIZE - 1, SIZE - 1, STEEL_HI, STEEL_LO)
-    return px
-
-
-def floor_tiles():
-    """Plain plate, quartered plate, tread plate, and a worn plate with a drain."""
-    plain = floor_plate(1)
-    for x, y in [(2, 2), (12, 2), (2, 12), (12, 12)]:
-        rivet(plain, x, y)
-
-    quartered = floor_plate(2)
-    for i in range(1, SIZE - 1):
-        quartered[7][i] = shade(STEEL, -12)
-        quartered[i][7] = shade(STEEL, -12)
-
-    tread = floor_plate(3)
-    for y in range(2, SIZE - 2):
-        for x in range(2, SIZE - 2):
-            # Raised diamond grip, two pixels long, alternating direction.
-            cell = (x // 4 + y // 4) % 2
-            if (x + (y if cell else -y)) % 4 == 0:
-                tread[y][x] = shade(STEEL, 9)
-                tread[y + 1][x] = shade(STEEL, -7) if y + 1 < SIZE - 2 else tread[y + 1][x]
-
-    worn = floor_plate(4)
-    for y in range(1, SIZE - 1):
-        for x in range(1, SIZE - 1):
-            stain = noise(x // 2, y // 2, 40)
-            if stain > 0.72:
-                worn[y][x] = shade(worn[y][x], -10)
-    for y in range(6, 10):
-        for x in range(6, 10):
-            edge = x in (6, 9) or y in (6, 9)
-            worn[y][x] = shade(STEEL, -14) if edge else rgb(30, 33, 44)
-    rivet(worn, 2, 2)
-    rivet(worn, 12, 12)
-    return [plain, quartered, tread, worn]
-
-
-def wall_cap(mask):
-    """The top of a wall. `mask` bits (N=1, E=2, S=4, W=8) mark open floor
-    beside it; those edges get a lit rim."""
-    px = mottled(CAP, 7, 5)
-    for i in range(SIZE):
-        px[i][7] = shade(CAP, -6)
-        px[7][i] = shade(CAP, -6)
-    rim = shade(CAP_RIM, -30)
-    if mask & 1:
-        for x in range(SIZE):
-            px[0][x], px[1][x] = CAP_RIM, rim
-    if mask & 4:
-        for x in range(SIZE):
-            px[SIZE - 1][x], px[SIZE - 2][x] = CAP_RIM, rim
-    if mask & 8:
-        for y in range(SIZE):
-            px[y][0], px[y][1] = CAP_RIM, rim
-    if mask & 2:
-        for y in range(SIZE):
-            px[y][SIZE - 1], px[y][SIZE - 2] = CAP_RIM, rim
-    return px
-
-
-def wall_face_base(seed):
-    """A wall's front face: lit cap lip on top, panels, a dark kickplate."""
-    px = mottled(FACE, seed, 6)
-    for x in range(SIZE):
-        px[0][x] = CAP_RIM
-        px[1][x] = shade(CAP_RIM, -30)
-        px[2][x] = FACE_LO
-        px[SIZE - 3][x] = FACE_HI
-        px[SIZE - 2][x] = rgb(28, 31, 42)
-        px[SIZE - 1][x] = rgb(16, 17, 24)
-    return px
-
-
-def wall_faces():
-    """Panelled, piped, lit and with a terminal screen."""
-    panels = wall_face_base(21)
-    bevel(panels, 1, 3, 7, 12, FACE_HI, FACE_LO)
-    bevel(panels, 8, 3, 14, 12, FACE_HI, FACE_LO)
-    for x, y in [(2, 4), (12, 4), (2, 10), (12, 10)]:
-        panels[y][x] = RIVET
-
-    pipes = wall_face_base(22)
-    for x in range(SIZE):
-        for y, tone in [(5, 0), (6, 10), (7, -14), (9, 0), (10, 10), (11, -14)]:
-            pipes[y][x] = shade(rgb(86, 92, 104), tone)
-    for x in (3, 12):
-        for y in range(4, 13):
-            pipes[y][x] = rgb(40, 44, 58)
-        pipes[4][x] = RIVET
-
-    lit = wall_face_base(23)
-    bevel(lit, 2, 4, 13, 11, FACE_LO, FACE_HI)
-    for x in range(4, 12):
-        for y in range(6, 10):
-            lit[y][x] = rgb(18, 20, 28) if y % 2 == 0 else rgb(46, 50, 64)
-    lit[5][3] = CYAN
-    lit[5][12] = shade(CYAN, -80)
-
-    screen = wall_face_base(24)
-    bevel(screen, 2, 4, 13, 11, FACE_LO, FACE_HI)
-    glass = rgb(14, 30, 26)
-    for y in range(5, 11):
-        for x in range(3, 13):
-            screen[y][x] = glass
-    for y, length in [(6, 7), (8, 5), (9, 8)]:
-        for x in range(4, 4 + length):
-            screen[y][x] = rgb(70, 220, 130) if x < 4 + length - 1 else rgb(40, 130, 80)
-    screen[12][7] = AMBER
-    return [panels, pipes, lit, screen]
-
-
-def grate_tile():
-    px = floor_plate(5)
-    bevel(px, 1, 1, SIZE - 2, SIZE - 2, STEEL_LO, STEEL_HI)
-    for y in range(2, SIZE - 2):
-        for x in range(2, SIZE - 2):
-            bar = x % 3 == 1
-            depth = rgb(14, 15, 22)
-            # Pipes glimpsed through the grating.
-            if y in (6, 7) or y in (11, 12):
-                depth = rgb(36, 40, 52) if y in (6, 11) else rgb(26, 28, 38)
-            px[y][x] = shade(STEEL, 8) if bar else depth
-    for x in range(2, SIZE - 2):
-        px[2][x] = shade(STEEL, 14)
-    return px
-
-
-def hazard_tile():
-    px = blank(rgb(0, 0, 0))
-    for y in range(SIZE):
-        for x in range(SIZE):
-            stripe = ((x + y) // 4) % 2 == 0
-            c = rgb(232, 190, 40) if stripe else rgb(30, 30, 34)
-            # Boots have worn the paint thin in places.
-            wear = noise(x, y, 31)
-            if stripe and wear > 0.82:
-                c = rgb(170, 140, 40)
-            elif not stripe and wear > 0.9:
-                c = rgb(48, 46, 44)
-            px[y][x] = c
-    bevel(px, 0, 0, SIZE - 1, SIZE - 1, rgb(80, 80, 86), rgb(18, 18, 22))
-    return px
-
-
-def door_tile():
-    """A blast door set into a wall face: two leaves, a seam and a status light."""
-    px = wall_face_base(25)
-    leaf = rgb(76, 82, 98)
-    for y in range(3, SIZE - 3):
-        for x in range(2, SIZE - 2):
-            px[y][x] = shade(leaf, (noise(x, y, 26) - 0.5) * 6)
-    bevel(px, 2, 3, 7, SIZE - 4, shade(leaf, 22), shade(leaf, -26))
-    bevel(px, 8, 3, SIZE - 3, SIZE - 4, shade(leaf, 22), shade(leaf, -26))
-    for y in range(3, SIZE - 3):
-        px[y][7] = rgb(16, 18, 24)
-    for x in range(3, 7):
-        px[5][x] = AMBER if x % 2 else rgb(40, 34, 20)
-    for x in range(9, 13):
-        px[5][x] = AMBER if x % 2 == 0 else rgb(40, 34, 20)
-    px[9][5] = px[9][10] = RIVET
-    px[SIZE - 3][7] = px[SIZE - 3][8] = rgb(80, 255, 120)
-    return px
-
-
-def vent_tile():
-    """Floor vent that reinforcements crawl out of."""
-    px = floor_plate(6)
-    bevel(px, 2, 2, SIZE - 3, SIZE - 3, SEAM, STEEL_HI)
-    for y in range(3, SIZE - 3):
-        for x in range(3, SIZE - 3):
-            glow = max(0.0, 1.0 - abs(x - 7.5) / 5.0) * (0.6 + 0.4 * (y / SIZE))
-            if y % 3 == 0:
-                px[y][x] = shade(STEEL, 6)
-            elif y % 3 == 1:
-                px[y][x] = rgb(14, 12, 18)
-            else:
-                px[y][x] = rgb(int(70 + 150 * glow), int(20 + 40 * glow), 26)
-    for x, y in [(1, 1), (13, 1), (1, 13), (13, 13)]:
-        rivet(px, x, y)
-    return px
-
-
-def lift_platform():
-    """Cargo lift platform, 2x2 tiles: ride it down to the next deck. Returned
-    as its four quarters: top-left, top-right, bottom-left, bottom-right."""
-    n = SIZE * 2
-    base = rgb(46, 52, 68)
-    px = [[shade(base, (noise(x, y, 11) - 0.5) * 6) for x in range(n)] for y in range(n)]
-    # Diamond plate.
-    for y in range(4, n - 4):
-        for x in range(4, n - 4):
-            if (x + y) % 4 == 0 and (x - y) % 8 == 0:
-                px[y][x] = shade(base, 20)
-                px[y + 1][x] = shade(base, -14)
-    # Heavy rim with running lights and hazard corners.
-    for i in range(n):
-        for d, c in [(0, rgb(16, 18, 26)), (1, rgb(100, 110, 134)), (2, rgb(70, 78, 98)), (3, rgb(30, 34, 46))]:
-            px[d][i] = px[i][d] = c
-            px[n - 1 - d][i] = px[i][n - 1 - d] = c if d else rgb(10, 11, 16)
-    for i in range(5, n - 5, 4):
-        for row, col in [(1, i), (n - 2, i), (i, 1), (i, n - 2)]:
-            px[row][col] = CYAN
-    for cx, cy in [(4, 4), (n - 8, 4), (4, n - 8), (n - 8, n - 8)]:
-        for y in range(4):
-            for x in range(4):
-                px[cy + y][cx + x] = AMBER if (x + y) % 3 == 0 else rgb(30, 30, 34)
-    # Two glowing chevrons pointing down.
-    for top, color in ((10, CYAN), (16, shade(CYAN, -90))):
-        for k in range(6):
-            for x in (10 + k, n - 11 - k):
-                px[top + k][x] = color
-                px[top + k + 1][x] = shade(color, -70)
-    return [
-        [row[:SIZE] for row in px[:SIZE]],
-        [row[SIZE:] for row in px[:SIZE]],
-        [row[:SIZE] for row in px[SIZE:]],
-        [row[SIZE:] for row in px[SIZE:]],
-    ]
 
 
 def vault_floor():
@@ -1375,56 +1139,817 @@ def floor_shadows():
     return {"shade_n": north, "shade_w": west, "shade_e": east}
 
 
-def station_preview(floors, faces, caps, lift, tiles):
-    """A small mock room, to see the tiles together."""
-    plan = [
-        "##########",
-        "#FFFDFFFF#",
-        "#.,,....=#",
-        "#.,,.LL.=#",
-        "#....LL.v#",
-        "##########",
+# --------------------------------------------------------------------------
+# Station tiles, one set per deck. Seen from above and a little south: walls
+# show a front face where the floor below meets them and a dark cap elsewhere.
+# Each deck draws the same shapes in its own steel, paint and light, so riding
+# a lift down reads as arriving somewhere new. Floors, grating and the hull are
+# drawn as 2x2 panels and cut into quarters, so a room isn't a grid of squares.
+# --------------------------------------------------------------------------
+
+DECK_THEMES = [
+    # Deck 1, the cargo hold: cold blue steel, cyan lamps, yellow hazard paint.
+    SimpleNamespace(
+        steel=rgb(58, 64, 82), cap=rgb(30, 34, 47), rim=rgb(104, 114, 142), face=rgb(52, 58, 76),
+        light=rgb(80, 230, 255), screen=rgb(70, 220, 130), led=rgb(255, 176, 50), paint=rgb(232, 190, 40),
+        pipe=rgb(92, 98, 116), grime=rgb(22, 24, 32), under=rgb(13, 14, 21), hull=rgb(15, 17, 25),
+    ),
+    # Deck 2, the engine works: warm gunmetal, copper pipe, orange lamps, rust.
+    SimpleNamespace(
+        steel=rgb(68, 63, 58), cap=rgb(35, 32, 30), rim=rgb(140, 122, 100), face=rgb(62, 56, 51),
+        light=rgb(255, 156, 64), screen=rgb(255, 190, 80), led=rgb(120, 230, 110), paint=rgb(232, 118, 40),
+        pipe=rgb(156, 102, 66), grime=rgb(52, 32, 20), under=rgb(17, 13, 12), hull=rgb(20, 17, 16),
+    ),
+    # Deck 3, the treasury: dark teal slate, brass trim, mint lamps, gold paint.
+    SimpleNamespace(
+        steel=rgb(46, 56, 60), cap=rgb(22, 27, 31), rim=rgb(178, 148, 86), face=rgb(40, 49, 54),
+        light=rgb(120, 255, 196), screen=rgb(120, 255, 196), led=rgb(255, 210, 90), paint=rgb(214, 172, 60),
+        pipe=rgb(156, 134, 86), grime=rgb(16, 22, 24), under=rgb(9, 13, 15), hull=rgb(12, 16, 18),
+    ),
+]
+
+PANEL = SIZE * 2
+# Tiny stencil digits, 3x5, for floor markings.
+DIGITS = {
+    "0": ["###", "#.#", "#.#", "#.#", "###"],
+    "1": [".#.", "##.", ".#.", ".#.", "###"],
+    "2": ["###", "..#", "###", "#..", "###"],
+    "3": ["###", "..#", ".##", "..#", "###"],
+    "4": ["#.#", "#.#", "###", "..#", "..#"],
+    "7": ["###", "..#", ".#.", ".#.", ".#."],
+}
+
+
+def mix(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3)) + (255,)
+
+
+def quarters(px):
+    """A 2x2 panel cut into its top-left, top-right, bottom-left and
+    bottom-right tiles, the order the game picks them in."""
+    return [[row[x : x + SIZE] for row in px[y : y + SIZE]] for y in (0, SIZE) for x in (0, SIZE)]
+
+
+def brushed(base, w, h, seed):
+    """Steel with a grain: soft blotches and faint streaks running across."""
+    return [
+        [
+            shade(
+                base,
+                (noise(x // 3, y // 3, seed) - 0.5) * 6
+                + (noise(x // 7, y, seed + 1) - 0.5) * 5
+                + (noise(x, y, seed + 2) - 0.5) * 3,
+            )
+            for x in range(w)
+        ]
+        for y in range(h)
     ]
-    rows, cols = len(plan), len(plan[0])
-    open_ = lambda r, c: 0 <= r < rows and 0 <= c < cols and plan[r][c] not in "#FD"
-    out = [[rgb(14, 15, 22) for _ in range(cols * SIZE)] for _ in range(rows * SIZE)]
-    lift_seen = {}
-    for r in range(rows):
-        for c in range(cols):
-            ch = plan[r][c]
-            if ch == "F":
-                img = faces[(r * 7 + c * 3) % len(faces)]
-            elif ch == "D":
-                img = tiles["door"]
-            elif ch == "#":
-                mask = (open_(r - 1, c)) | (open_(r, c + 1) << 1) | (open_(r + 1, c) << 2) | (open_(r, c - 1) << 3)
-                img = caps[mask]
-            elif ch == "L":
-                q = (plan[r - 1][c] == "L") * 2 + (plan[r][c - 1] == "L")
-                img = lift[q]
-            elif ch == ",":
-                img = tiles["grate"]
-            elif ch == "=":
-                img = tiles["hazard"]
-            elif ch == "v":
-                img = tiles["vent"]
-            else:
-                img = floors[(r * 5 + c * 11) % len(floors)]
-            for y in range(SIZE):
-                for x in range(SIZE):
-                    out[r * SIZE + y][c * SIZE + x] = img[y][x]
-            if ch not in "#FD":
-                shades = floor_shadows()
-                for key, solid in [("shade_n", not open_(r - 1, c)), ("shade_w", not open_(r, c - 1)), ("shade_e", not open_(r, c + 1))]:
-                    if not solid:
-                        continue
-                    for y in range(SIZE):
-                        for x in range(SIZE):
-                            a = shades[key][y][x][3] / 255.0
-                            o = out[r * SIZE + y][c * SIZE + x]
-                            out[r * SIZE + y][c * SIZE + x] = tuple(int(v * (1 - a)) for v in o[:3]) + (255,)
+
+
+def plate_rim(px, x0, y0, x1, y1, T):
+    """Frames a plate: a dark seam on its top and left (the plates beside it
+    close the other two sides), a lit inner edge and a shaded far edge."""
+    seam, hi, lo = shade(T.steel, -28), shade(T.steel, 13), shade(T.steel, -11)
+    for x in range(x0, x1 + 1):
+        px[y1][x] = lo
+        if x > x0:
+            px[y0 + 1][x] = hi
+    for y in range(y0, y1 + 1):
+        px[y][x1] = lo
+        if y0 < y < y1:
+            px[y][x0 + 1] = hi
+    for x in range(x0, x1 + 1):
+        px[y0][x] = seam
+    for y in range(y0, y1 + 1):
+        px[y][x0] = seam
+
+
+def recess(px, x0, y0, x1, y1, T, depth=-8):
+    """Sinks a box into a plate: shaded top and left, lit bottom and right."""
+    for y in range(y0 + 1, y1):
+        for x in range(x0 + 1, x1):
+            px[y][x] = shade(px[y][x], depth)
+    bevel(px, x0, y0, x1, y1, shade(T.steel, -26), shade(T.steel, 12))
+
+
+def bolt(px, x, y, T):
+    px[y][x] = shade(T.steel, 44)
+    px[y][x + 1] = shade(T.steel, 20)
+    px[y + 1][x] = shade(T.steel, 12)
+    px[y + 1][x + 1] = shade(T.steel, -26)
+
+
+def weather(px, T, seed, grime=1.0, scratches=2):
+    """Grime gathered in patches, and a few bright scratches."""
+    h, w = len(px), len(px[0])
+    for y in range(h):
+        for x in range(w):
+            g = noise(x // 4, y // 4, seed) * 0.6 + noise(x // 2, y // 2, seed + 1) * 0.4
+            if g > 0.68:
+                px[y][x] = mix(px[y][x], T.grime, (g - 0.68) * 1.5 * grime)
+    for k in range(scratches):
+        sx, sy = int(noise(k, 1, seed + 7) * w), int(noise(k, 2, seed + 7) * h)
+        length, slope = 2 + int(noise(k, 3, seed + 7) * 5), noise(k, 4, seed + 7) > 0.5
+        for i in range(length):
+            x, y = sx + i, sy + (i // 3 if slope else 0)
+            if 2 <= x < w - 1 and 2 <= y < h - 1:
+                px[y][x] = shade(px[y][x], 7)
+
+
+def stencil(px, text, x0, y0, color, seed, keep=0.3):
+    """Worn stencil lettering: boots have taken some of the paint."""
+    for i, ch in enumerate(text):
+        for dy, line in enumerate(DIGITS[ch]):
+            for dx, on in enumerate(line):
+                x, y = x0 + i * 4 + dx, y0 + dy
+                if on == "#" and noise(x, y, seed) > keep:
+                    px[y][x] = mix(px[y][x], color, 0.55)
+
+
+def floor_panels(T, seed):
+    """Heavy plate, four small plates, tread plate, a service hatch, staggered
+    planks, and a plate with loading-bay paint. Each 32x32."""
+    n = PANEL
+
+    heavy = brushed(T.steel, n, n, seed)
+    plate_rim(heavy, 0, 0, n - 1, n - 1, T)
+    for y in range(3, n - 3):
+        for x in range(3, n - 3):
+            # Worn brighter down the middle, where boots go.
+            d = math.hypot(x - 15.5, y - 15.5)
+            heavy[y][x] = shade(heavy[y][x], max(0.0, 5 - d * 0.4))
+    for x, y in [(3, 3), (27, 3), (3, 27), (27, 27)]:
+        bolt(heavy, x, y, T)
+
+    four = brushed(shade(T.steel, 3), n, n, seed + 10)
+    for x0, y0 in [(0, 0), (16, 0), (0, 16), (16, 16)]:
+        plate_rim(four, x0, y0, x0 + 15, y0 + 15, T)
+        bolt(four, x0 + 3, y0 + 3, T)
+        bolt(four, x0 + 11, y0 + 11, T)
+
+    tread = brushed(shade(T.steel, -3), n, n, seed + 20)
+    plate_rim(tread, 0, 0, n - 1, n - 1, T)
+    for y in range(5, n - 5):
+        for x in range(5, n - 5):
+            # Raised diamond grip, two pixels long, alternating direction.
+            cell = (x // 4 + y // 4) % 2
+            if (x + (y if cell else -y)) % 4 == 0:
+                tread[y][x] = shade(T.steel, 11)
+                if y + 1 < n - 5:
+                    tread[y + 1][x] = shade(T.steel, -9)
+    bevel(tread, 4, 4, n - 5, n - 5, shade(T.steel, 9), shade(T.steel, -14))
+
+    hatch = brushed(T.steel, n, n, seed + 30)
+    plate_rim(hatch, 0, 0, n - 1, n - 1, T)
+    # A round access hatch: its rim shaded like a shallow dish, hinged on the
+    # left, a pull notch on the right.
+    for y in range(n):
+        for x in range(n):
+            dx, dy = x - 15.5, y - 15.5
+            r = math.hypot(dx, dy)
+            if r < 8.0:
+                hatch[y][x] = shade(hatch[y][x], -3)
+            elif r < 9.3:
+                lit = (dx + dy) / max(r, 1.0)
+                hatch[y][x] = shade(T.steel, 20 * lit - 10)
+    for y in (11, 19):
+        for x in (5, 6):
+            hatch[y][x] = shade(T.steel, 18)
+            hatch[y + 1][x] = shade(T.steel, -20)
+    for y in range(14, 18):
+        hatch[y][22] = shade(T.steel, -34)
+    for x, y in [(10, 10), (20, 10), (10, 20), (20, 20), (3, 3), (27, 27)]:
+        bolt(hatch, x, y, T)
+
+    planks = brushed(shade(T.steel, -4), n, n, seed + 40)
+    plate_rim(planks, 0, 0, n - 1, 15, T)
+    plate_rim(planks, 0, 16, 10, n - 1, T)
+    plate_rim(planks, 11, 16, n - 1, n - 1, T)
+    for x, y in [(3, 7), (27, 7), (6, 23), (27, 23)]:
+        bolt(planks, x, y, T)
+
+    marked = brushed(T.steel, n, n, seed + 50)
+    plate_rim(marked, 0, 0, n - 1, n - 1, T)
+    # Corner brackets of a loading bay, and the bay's number.
+    for cx, cy, sx, sy in [(4, 4, 1, 1), (27, 4, -1, 1), (4, 27, 1, -1), (27, 27, -1, -1)]:
+        for i in range(6):
+            for x, y in [(cx + sx * i, cy), (cx, cy + sy * i), (cx + sx * i, cy + sy), (cx + sx, cy + sy * i)]:
+                if noise(x, y, seed + 51) > 0.22:
+                    marked[y][x] = mix(marked[y][x], T.paint, 0.6)
+    stencil(marked, "07" if seed % 2 else "13", 12, 13, T.paint, seed + 52, keep=0.15)
+
+    panels = [heavy, four, tread, hatch, planks, marked]
+    for i, px in enumerate(panels):
+        weather(px, T, seed + 100 + i)
+    return panels
+
+
+def pipe_run(px, at, thick, color, vertical, span=None):
+    """A round pipe: lit along one side, shaded along the other, with a
+    flange every 16 pixels."""
+    n = len(px)
+    for along in range(n) if span is None else range(*span):
+        for i in range(thick):
+            t = i / max(1, thick - 1)
+            tone = 20 - 44 * t + (14 if along % 16 in (6, 7) else 0)
+            x, y = (at + i, along) if vertical else (along, at + i)
+            px[y][x] = shade(color, tone)
+
+
+def grate_panels(T, seed):
+    """Catwalk grating over the deck's guts: pipes running across, pipes
+    running down past a cable bundle, a lit service trench, and plain dark."""
+    n = PANEL
+
+    def under(s):
+        return [[shade(T.under, (noise(x // 2, y // 2, seed + s) - 0.5) * 5) for x in range(n)] for y in range(n)]
+
+    beam = shade(T.under, 12)
+    across = under(0)
+    for y in range(n):
+        for x in (14, 15, 16, 17):
+            across[y][x] = shade(beam, -4 if x in (14, 17) else 2)
+    pipe_run(across, 6, 5, mix(T.pipe, T.under, 0.15), False)
+    pipe_run(across, 20, 4, mix(T.pipe, T.under, 0.25), False)
+
+    down = under(1)
+    for x in range(n):
+        for y in (14, 15, 16):
+            down[y][x] = shade(beam, -3)
+    pipe_run(down, 5, 5, mix(T.pipe, T.under, 0.15), True)
+    pipe_run(down, 23, 3, mix(T.pipe, T.under, 0.25), True)
+    for x in range(10, 20):
+        # A bundle of cables, each its own colour.
+        for i, c in enumerate([rgb(120, 40, 40), rgb(40, 60, 110), rgb(60, 60, 64)]):
+            down[24 + i][x] = mix(c, T.under, 0.2)
+
+    lit = under(2)
+    for y in range(n):
+        for x in range(n):
+            glow = max(0.0, 1.0 - abs(y - 15.5) / 9.0) ** 1.5
+            lit[y][x] = mix(lit[y][x], T.light, glow * 0.55)
+    pipe_run(lit, 26, 3, mix(T.pipe, T.under, 0.3), False)
+
+    dark = under(3)
+    for i in range(n):
+        for d in (-1, 0, 1):
+            dark[i][15 + d] = shade(beam, -6)
+            dark[15 + d][i] = shade(beam, -6)
+
+    out = []
+    for px in [across, down, lit, dark]:
+        top = shade(T.steel, 10)
+        for y in range(n):
+            for x in range(n):
+                if x == 0 or y == 0:
+                    px[y][x] = shade(T.steel, -20)
+                elif x == 1 or y == 1:
+                    px[y][x] = shade(T.steel, 9)
+                elif x == n - 1 or y == n - 1:
+                    px[y][x] = shade(T.steel, -8)
+                elif x == 2 or y == 2 or x == n - 2 or y == n - 2:
+                    px[y][x] = T.steel
+                elif y % 8 == 7:
+                    px[y][x] = top
+                elif x % 3 == 0:
+                    px[y][x] = shade(T.steel, 4 if y % 8 else 10)
+                else:
+                    # The bars shade what's below them on their right and underneath.
+                    depth = 0.6 if x % 3 == 1 or y % 8 == 0 else 0.9
+                    px[y][x] = tuple(int(v * depth) for v in px[y][x][:3]) + (255,)
+        weather(px, T, seed + 60 + len(out), grime=0.5, scratches=2)
+        out.append(px)
     return out
 
+
+def hull_panel(T, seed):
+    """The hull between rooms: big, faint plates, barely lighter than space."""
+    n = PANEL
+    px = [[shade(T.hull, (noise(x // 4, y // 4, seed) - 0.5) * 3) for x in range(n)] for y in range(n)]
+    for i in range(n):
+        px[0][i] = px[i][0] = shade(T.hull, -5)
+        px[1][i] = shade(T.hull, 4)
+        if i < 16:
+            px[16][i] = shade(T.hull, -4)
+            px[17][i] = shade(T.hull, 3)
+    for x, y in [(4, 4), (27, 9), (9, 24)]:
+        px[y][x] = shade(T.hull, 12)
+        px[y + 1][x + 1] = shade(T.hull, -6)
+    return px
+
+
+def wall_cap(T, mask):
+    """The top of a wall. `mask` bits (N=1, E=2, S=4, W=8) mark open floor
+    beside it; those edges get a lit, bolted rim."""
+    px = [
+        [shade(T.cap, (noise(x, y, 7) - 0.5) * 4 - (4 if (x + y) % 8 == 0 else 0)) for x in range(SIZE)]
+        for y in range(SIZE)
+    ]
+    rim, mid, dark = T.rim, shade(T.rim, -36), shade(T.cap, -10)
+    last = SIZE - 1
+    edges = [
+        (1, lambda d, i: (i, d)),
+        (4, lambda d, i: (i, last - d)),
+        (8, lambda d, i: (d, i)),
+        (2, lambda d, i: (last - d, i)),
+    ]
+    for bit, at in edges:
+        if not mask & bit:
+            continue
+        for i in range(SIZE):
+            for d, c in [(2, dark), (1, mid), (0, rim)]:
+                x, y = at(d, i)
+                px[y][x] = c
+        for i in (4, 12):
+            x, y = at(1, i)
+            px[y][x] = shade(T.rim, 30)
+    return px
+
+
+def face_base(T, seed):
+    """A wall's front face: a lit lip, a body lighter near the top, a painted
+    band in the deck's colour, and a dark kickplate."""
+    px = [[shade(T.face, (noise(x, y, seed) - 0.5) * 5 + 5 - y * 0.8) for x in range(SIZE)] for y in range(SIZE)]
+    for x in range(SIZE):
+        px[0][x] = T.rim
+        px[1][x] = shade(T.rim, -34)
+        px[2][x] = shade(T.face, -22)
+        px[12][x] = shade(T.face, 12)
+        worn = noise(x, 13, seed) < 0.18
+        px[13][x] = mix(T.paint, T.face, 0.75 if worn else 0.4)
+        px[14][x] = shade(T.face, -26)
+        px[15][x] = shade(T.face, -40)
+    return px
+
+
+def wall_faces(T):
+    """Panels, a rib, pipes, a lamp, a terminal, lockers, a grille, a junction
+    box and a warning plate. The lamp and terminal light the floor below."""
+    hi, lo = shade(T.face, 16), shade(T.face, -18)
+
+    panels = face_base(T, 21)
+    bevel(panels, 1, 3, 7, 11, hi, lo)
+    bevel(panels, 8, 3, 14, 11, hi, lo)
+    for x, y in [(2, 4), (13, 4), (2, 10), (13, 10)]:
+        panels[y][x] = shade(T.rim, -20)
+        panels[y + 1][x] = lo
+
+    rib = face_base(T, 22)
+    for y in range(3, 13):
+        rib[y][6] = shade(T.face, 22)
+        rib[y][7] = rib[y][8] = shade(T.face, 10)
+        rib[y][9] = shade(T.face, -12)
+        rib[y][10] = shade(T.face, -22)
+    for y in (4, 10):
+        rib[y][7] = shade(T.rim, -10)
+        rib[y + 1][8] = lo
+    for y in (5, 7, 9):
+        for x in list(range(2, 5)) + list(range(12, 15)):
+            rib[y][x] = shade(T.face, -30)
+            rib[y + 1][x] = shade(T.face, 8)
+
+    pipes = face_base(T, 23)
+    for x in range(SIZE):
+        for y0 in (4, 8):
+            for i, tone in enumerate([20, 2, -24]):
+                pipes[y0 + i][x] = shade(T.pipe, tone)
+    for x in (3, 11):
+        for y in range(3, 12):
+            pipes[y][x] = shade(T.face, -28)
+        pipes[3][x] = shade(T.rim, -10)
+    # A valve wheel on the top pipe.
+    for x, y in [(13, 4), (12, 5), (13, 5), (14, 5), (13, 6)]:
+        pipes[y][x] = rgb(196, 52, 48)
+    pipes[5][13] = rgb(250, 120, 100)
+
+    lamp = face_base(T, 24)
+    bevel(lamp, 2, 3, 13, 11, lo, hi)
+    for y in range(4, 11):
+        for x in range(3, 13):
+            heat = 1.0 - abs(y - 7) / 4.0
+            lamp[y][x] = mix(T.light, WHITE, heat * 0.45) if 4 < y < 10 else shade(T.light, -110)
+    for y in range(4, 11):
+        for x in (5, 8, 11):
+            lamp[y][x] = shade(T.face, -30)
+
+    terminal = face_base(T, 25)
+    bevel(terminal, 2, 3, 13, 11, lo, hi)
+    glass = mix(T.under, T.screen, 0.12)
+    for y in range(4, 11):
+        for x in range(3, 13):
+            terminal[y][x] = glass if y % 2 else shade(glass, -4)
+    for y, length in [(5, 7), (7, 4), (8, 8)]:
+        for x in range(4, 4 + length):
+            terminal[y][x] = T.screen if x < 3 + length else shade(T.screen, -90)
+    terminal[5][12] = WHITE
+    terminal[12][6] = T.led
+    terminal[12][9] = shade(T.led, -90)
+
+    lockers = face_base(T, 26)
+    for x0 in (2, 8):
+        bevel(lockers, x0, 3, x0 + 5, 12, hi, lo)
+        for y in (4, 6):
+            for x in range(x0 + 1, x0 + 5):
+                lockers[y][x] = shade(T.face, -30)
+                lockers[y + 1][x] = shade(T.face, 6)
+    for y in (8, 9):
+        lockers[y][6] = lockers[y][9] = shade(T.rim, 20)
+    lockers[10][4] = T.paint
+
+    grille = face_base(T, 27)
+    bevel(grille, 2, 3, 13, 11, lo, hi)
+    for y in range(4, 11):
+        for x in range(3, 13):
+            grille[y][x] = shade(T.face, 10) if y % 2 else shade(T.face, -34)
+
+    # A breaker panel: a row of switches under their lights.
+    junction = face_base(T, 28)
+    bevel(junction, 2, 3, 13, 11, shade(T.face, 24), shade(T.face, -24))
+    for y in range(4, 11):
+        for x in range(3, 13):
+            junction[y][x] = shade(T.face, 6)
+    for i, x in enumerate((4, 7, 10)):
+        junction[5][x] = junction[5][x + 1] = [T.led, T.led, rgb(255, 60, 60)][i]
+        for y in (7, 8, 9):
+            junction[y][x] = junction[y][x + 1] = shade(T.face, -30)
+        up = i != 2
+        junction[8 if up else 9][x] = shade(T.rim, 30)
+        junction[7 if up else 8][x + 1] = shade(T.rim, 10)
+
+    warning = face_base(T, 29)
+    for y in range(3, 12):
+        for x in range(2, 14):
+            stripe = ((x + y) // 2) % 2 == 0
+            c = T.paint if stripe else shade(T.under, 10)
+            warning[y][x] = mix(c, T.face, 0.4) if noise(x, y, 291) > 0.8 else c
+    bevel(warning, 2, 3, 13, 11, hi, lo)
+
+    faces = [panels, rib, pipes, lamp, terminal, lockers, grille, junction, warning]
+    for i, px in enumerate(faces):
+        weather(px, T, 300 + i, grime=0.6, scratches=1)
+    return faces
+
+
+def door_tile(T):
+    """A blast door set into a wall face: two leaves striped at the foot, a
+    seam, view slits and a red lamp over it."""
+    px = face_base(T, 31)
+    leaf = shade(T.face, 22)
+    for y in range(3, SIZE):
+        for x in range(2, SIZE - 2):
+            px[y][x] = shade(leaf, (noise(x, y, 32) - 0.5) * 6)
+    for y in range(11, SIZE - 1):
+        for x in range(2, SIZE - 2):
+            if ((x + y) // 2) % 2 == 0:
+                px[y][x] = mix(T.paint, leaf, 0.2)
+    bevel(px, 2, 3, 7, SIZE - 1, shade(leaf, 22), shade(leaf, -26))
+    bevel(px, 8, 3, SIZE - 3, SIZE - 1, shade(leaf, 22), shade(leaf, -26))
+    for y in range(3, SIZE):
+        px[y][7] = shade(T.under, 2)
+        px[y][1] = px[y][SIZE - 2] = shade(T.rim, -40)
+    for x in (4, 5, 10, 11):
+        px[6][x] = shade(T.under, 6)
+        px[7][x] = mix(T.light, T.under, 0.6)
+    px[2][7] = px[2][8] = rgb(255, 60, 60)
+    px[1][7] = px[1][8] = rgb(255, 160, 150)
+    return px
+
+
+def vent_tile(T):
+    """Floor vent that reinforcements crawl out of, hot red inside."""
+    px = brushed(T.steel, SIZE, SIZE, 61)
+    plate_rim(px, 0, 0, SIZE - 1, SIZE - 1, T)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            soot = math.hypot(x - 7.5, y - 7.5)
+            if 5.5 < soot < 8.5:
+                px[y][x] = mix(px[y][x], rgb(10, 8, 8), 0.3)
+    bevel(px, 3, 3, SIZE - 4, SIZE - 4, shade(T.steel, -30), shade(T.steel, 14))
+    for y in range(4, SIZE - 4):
+        for x in range(4, SIZE - 4):
+            glow = max(0.0, 1.0 - abs(x - 7.5) / 4.5) * (0.55 + 0.45 * (y / SIZE))
+            if y % 2 == 0:
+                px[y][x] = shade(T.steel, 4)
+            else:
+                px[y][x] = rgb(int(80 + 170 * glow), int(18 + 60 * glow ** 2), int(20 + 20 * glow))
+    for x, y in [(1, 1), (13, 1), (1, 13), (13, 13)]:
+        bolt(px, x, y, T)
+    return px
+
+
+def hazard_tile(T):
+    """The escape pad's paint. Seamless, so a pad reads as one marking."""
+    px = blank(CLEAR)
+    dark = shade(T.under, 14)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            stripe = ((x + y) // 4) % 2 == 0
+            c = T.paint if stripe else dark
+            wear = noise(x, y, 31) * 0.7 + noise(x // 3, y // 3, 32) * 0.3
+            if stripe and wear > 0.74:
+                c = mix(T.paint, dark, 0.45)
+            elif not stripe and wear > 0.86:
+                c = shade(dark, 14)
+            px[y][x] = shade(c, (noise(x, y, 33) - 0.5) * 8)
+    return px
+
+
+def lift_platform(T):
+    """Cargo lift platform, 2x2 tiles: ride it down to the next deck. Returned
+    as its four quarters: top-left, top-right, bottom-left, bottom-right."""
+    n = PANEL
+    base = shade(T.steel, -10)
+    px = brushed(base, n, n, 11)
+    for y in range(5, n - 5):
+        for x in range(5, n - 5):
+            if (x + y) % 4 == 0 and (x - y) % 8 == 0:
+                px[y][x] = shade(base, 20)
+                px[y + 1][x] = shade(base, -14)
+    # Heavy rim with running lights and hazard corners.
+    for i in range(n):
+        for d, c in [(0, shade(T.under, 2)), (1, T.rim), (2, shade(T.rim, -34)), (3, shade(base, -22))]:
+            px[d][i] = px[i][d] = c
+            px[n - 1 - d][i] = px[i][n - 1 - d] = c if d else shade(T.under, -4)
+    for i in range(5, n - 5, 4):
+        for row, col in [(1, i), (n - 2, i), (i, 1), (i, n - 2)]:
+            px[row][col] = CYAN
+    for cx, cy in [(4, 4), (n - 8, 4), (4, n - 8), (n - 8, n - 8)]:
+        for y in range(4):
+            for x in range(4):
+                px[cy + y][cx + x] = T.paint if (x + y) % 3 == 0 else shade(T.under, 12)
+    # Two glowing chevrons pointing down.
+    for top, color in ((10, CYAN), (16, shade(CYAN, -90))):
+        for k in range(6):
+            for x in (10 + k, n - 11 - k):
+                px[top + k][x] = color
+                px[top + k + 1][x] = shade(color, -70)
+    return quarters(px)
+
+
+def spill(color, peak=58):
+    """Light thrown onto the floor below a lamp, 32x32 and centred under it:
+    brightest at the wall, fading down and out."""
+    px = [[CLEAR for _ in range(PANEL)] for _ in range(PANEL)]
+    for y in range(PANEL):
+        for x in range(PANEL):
+            across = max(0.0, 1.0 - (abs(x - 15.5) / 16.0) ** 2)
+            down = max(0.0, 1.0 - y / PANEL) ** 1.7
+            a = int(peak * across * down)
+            if a:
+                px[y][x] = color[:3] + (a,)
+    return px
+
+
+def deck_tiles(T, seed):
+    """Every tile one deck needs, by file name."""
+    tiles = {}
+    for kind, panels in [("floor", floor_panels(T, seed)), ("grate", grate_panels(T, seed))]:
+        for i, px in enumerate(panels):
+            for q, quarter in enumerate(quarters(px)):
+                tiles[f"{kind}_{i}_{q}"] = quarter
+    tiles.update({f"hull_{q}": px for q, px in enumerate(quarters(hull_panel(T, seed)))})
+    tiles.update({f"wall_face_{i}": px for i, px in enumerate(wall_faces(T))})
+    tiles.update({f"wall_cap_{mask}": wall_cap(T, mask) for mask in range(16)})
+    tiles.update({f"lift_{i}": px for i, px in enumerate(lift_platform(T))})
+    tiles.update({"door": door_tile(T), "vent": vent_tile(T), "hazard": hazard_tile(T)})
+    tiles.update({"spill_lamp": spill(T.light), "spill_screen": spill(T.screen, 40), "spill_door": spill(rgb(255, 60, 60), 36)})
+    return tiles
+
+
+def floor_decals():
+    """Wear and mess scattered over plain floor, all translucent so they take
+    on each deck's steel: oil, a scorch mark, loose bolts, scuffs, a loose
+    cable, a coolant puddle, a painted arrow, a drain, rust and a dent."""
+    def canvas16():
+        return [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+
+    oil = canvas16()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            d = ((x - 7.5) / 6.0) ** 2 + ((y - 8.5) / 4.2) ** 2 + (noise(x // 2, y // 2, 401) - 0.5) * 0.9
+            if d < 1.0:
+                oil[y][x] = (6, 6, 10, 120 if d < 0.65 else 64)
+    for x, y in [(5, 7), (6, 7), (9, 9)]:
+        oil[y][x] = (120, 130, 170, 70)
+
+    scorch = canvas16()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            r = math.hypot(x - 7.5, y - 7.5)
+            reach = 4.0 + noise(int((math.atan2(y - 7.5, x - 7.5) + math.pi) * 2.5), 0, 402) * 4.0
+            if r < reach:
+                scorch[y][x] = (10, 7, 6, int(170 * (1.0 - r / reach) ** 0.7))
+
+    debris = canvas16()
+    for x, y in [(3, 4), (11, 3), (8, 11), (12, 12)]:
+        debris[y][x] = (150, 156, 172, 255)
+        debris[y][x + 1] = (90, 94, 108, 255)
+        debris[y + 1][x + 1] = (0, 0, 0, 90)
+    for i in range(5):
+        debris[7 + i // 3][3 + i] = (110, 116, 130, 255)
+        debris[8 + i // 3][3 + i] = (0, 0, 0, 70)
+
+    scuffs = canvas16()
+    for k, (x0, y0, length) in enumerate([(2, 4, 7), (6, 7, 8), (3, 11, 6), (9, 13, 5)]):
+        for i in range(length):
+            scuffs[y0 + i // 4][x0 + i] = (255, 255, 255, 16 + 6 * (k % 2))
+
+    cable = canvas16()
+    pts = [(2 + i * 0.5, 9 + 3.5 * math.sin(i / 24 * math.pi * 1.6)) for i in range(25)]
+    for x, y in pts:
+        xi, yi = int(x), int(y)
+        cable[yi + 1][xi] = (0, 0, 0, 80)
+        cable[yi][xi] = (34, 34, 40, 255)
+        cable[yi - 1][xi] = (70, 72, 84, 255)
+    for x, y in (pts[0], pts[-1]):
+        cable[int(y) - 1][int(x)] = cable[int(y)][int(x)] = (200, 160, 60, 255)
+
+    coolant = canvas16()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            d = ((x - 8) / 5.5) ** 2 + ((y - 8) / 3.6) ** 2 + (noise(x // 2, y // 2, 403) - 0.5) * 0.8
+            if d < 1.0:
+                coolant[y][x] = (60, 220, 190, 80 if d > 0.75 else 44)
+    coolant[6][6] = coolant[7][7] = (200, 255, 240, 110)
+
+    arrow = canvas16()
+    shape = [(x, 7) for x in range(2, 12)] + [(x, 8) for x in range(2, 12)]
+    shape += [(11 - k + d, 7 - k) for k in range(1, 5) for d in (0, 1)]
+    shape += [(11 - k + d, 8 + k) for k in range(1, 5) for d in (0, 1)]
+    for x, y in shape:
+        if 0 <= y < SIZE and noise(x, y, 404) > 0.25:
+            arrow[y][x] = (230, 230, 220, 54)
+
+    drain = canvas16()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            r = math.hypot(x - 7.5, y - 7.5)
+            if r < 5.0:
+                drain[y][x] = (0, 0, 0, 150) if (x % 2 and r < 4.0) else (0, 0, 0, 70)
+            elif r < 6.0:
+                drain[y][x] = (255, 255, 255, 34) if y < 8 else (0, 0, 0, 90)
+
+    rust = canvas16()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            g = noise(x // 2, y // 2, 405) * 0.6 + noise(x, y, 406) * 0.4
+            d = math.hypot(x - 7.5, y - 8.0) / 7.0
+            if g > 0.35 + d * 0.5:
+                rust[y][x] = (150, 70, 28, 70 if g > 0.6 + d * 0.3 else 40)
+
+    dent = canvas16()
+    for i in range(10):
+        x, y = 3 + i, 6 + (i * 3) // 5
+        dent[y][x] = (0, 0, 0, 100)
+        dent[y + 1][x] = (255, 255, 255, 34)
+    for i in range(4):
+        dent[9 + i][8 + i // 2] = (0, 0, 0, 80)
+
+    return {
+        "oil": oil, "scorch": scorch, "debris": debris, "scuffs": scuffs, "cable": cable,
+        "coolant": coolant, "arrow": arrow, "drain": drain, "rust": rust, "dent": dent,
+    }
+
+
+def floor_lips():
+    """The edge of grating or paint against plate floor: a lit lip and a dark
+    drop, on each side."""
+    lips = {}
+    for side in "nesw":
+        px = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+        for i in range(SIZE):
+            for d, c in [(0, (255, 255, 255, 34)), (1, (0, 0, 0, 120)), (2, (0, 0, 0, 46))]:
+                x, y = {"n": (i, d), "s": (i, SIZE - 1 - d), "w": (d, i), "e": (SIZE - 1 - d, i)}[side]
+                px[y][x] = c
+        lips[f"lip_{side}"] = px
+    return lips
+
+
+# How often each look turns up; keep these in step with `draw_deck` in room.rs.
+FLOOR_WEIGHTS = [34, 14, 14, 10, 22, 6]
+GRATE_WEIGHTS = [35, 30, 10, 25]
+FACE_WEIGHTS = [26, 18, 14, 8, 6, 10, 8, 6, 4]
+FACE_SPILLS = {3: "spill_lamp", 4: "spill_screen"}
+DECALS = ["oil", "scorch", "debris", "scuffs", "cable", "coolant", "arrow", "drain", "rust", "dent"]
+DECAL_WEIGHTS = [
+    [14, 6, 14, 22, 8, 6, 8, 10, 2, 10],
+    [16, 12, 14, 18, 8, 4, 4, 8, 14, 10],
+    [10, 4, 10, 22, 6, 10, 10, 12, 2, 8],
+]
+DECAL_CHANCE = 11
+
+
+def tile_hash(col, row, salt):
+    """The same hash as `hash` in room.rs, so the preview matches the game."""
+    m = 0xFFFFFFFF
+    h = (col | row << 16) & m
+    h ^= (salt * 0x9E3779B9) & m
+    h ^= h >> 16
+    h = (h * 0x85EBCA6B) & m
+    h ^= h >> 13
+    h = (h * 0xC2B2AE35) & m
+    h ^= h >> 16
+    return h
+
+
+def tile_pick(col, row, salt, weights):
+    roll = tile_hash(col, row, salt) % sum(weights)
+    for i, w in enumerate(weights):
+        if roll < w:
+            return i
+        roll -= w
+    return 0
+
+
+def panel_pick(col, row, salt, weights):
+    """Which 2x2 panel a tile belongs to, and which quarter of it it shows.
+    Panels near each other mostly match, so an area reads as fitted out alike."""
+    bc, br = col // 2, row // 2
+    area = tile_pick(bc // 3, br // 3, salt, weights)
+    look = area if tile_hash(bc, br, salt + 1) % 100 < 60 else tile_pick(bc, br, salt + 2, weights)
+    return f"{look}_{2 * (row % 2) + col % 2}"
+
+
+def blend(dst, src, ox, oy):
+    for y, row in enumerate(src):
+        for x, c in enumerate(row):
+            X, Y = ox + x, oy + y
+            if c[3] and 0 <= Y < len(dst) and 0 <= X < len(dst[0]):
+                a, d = c[3] / 255.0, dst[Y][X]
+                dst[Y][X] = tuple(int(d[i] * (1 - a) + c[i] * a) for i in range(3)) + (255,)
+
+
+PREVIEW_PLAN = [
+    "######################",
+    "######################",
+    "#####D########D#######",
+    "##..................##",
+    "##....,,,,,,,,......##",
+    "##.v..,,,,,,,,...LL.##",
+    "##....,,,,,,,,...LL.##",
+    "##..................##",
+    "##..##........=====.##",
+    "##..##........=====.##",
+    "##............=====.##",
+    "#######,,,,###########",
+    "#######,,,,###########",
+    "######################",
+]
+
+
+def station_preview(sets, shared):
+    """A mock room drawn the way `draw_deck` draws one, in each deck's set."""
+    plan = PREVIEW_PLAN
+    rows, cols = len(plan), len(plan[0])
+    is_floor = lambda r, c: 0 <= r < rows and 0 <= c < cols and plan[r][c] not in "#D"
+    family = lambda ch: {",": 1, "=": 2}.get(ch, 0)
+    out = []
+    for deck, tiles in enumerate(sets):
+        img = [[rgb(6, 7, 10) for _ in range(cols * SIZE)] for _ in range(rows * SIZE)]
+        later = []
+        for r in range(rows):
+            for c in range(cols):
+                ch = plan[r][c]
+                touches = any(is_floor(r + dr, c + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1))
+                if ch == "#" and not touches:
+                    tile = tiles[f"hull_{2 * (r % 2) + c % 2}"]
+                elif ch == "#" and is_floor(r + 1, c):
+                    look = tile_pick(c, r, 3, FACE_WEIGHTS)
+                    tile = tiles[f"wall_face_{look}"]
+                    if look in FACE_SPILLS:
+                        later.append((tiles[FACE_SPILLS[look]], c * SIZE - 8, (r + 1) * SIZE))
+                elif ch == "#":
+                    mask = is_floor(r - 1, c) | is_floor(r, c + 1) << 1 | is_floor(r + 1, c) << 2 | is_floor(r, c - 1) << 3
+                    tile = tiles[f"wall_cap_{mask}"]
+                elif ch == "D":
+                    tile = tiles["door"]
+                    later.append((tiles["spill_door"], c * SIZE - 8, (r + 1) * SIZE))
+                elif ch == ",":
+                    tile = tiles["grate_" + panel_pick(c, r, 2, GRATE_WEIGHTS)]
+                elif ch == "=":
+                    tile = tiles["hazard"]
+                elif ch == "v":
+                    tile = tiles["vent"]
+                elif ch == "L":
+                    tile = tiles[f"lift_{(plan[r - 1][c] == 'L') * 2 + (plan[r][c - 1] == 'L')}"]
+                else:
+                    tile = tiles["floor_" + panel_pick(c, r, 1, FLOOR_WEIGHTS)]
+                blend(img, tile, c * SIZE, r * SIZE)
+                if ch == "." and tile_hash(c, r, 4) % 100 < DECAL_CHANCE:
+                    blend(img, shared["decal_" + DECALS[tile_pick(c, r, 5, DECAL_WEIGHTS[deck])]], c * SIZE, r * SIZE)
+                if family(ch):
+                    for side, (dr, dc) in zip("nesw", [(-1, 0), (0, 1), (1, 0), (0, -1)]):
+                        if is_floor(r + dr, c + dc) and family(plan[r + dr][c + dc]) != family(ch):
+                            blend(img, shared[f"lip_{side}"], c * SIZE, r * SIZE)
+                if is_floor(r, c):
+                    for key, (dr, dc) in [("shade_n", (-1, 0)), ("shade_w", (0, -1)), ("shade_e", (0, 1))]:
+                        if not is_floor(r + dr, c + dc):
+                            blend(img, shared[key], c * SIZE, r * SIZE)
+        for spill_px, x, y in later:
+            blend(img, spill_px, x, y)
+        out.append(img)
+    return out
 
 # --------------------------------------------------------------------------
 # The vault keeper and its gate. The keeper is drawn in near-neutral steel so
@@ -2111,22 +2636,16 @@ def main():
     sentry_gun = from_ascii("sentry_gun", SENTRY_GUN, SENTRY_METAL, width=12, height=6)
     write_png(os.path.join(ROOT, "sentry_gun.png"), sentry_gun)
 
-    tiles = {
-        "grate": grate_tile(),
-        "hazard": hazard_tile(),
-        "door": door_tile(),
-        "vent": vent_tile(),
-    }
-    floors = floor_tiles()
-    faces = wall_faces()
-    caps = [wall_cap(mask) for mask in range(16)]
-    lift = lift_platform()
-    tiles.update({f"floor_{i}": px for i, px in enumerate(floors)})
-    tiles.update({f"wall_face_{i}": px for i, px in enumerate(faces)})
-    tiles.update({f"wall_cap_{i}": px for i, px in enumerate(caps)})
-    tiles.update({f"lift_{i}": px for i, px in enumerate(lift)})
-    tiles.update(floor_shadows())
-    for name, px in tiles.items():
+    sets = []
+    for deck, theme in enumerate(DECK_THEMES):
+        tiles = deck_tiles(theme, 1 + deck)
+        sets.append(tiles)
+        for name, px in tiles.items():
+            write_png(os.path.join(ROOT, "tiles", f"deck_{deck}", f"{name}.png"), px)
+    shared = floor_shadows()
+    shared.update(floor_lips())
+    shared.update({f"decal_{name}": px for name, px in floor_decals().items()})
+    for name, px in shared.items():
         write_png(os.path.join(ROOT, "tiles", f"{name}.png"), px)
 
     write_png(os.path.join(ROOT, "shadow.png"), shadow())
@@ -2192,10 +2711,9 @@ def main():
     write_png(os.path.join(preview, "loot.png"), contact_sheet(list(loot.values())))
     write_png(
         os.path.join(preview, "player_tiles.png"),
-        contact_sheet([player, engineer, bulwark, hacker, doctor, sentry] + floors + faces + [caps[0], caps[15]] + [tiles[k] for k in ("grate", "hazard", "door", "vent")]),
+        contact_sheet([player, engineer, bulwark, hacker, doctor, sentry]),
     )
-    station = station_preview(floors, faces, caps, lift, tiles)
-    write_png(os.path.join(preview, "station.png"), contact_sheet([station], scale=4))
+    write_png(os.path.join(preview, "station.png"), contact_sheet(station_preview(sets, shared), scale=2))
     write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
     write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))

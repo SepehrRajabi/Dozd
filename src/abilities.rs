@@ -14,7 +14,7 @@ pub const RICOCHET_TARGETS: usize = 2;
 pub const RICOCHET_REACH: f32 = 70.0;
 pub const RICOCHET_DAMAGE: f32 = 0.6;
 /// Odds a hit on a guard by a Doctor's crewmate, or the Doctor, heals them.
-pub const LIFESTEAL_CHANCE: f32 = 0.3;
+pub const LIFESTEAL_CHANCE: f32 = 0.5;
 /// The share of the damage dealt that such a hit gives back as hull.
 pub const LIFESTEAL_SHARE: f32 = 0.5;
 

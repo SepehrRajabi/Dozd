@@ -22,7 +22,6 @@ use crate::{GameState, Level};
 pub const TILE: f32 = 16.0;
 /// Decks per heist; each holds a vault, and only the last has no lift down.
 pub const DECKS: u8 = 3;
-const HULL: Color = Color::srgb(0.055, 0.06, 0.085);
 
 // Layouts come from `deckgen`. Legend:
 // '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
@@ -431,63 +430,122 @@ fn build_grid(layout: Layout) -> RoomGrid {
     grid
 }
 
+/// Each deck has its own set of station tiles (`sprites/tiles/deck_N`).
+const DECK_LOOKS: u8 = 3;
+// How often each look turns up; keep these in step with tools/gen_assets.py.
+const FLOOR_WEIGHTS: [u32; 6] = [34, 14, 14, 10, 22, 6];
+const GRATE_WEIGHTS: [u32; 4] = [35, 30, 10, 25];
+const FACE_WEIGHTS: [u32; 9] = [26, 18, 14, 8, 6, 10, 8, 6, 4];
+/// Wall faces that light the floor below them: the lamp and the terminal.
+const LIT_FACES: [(usize, &str); 2] = [(3, "spill_lamp"), (4, "spill_screen")];
+const DECALS: [&str; 10] = ["oil", "scorch", "debris", "scuffs", "cable", "coolant", "arrow", "drain", "rust", "dent"];
+/// Decal odds per deck: the engine works are the rusty, scorched one.
+const DECAL_WEIGHTS: [[u32; 10]; 3] = [
+    [14, 6, 14, 22, 8, 6, 8, 10, 2, 10],
+    [16, 12, 14, 18, 8, 4, 4, 8, 14, 10],
+    [10, 4, 10, 22, 6, 10, 10, 12, 2, 8],
+];
+/// Percent of plain floor tiles with a decal on them.
+const DECAL_CHANCE: u32 = 11;
+
 /// Spawns the tile sprites for the deck just built. They carry `Level`, so the
 /// next deck's `sync_deck` clears them.
-fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>, grid: Res<RoomGrid>) {
-    let tile = |name: &str| assets.load(format!("sprites/tiles/{name}.png"));
-    let floors: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("floor_{i}"))).collect();
-    let faces: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("wall_face_{i}"))).collect();
+fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>, grid: Res<RoomGrid>, built: Res<BuiltDeck>) {
+    let deck = built.0.map_or(0, |(_, deck)| deck).min(DECK_LOOKS - 1) as usize;
+    let tile = |name: &str| assets.load(format!("sprites/tiles/deck_{deck}/{name}.png"));
+    let shared = |name: &str| assets.load(format!("sprites/tiles/{name}.png"));
+    // A 2x2 panel's four quarters, in the order `panel` picks them.
+    let panels = |kind: &str, looks: usize| -> Vec<[Handle<Image>; 4]> {
+        (0..looks).map(|i| std::array::from_fn(|q| tile(&format!("{kind}_{i}_{q}")))).collect()
+    };
+    let floors = panels("floor", FLOOR_WEIGHTS.len());
+    let grates = panels("grate", GRATE_WEIGHTS.len());
+    let hull: [Handle<Image>; 4] = std::array::from_fn(|q| tile(&format!("hull_{q}")));
+    let faces: Vec<Handle<Image>> = (0..FACE_WEIGHTS.len()).map(|i| tile(&format!("wall_face_{i}"))).collect();
     let caps: Vec<Handle<Image>> = (0..16).map(|i| tile(&format!("wall_cap_{i}"))).collect();
     let lift: Vec<Handle<Image>> = (0..4).map(|i| tile(&format!("lift_{i}"))).collect();
-    let (grate, hazard, door, vent) = (tile("grate"), tile("hazard"), tile("door"), tile("vent"));
-    let shades = [tile("shade_n"), tile("shade_w"), tile("shade_e")];
+    let (hazard, door, vent) = (tile("hazard"), tile("door"), tile("vent"));
+    let door_glow = tile("spill_door");
+    let lit_faces = LIT_FACES.map(|(face, glow)| (face, tile(glow)));
+    let shades = [shared("shade_n"), shared("shade_w"), shared("shade_e")];
+    let lips = ["n", "e", "s", "w"].map(|side| shared(&format!("lip_{side}")));
+    let decals = DECALS.map(|name| shared(&format!("decal_{name}")));
 
     // Off the edge of the deck counts as solid; the gate, open or shut, as floor
     // (its doors are drawn from the `Breach`).
     let open = |col: isize, row: isize| {
         col >= 0 && row >= 0 && (col as usize) < grid.cols() && (row as usize) < grid.rows() && grid.is_floor(col as usize, row as usize)
     };
+    // Grating and the escape pad's paint are set into the plate floor around them.
+    let inset = |ch: char| match ch {
+        ',' | 'G' => 1,
+        '=' => 2,
+        _ => 0,
+    };
+    let overlay = |commands: &mut Commands, image: &Handle<Image>, pos: Vec2, z: f32| {
+        commands.spawn((Level, Sprite::from_image(image.clone()), Transform::from_translation(pos.extend(z))));
+    };
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
             let (c, r) = (col as isize, row as isize);
             let ch = grid.tiles[row][col];
+            let pos = grid.tile_center(col, row);
+            let quarter = 2 * (row % 2) + col % 2;
             let image = match ch {
-                // Solid rock with no floor next to it is just dark hull.
-                '#' if !grid.touches_floor(col, row) => None,
-                // Floor below: the wall's front face shows.
-                '#' if open(c, r + 1) => Some(faces[variant(col, row, &[45, 30, 17, 8])].clone()),
+                // Solid rock with no floor next to it is the hull between rooms.
+                '#' if !grid.touches_floor(col, row) => hull[quarter].clone(),
+                // Floor below: the wall's front face shows, and a lamp in it
+                // lights the floor.
+                '#' if open(c, r + 1) => {
+                    let face = variant(col, row, 3, &FACE_WEIGHTS);
+                    if let Some((_, glow)) = lit_faces.iter().find(|(lit, _)| *lit == face) {
+                        overlay(&mut commands, glow, pos - Vec2::new(0.0, TILE * 1.5), 0.06);
+                    }
+                    faces[face].clone()
+                }
                 '#' => {
                     let mask = open(c, r - 1) as usize
                         | (open(c + 1, r) as usize) << 1
                         | (open(c, r + 1) as usize) << 2
                         | (open(c - 1, r) as usize) << 3;
-                    Some(caps[mask].clone())
+                    caps[mask].clone()
                 }
-                'D' => Some(door.clone()),
-                ',' | 'G' => Some(grate.clone()),
-                '=' => Some(hazard.clone()),
-                'v' => Some(vent.clone()),
+                'D' => {
+                    overlay(&mut commands, &door_glow, pos - Vec2::new(0.0, TILE * 1.5), 0.06);
+                    door.clone()
+                }
+                ',' | 'G' => grates[panel(col, row, 2, &GRATE_WEIGHTS)][quarter].clone(),
+                '=' => hazard.clone(),
+                'v' => vent.clone(),
                 // A lift is one 2x2 platform; each tile shows its quarter.
                 'L' | 'u' => {
                     let same = |c: isize, r: isize| open(c, r) && grid.tiles[r as usize][c as usize] == ch;
-                    Some(lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize].clone())
+                    lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize].clone()
                 }
-                _ => Some(floors[variant(col, row, &[58, 16, 18, 8])].clone()),
+                _ => floors[panel(col, row, 1, &FLOOR_WEIGHTS)][quarter].clone(),
             };
-            let pos = grid.tile_center(col, row);
-            let sprite = match image {
+            let sprite = match ch {
                 // The shaft the crew rode in on is dimmed: it doesn't go anywhere.
-                Some(image) if ch == 'u' => Sprite { image, color: Color::srgb(0.45, 0.45, 0.5), ..default() },
-                Some(image) => Sprite::from_image(image),
-                None => Sprite::from_color(HULL, Vec2::splat(TILE)),
+                'u' => Sprite { image, color: Color::srgb(0.45, 0.45, 0.5), ..default() },
+                _ => Sprite::from_image(image),
             };
             commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
 
+            if ch == '.' && hash(col, row, 4) % 100 < DECAL_CHANCE {
+                overlay(&mut commands, &decals[variant(col, row, 5, &DECAL_WEIGHTS[deck])], pos, 0.02);
+            }
+            if inset(ch) > 0 {
+                for (lip, (dc, dr)) in lips.iter().zip([(0, -1), (1, 0), (0, 1), (-1, 0)]) {
+                    if open(c + dc, r + dr) && inset(grid.tiles[(r + dr) as usize][(c + dc) as usize]) != inset(ch) {
+                        overlay(&mut commands, lip, pos, 0.03);
+                    }
+                }
+            }
             // Walls shade the floor beside them.
             if grid.is_floor(col, row) {
                 for (shade, (dc, dr)) in shades.iter().zip([(0, -1), (-1, 0), (1, 0)]) {
                     if !open(c + dc, r + dr) {
-                        commands.spawn((Level, Sprite::from_image(shade.clone()), Transform::from_translation(pos.extend(0.05))));
+                        overlay(&mut commands, shade, pos, 0.05);
                     }
                 }
             }
@@ -495,17 +553,23 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
     }
 }
 
-/// Picks one of a tile's looks by weight, from its position alone, so every
-/// machine draws a deck the same way.
-fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
-    // Murmur3's finaliser, so neighbours don't fall into patterns.
+/// A tile's position, scrambled with Murmur3's finaliser so neighbours don't
+/// fall into patterns. `salt` keeps different choices about one tile apart.
+fn hash(col: usize, row: usize, salt: u32) -> u32 {
     let mut h = (col as u32) | (row as u32) << 16;
+    h ^= salt.wrapping_mul(0x9E37_79B9);
     h ^= h >> 16;
     h = h.wrapping_mul(0x85EB_CA6B);
     h ^= h >> 13;
     h = h.wrapping_mul(0xC2B2_AE35);
     h ^= h >> 16;
-    let mut roll = h % weights.iter().sum::<u32>();
+    h
+}
+
+/// Picks one of a tile's looks by weight, from its position alone, so every
+/// machine draws a deck the same way.
+fn variant(col: usize, row: usize, salt: u32, weights: &[u32]) -> usize {
+    let mut roll = hash(col, row, salt) % weights.iter().sum::<u32>();
     for (i, &weight) in weights.iter().enumerate() {
         if roll < weight {
             return i;
@@ -513,6 +577,17 @@ fn variant(col: usize, row: usize, weights: &[u32]) -> usize {
         roll -= weight;
     }
     0
+}
+
+/// Which look the 2x2 panel holding a tile has. Panels near each other mostly
+/// match, so an area reads as fitted out alike rather than as patchwork.
+fn panel(col: usize, row: usize, salt: u32, weights: &[u32]) -> usize {
+    let (pc, pr) = (col / 2, row / 2);
+    if hash(pc, pr, salt + 1) % 100 < 60 {
+        variant(pc / 3, pr / 3, salt, weights)
+    } else {
+        variant(pc, pr, salt + 2, weights)
+    }
 }
 
 /// Places loot, guards, the vault, its gate and its keeper. Host only; everyone
