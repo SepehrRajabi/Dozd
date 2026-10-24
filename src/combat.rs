@@ -3,7 +3,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::abilities::{RICOCHET_DAMAGE, RICOCHET_REACH, RICOCHET_TARGETS};
-use crate::class::{RIOT_POINTS, RIOT_THICKNESS, RiotShield};
+use crate::class::{Boons, RIOT_POINTS, RIOT_THICKNESS, RiotShield};
 use crate::guns::GunKind;
 use crate::net::{LocalPlayer, authority};
 use crate::perks::PerkKind;
@@ -52,7 +52,7 @@ pub struct Health {
     pub shield: f32,
     pub max_shield: f32,
     /// Seconds since the last hit, for shield regen.
-    since_hit: f32,
+    pub(crate) since_hit: f32,
     /// Seconds left on the hit flash.
     pub flash: f32,
     /// Whether the last hit was fully absorbed by the shield.
@@ -445,15 +445,17 @@ fn reset_shake(mut shake: ResMut<Shake>) {
     shake.0 = 0.0;
 }
 
-fn tick_health(time: Res<Time>, mut health: Query<&mut Health>) {
+fn tick_health(time: Res<Time>, mut health: Query<(&mut Health, Option<&Boons>)>) {
     let dt = time.delta_secs();
-    for mut h in &mut health {
+    for (mut h, boons) in &mut health {
         h.flash = (h.flash - dt).max(0.0);
         h.invulnerable = (h.invulnerable - dt).max(0.0);
         h.warded = (h.warded - dt).max(0.0);
         h.since_hit += dt;
-        if h.since_hit >= SHIELD_DELAY && !h.is_dead() && h.shield < h.max_shield {
-            h.shield = (h.shield + SHIELD_REGEN * dt).min(h.max_shield);
+        // Overclocked, the shield starts back sooner and fills faster.
+        let rate = boons.map_or(1.0, |b| b.cooldown_rate());
+        if h.since_hit * rate >= SHIELD_DELAY && !h.is_dead() && h.shield < h.max_shield {
+            h.shield = (h.shield + SHIELD_REGEN * rate * dt).min(h.max_shield);
         }
     }
 }

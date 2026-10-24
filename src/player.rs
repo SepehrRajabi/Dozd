@@ -553,11 +553,11 @@ fn clear_input_edges(mut controls: Query<&mut Controls>) {
 pub fn move_players(
     time: Res<Time>,
     grid: Res<RoomGrid>,
-    mut players: Query<(&Player, &Controls, &mut Transform, &mut Walking, &mut Dash, &mut Health, &mut Aim)>,
+    mut players: Query<(&Player, &Controls, &mut Transform, &mut Walking, &mut Dash, &mut Health, &mut Aim, Option<&Boons>)>,
     lasers: Query<&Laser>,
 ) {
     let dt = time.delta_secs();
-    for (player, controls, mut transform, mut walking, mut dash, mut health, mut aim) in &mut players {
+    for (player, controls, mut transform, mut walking, mut dash, mut health, mut aim, boons) in &mut players {
         if health.is_dead() || player.status != PirateStatus::Active {
             if walking.moving {
                 walking.moving = false;
@@ -576,7 +576,9 @@ pub fn move_players(
             walking.moving = moving;
         }
 
-        dash.cooldown = (dash.cooldown - dt).max(0.0);
+        // Overclocked, the dash comes back sooner.
+        let rate = boons.map_or(1.0, |b| b.cooldown_rate());
+        dash.cooldown = (dash.cooldown - dt * rate).max(0.0);
         if controls.dash && dash.cooldown <= 0.0 {
             // Dash where you're moving; standing still, dash toward the aim.
             dash.dir = controls.movement.try_normalize().unwrap_or(aim.dir);

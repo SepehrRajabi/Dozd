@@ -10,7 +10,7 @@ use crate::breach::spawn_breach;
 use crate::challenge::Challenge;
 use crate::combat::{Health, Noise};
 use crate::deckgen::{self, Layout};
-use crate::enemies::{EnemyKind, spawn_enemy};
+use crate::enemies::{Enemy, EnemyKind, spawn_enemy};
 use crate::loot::{LootKind, spawn_loot};
 use crate::mission::MissionStatus;
 use crate::net::{NetMode, authority};
@@ -22,6 +22,8 @@ use crate::{GameState, Level};
 pub const TILE: f32 = 16.0;
 /// Decks per heist; each holds a vault, and only the last has no lift down.
 pub const DECKS: u8 = 3;
+/// Room a hacked guard riding down with the crew needs: the biggest guard's.
+const CARRIED_HALF: f32 = 6.0;
 
 // Layouts come from `deckgen`. Legend:
 // '#' wall   'D' door   '.' floor   ',' grate   '=' hazard (escape pad)   'v' vent
@@ -335,6 +337,7 @@ fn sync_deck(
     mut noise: ResMut<Noise>,
     stale: Query<Entity, (With<Level>, Without<Player>, Without<Remote>, Without<Challenge>)>,
     mut crew: Query<(&Player, &Health, &mut Transform)>,
+    mut hacked: Query<(&mut Enemy, &Health, &mut Transform), Without<Player>>,
 ) {
     let target = if mode.is_authority() {
         (heist.seed, heist.deck)
@@ -348,8 +351,10 @@ fn sync_deck(
     built.0 = Some(target);
 
     // The old deck's tiles, guards, loot and effects. Challenges outlive the
-    // deck: the host resolves deck-span ones itself.
-    for entity in &stale {
+    // deck: the host resolves deck-span ones itself. Guards a Hacker turned
+    // ride down with the crew.
+    let rides = |entity| hacked.get(entity).is_ok_and(|(enemy, health, _)| enemy.is_hacked() && !health.is_dead());
+    for entity in stale.iter().filter(|e| !rides(*e)) {
         commands.entity(entity).despawn();
     }
     *field = FlowField::default();
@@ -370,9 +375,32 @@ fn sync_deck(
             };
             transform.translation = pos.extend(transform.translation.z);
         }
+        land_hacked(&grid, &mut hacked);
     }
     commands.insert_resource(grid);
     commands.trigger(DeckBuilt);
+}
+
+/// Sets the guards fighting for the crew down on open floor around where the
+/// crew lands, in rings past them, each in sight of the crew's spot.
+fn land_hacked(grid: &RoomGrid, guards: &mut Query<(&mut Enemy, &Health, &mut Transform), Without<Player>>) {
+    let centre = grid.crew_spawn;
+    let mut spots = (0..4).flat_map(|ring| {
+        let radius = TILE * (1.5 + ring as f32);
+        let count = 8 + 4 * ring;
+        (0..count).map(move |i| centre + Vec2::from_angle(std::f32::consts::TAU * (i as f32 + 0.5) / count as f32) * radius)
+    });
+    for (mut enemy, health, mut transform) in guards.iter_mut() {
+        if !enemy.is_hacked() || health.is_dead() {
+            continue;
+        }
+        let pos = spots
+            .by_ref()
+            .find(|p| !grid.collides(*p, Vec2::splat(CARRIED_HALF)) && grid.line_of_sight(centre, *p))
+            .unwrap_or(centre);
+        enemy.arrive(pos);
+        transform.translation = pos.extend(transform.translation.z);
+    }
 }
 
 /// The collision grid for a layout.

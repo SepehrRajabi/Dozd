@@ -20,6 +20,7 @@ mod hud;
 mod loot;
 mod menu;
 mod mine_view;
+mod ring_view;
 mod mission;
 mod net;
 mod perks;
@@ -197,6 +198,7 @@ impl Plugin for ViewPlugins {
                 breach_hud::BreachViewPlugin,
                 boss_view::BossViewPlugin,
                 mine_view::MineViewPlugin,
+                ring_view::RingViewPlugin,
             ),
         ));
     }

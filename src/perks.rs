@@ -12,11 +12,14 @@ use crate::guns::Arsenal;
 use crate::net::{LocalPlayer, authority};
 use crate::player::{Dash, PirateStatus, Player};
 use crate::hud::{self, HudSlot, Meter};
+use crate::ring_view::{AuraRing, RING_AT};
 use crate::{GameState, Level};
 
 const PICKUP_RADIUS: f32 = 10.0;
 /// Enemies this close to a pirate with a shock field are stunned.
 pub const SHOCK_RADIUS: f32 = 56.0;
+/// The tint of the ring around a pirate while their shock field is up.
+const SHOCK_COLOR: Color = Color::srgb(0.55, 0.88, 1.0);
 /// How long a stun outlasts leaving the field.
 const SHOCK_STUN: f32 = 1.2;
 /// How long an instant perk stays listed in the HUD.
@@ -227,15 +230,11 @@ fn dress_pickup(
 }
 
 /// Gives every pirate (here or replicated) their shock ring, hidden until needed.
-fn dress_perks(add: On<Add, Perks>, mut commands: Commands, assets: Res<AssetServer>) {
+fn dress_perks(add: On<Add, Perks>, mut commands: Commands) {
     commands.entity(add.entity).with_child((
         ShockRing,
-        Sprite {
-            image: assets.load("sprites/fx/shock_ring.png"),
-            color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-            ..default()
-        },
-        Transform::from_xyz(0.0, -4.0, -0.2),
+        AuraRing::new(SHOCK_RADIUS, 0.06),
+        Transform::from_translation(RING_AT),
         Visibility::Hidden,
     ));
 }
@@ -330,20 +329,19 @@ fn shock_enemies(
 fn shock_rings(
     time: Res<Time>,
     players: Query<&Perks>,
-    mut rings: Query<(&ChildOf, &mut Sprite, &mut Transform, &mut Visibility), With<ShockRing>>,
+    mut rings: Query<(&ChildOf, &mut AuraRing, &mut Visibility), With<ShockRing>>,
 ) {
     let t = time.elapsed_secs();
-    for (parent, mut sprite, mut transform, mut visibility) in &mut rings {
+    for (parent, mut ring, mut visibility) in &mut rings {
         let Ok(perks) = players.get(parent.parent()) else { continue };
         let Some(perk) = perks.get(PerkKind::ShockField) else {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
         visibility.set_if_neq(Visibility::Inherited);
-        transform.rotation = Quat::from_rotation_z(t * 0.8);
         // Flickers as it runs out.
         let fading = perk.left < 2.0 && (t * 12.0).sin() < 0.0;
-        sprite.color = Color::srgba(1.0, 1.0, 1.0, if fading { 0.25 } else { 0.55 + 0.2 * (t * 6.0).sin() });
+        ring.color = SHOCK_COLOR.with_alpha(if fading { 0.1 } else { 0.3 + 0.04 * (t * 3.0).sin() });
     }
 }
 

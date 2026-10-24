@@ -24,13 +24,13 @@ pub enum Passive {
     Supply,
     /// Gunner: their bullets sometimes bounce on into nearby guards.
     Ricochet,
-    /// Engineer: a heavier shield.
-    Armor,
-    /// Engineer: every crew ability, theirs included, recharges faster, and
-    /// sentries fire faster; a little more shield.
+    /// Engineer: every crewmate's ability and dash, theirs included, recharges
+    /// faster and their shield refills sooner and faster; sentries fire faster.
     Overclock,
     /// Bulwark: crewmates nearby hit harder.
     Rally,
+    /// Bulwark: a heavier shield.
+    Armor,
     /// Hacker: guards nearby sometimes miss.
     Jamming,
     /// Doctor: crewmates nearby slowly heal.
@@ -63,9 +63,9 @@ impl Passive {
     pub const ALL: [Passive; 8] = [
         Self::Supply,
         Self::Ricochet,
-        Self::Armor,
         Self::Overclock,
         Self::Rally,
+        Self::Armor,
         Self::Jamming,
         Self::Healing,
         Self::Lifesteal,
@@ -79,8 +79,8 @@ impl Passive {
     pub fn class(self) -> PirateClass {
         match self {
             Self::Supply | Self::Ricochet => PirateClass::Gunner,
-            Self::Armor | Self::Overclock => PirateClass::Engineer,
-            Self::Rally => PirateClass::Bulwark,
+            Self::Overclock => PirateClass::Engineer,
+            Self::Rally | Self::Armor => PirateClass::Bulwark,
             Self::Jamming => PirateClass::Hacker,
             Self::Healing | Self::Lifesteal => PirateClass::Doctor,
         }
@@ -90,9 +90,9 @@ impl Passive {
         match self {
             Self::Supply => "SUPPLY",
             Self::Ricochet => "RICOCHET",
-            Self::Armor => "ARMOUR",
             Self::Overclock => "OVERCLOCK",
             Self::Rally => "RALLY",
+            Self::Armor => "ARMOUR",
             Self::Jamming => "JAMMING",
             Self::Healing => "FIELD MEDIC",
             Self::Lifesteal => "LIFESTEAL",
@@ -104,9 +104,9 @@ impl Passive {
         match self {
             Self::Supply => "Crew shots may cost no ammo",
             Self::Ricochet => "Hits may bounce to others",
-            Self::Armor => "80% more shield",
-            Self::Overclock => "Crew cooldowns -35%, +shield",
+            Self::Overclock => "Crew CDs, dash, regen -35%",
             Self::Rally => "You and crew near: +25% dmg",
+            Self::Armor => "80% more shield",
             Self::Jamming => "Guards nearby may miss",
             Self::Healing => "Heals crew nearby",
             Self::Lifesteal => "Crew hits may heal shooters",

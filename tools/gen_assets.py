@@ -1071,6 +1071,25 @@ def shock_ring(radius=56):
     return px
 
 
+def aura_ring(radius, fill=0.06, edge=1.0):
+    """A soft white ring, tinted in game, `radius` pixels across from its centre
+    to the middle of its line so it draws 1:1 with no scaling. A thin line with
+    feathered sides and a faint glow rising toward it from inside."""
+    size = radius * 2 + 2
+    c = size / 2
+    px = [[(0, 0, 0, 0)] * size for _ in range(size)]
+    for y in range(size):
+        for x in range(size):
+            d = ((x + 0.5 - c) ** 2 + (y + 0.5 - c) ** 2) ** 0.5
+            line = max(0.0, 1.0 - abs(d - (radius - 0.5)) / 0.85) * edge
+            t = min(1.0, max(0.0, (d - 0.5 * radius) / (0.5 * radius)))
+            glow = fill * t * t * (3 - 2 * t) if d < radius else 0.0
+            a = int(round(255 * max(line, glow)))
+            if a:
+                px[y][x] = (255, 255, 255, a)
+    return px
+
+
 def noise(x, y, seed):
     n = (x * 374761393 + y * 668265263 + seed * 144269504) & 0xFFFFFFFF
     n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
@@ -2731,6 +2750,9 @@ def main():
         perks[name] = px
         write_png(os.path.join(ROOT, "perks", f"{name}.png"), px)
     write_png(os.path.join(ROOT, "fx", "shock_ring.png"), shock_ring())
+    # Each drawn 1:1 in src/class.rs: at HACK_RADIUS and round the ward bubble.
+    write_png(os.path.join(ROOT, "fx", "hack_ring.png"), aura_ring(40, fill=0.1))
+    write_png(os.path.join(ROOT, "fx", "ward_ring.png"), aura_ring(11, fill=0.2))
 
     keeper = keeper_body()
     write_png(os.path.join(ROOT, "boss", "keeper.png"), keeper)

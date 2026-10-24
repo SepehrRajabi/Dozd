@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::class::{HACK_COLOR, RiotShield};
 use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_covers, shield_outlines};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
-use crate::enemies::{EnemyKind, Summoned, spawn_summoned, whiffs};
+use crate::enemies::{Enemy, EnemyKind, Summoned, spawn_summoned, whiffs};
 use crate::guns::Arsenal;
 use crate::mission::Banner;
 use crate::net::authority;
@@ -1546,7 +1546,7 @@ fn drive_brute(
     mut banner: ResMut<Banner>,
     mut brutes: Query<(&mut Keeper, &KeeperJam, &Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
     mut crew: Crew,
-    summoned: Query<(), With<Summoned>>,
+    summoned: Query<&Enemy, With<Summoned>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
 ) {
     let Ok((mut keeper, jam, health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
@@ -1598,7 +1598,7 @@ fn drive_brute(
             if brain.summon_cd <= 0.0 {
                 brain.summon_cd = if enraged { ENRAGED_SUMMON_GAP } else { SUMMON_GAP };
                 // At the cap, it skips this roar.
-                let count = summon_count(enraged, summoned.iter().count(), pirates.len());
+                let count = summon_count(enraged, summoned.iter().filter(|g| !g.is_hacked()).count(), pirates.len());
                 if count > 0 {
                     let open = |p: Vec2| !grid.collides(p, Vec2::splat(SUMMON_HALF));
                     summons = summon_spots(room, &pirates, count, open, &mut rng);
@@ -1798,7 +1798,7 @@ fn keeper_deaths(
     hands: Query<(Entity, &Transform), With<KeeperHand>>,
     beams: Query<Entity, With<KeeperBeam>>,
     orbs: Query<Entity, With<KeeperOrb>>,
-    summoned: Query<(Entity, &Transform), (With<Summoned>, Without<Keeper>)>,
+    summoned: Query<(Entity, &Enemy, &Transform), (With<Summoned>, Without<Keeper>)>,
     pirates: Query<(&Player, &Health, &Arsenal), Without<Keeper>>,
 ) {
     for (entity, keeper, health, transform) in &keepers {
@@ -1818,8 +1818,9 @@ fn keeper_deaths(
         for e in beams.iter().chain(orbs.iter()) {
             commands.entity(e).despawn();
         }
-        // Its guards go down with it, leaving nothing behind.
-        for (guard, t) in &summoned {
+        // Its guards go down with it, leaving nothing behind; those a Hacker
+        // turned are the crew's now, and fight on.
+        for (guard, _, t) in summoned.iter().filter(|(_, g, _)| !g.is_hacked()) {
             fx(&mut commands, FxKind::Burst, t.translation.truncate(), 0.0, KEEPER_COLOR);
             commands.entity(guard).despawn();
         }

@@ -337,6 +337,15 @@ impl Enemy {
         self.hacked
     }
 
+    /// Sets it down at `pos` on a new deck, fresh from the lift with the crew.
+    pub fn arrive(&mut self, pos: Vec2) {
+        self.home = pos;
+        self.state = AiState::Hunt;
+        self.burst_left = 0;
+        self.wander = None;
+        self.velocity = Vec2::ZERO;
+    }
+
     /// Turns the enemy against its own side, for good.
     pub fn hack(&mut self) {
         self.hacked = true;
@@ -348,7 +357,7 @@ impl Enemy {
 
 /// Host only: called in by a boss (see the Vault Brute in `boss.rs`). Fights
 /// like any other guard, but drops only ammo, never credits, so the fight
-/// can't be farmed for loot, and goes down with the boss.
+/// can't be farmed for loot, and goes down with the boss, unless hacked.
 #[derive(Component)]
 pub struct Summoned;
 
@@ -947,8 +956,16 @@ fn enemy_visuals(time: Res<Time>, mut enemies: Query<(&EnemyLook, &Health, &mut 
         sprite.color = if health.flash > 0.0 {
             Color::srgb(1.0, 0.3, 0.3)
         } else if look.hacked {
-            // Glitches between the crew's green and its own colours.
-            if blink { Color::srgb(0.45, 1.0, 0.55) } else { Color::srgb(0.75, 1.0, 0.8) }
+            // Glitches between the crew's green and its own colours, still
+            // smouldering or seething if it was enraged when turned.
+            let own = if look.empowered {
+                Color::srgb(1.0, 0.7, 0.45)
+            } else if look.frenzied {
+                Color::srgb(1.0, 0.5, 0.5)
+            } else {
+                Color::srgb(0.75, 1.0, 0.8)
+            };
+            if blink { Color::srgb(0.45, 1.0, 0.55) } else { own }
         } else if look.stunned {
             // Crackles between white and electric blue.
             if blink { Color::srgb(0.55, 0.85, 1.0) } else { Color::srgb(0.85, 0.95, 1.0) }

@@ -32,13 +32,14 @@ use crate::mission::Alarm;
 use crate::net::{LocalId, LocalPlayer, authority};
 use crate::settings::config_file;
 use crate::player::{Aim, Controls, HackAiming, LocalAim, MAX_SHIELD, PirateStatus, Player, move_players};
+use crate::ring_view::{AuraRing, RING_AT};
 use crate::room::RoomGrid;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
 /// Guns every pirate can carry; a Gunner with a spare gun gets one more.
 pub const BASE_SLOTS: usize = 3;
-/// Extra shield an Engineer's armour carries, as a share of a pirate's usual.
-pub const ENGINEER_ARMOR: f32 = 0.8;
+/// Extra shield a Bulwark's armour carries, as a share of a pirate's usual.
+pub const ARMOR_BONUS: f32 = 0.8;
 /// Seconds a sentry keeps fighting.
 pub const SENTRY_LIFE: f32 = 20.0;
 /// Seconds from dropping a sentry until the next one is ready.
@@ -57,11 +58,10 @@ const SENTRY_PICKUP: f32 = 16.0;
 const SENTRY_REFUND: f32 = 0.75;
 /// Where the gun head turns, relative to the sentry's origin.
 const SENTRY_PIVOT: Vec2 = Vec2::new(0.0, 0.5);
-/// How much an Engineer's overclock cuts every crew ability's cooldown, wherever
-/// they are, the Engineer's own included.
+/// How much an Engineer's overclock cuts every crewmate's ability and dash
+/// cooldowns and shield recharge wait and refill time, wherever they are, the
+/// Engineer's own included.
 pub const OVERCLOCK_CUT: f32 = 0.35;
-/// Extra shield an overclocking Engineer still carries: lighter than full armour.
-pub const OVERCLOCK_ARMOR: f32 = 0.25;
 
 /// Odds a shot by a Gunner or any crewmate of theirs, wherever they are, costs no ammo.
 pub const SUPPLY_CHANCE: f32 = 0.3;
@@ -155,8 +155,6 @@ const MINE_KNOCKBACK: f32 = 160.0;
 pub const MINE_HEAL_SHARE: f32 = 0.4;
 /// Live leech mines a Doctor can have down at once: one more replaces the oldest.
 pub const MINE_MAX: usize = 3;
-/// The shock ring sprite's width, to scale it to a radius.
-const RING_SIZE: f32 = 113.0;
 
 pub struct ClassPlugin;
 
@@ -277,8 +275,7 @@ impl Passive {
     /// The shield a pirate with this passive starts each run with.
     pub fn shield(self) -> f32 {
         match self {
-            Self::Armor => MAX_SHIELD * (1.0 + ENGINEER_ARMOR),
-            Self::Overclock => MAX_SHIELD * (1.0 + OVERCLOCK_ARMOR),
+            Self::Armor => MAX_SHIELD * (1.0 + ARMOR_BONUS),
             _ => MAX_SHIELD,
         }
     }
@@ -507,8 +504,9 @@ pub struct Boons {
     /// A Doctor with lifesteal is in the crew: their hits on guards heal them
     /// `LIFESTEAL_SHARE` of the damage dealt `LIFESTEAL_CHANCE` of the time.
     pub leeching: bool,
-    /// An Engineer with overclock is in the crew: their ability recharges,
-    /// and their sentry fires, `OVERCLOCK_CUT` sooner (see `cooldown_rate`).
+    /// An Engineer with overclock is in the crew: their ability and dash
+    /// recharge, their shield refills and their sentry fires `OVERCLOCK_CUT`
+    /// sooner (see `cooldown_rate`).
     pub overclocked: bool,
     /// For a Doctor, Bulwark, Gunner or overclocking Engineer: how many
     /// crewmates their passive reaches.
@@ -528,7 +526,8 @@ impl Boons {
         rally * cry
     }
 
-    /// How many seconds of cooldown their ability sheds each second.
+    /// How many seconds of cooldown their ability and dash shed, and how
+    /// many seconds of shield recharge pass, each second.
     pub fn cooldown_rate(self) -> f32 {
         if self.overclocked { 1.0 / (1.0 - OVERCLOCK_CUT) } else { 1.0 }
     }
@@ -559,8 +558,7 @@ pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String,
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
     }
     match passive {
-        Passive::Armor => effects.push((format!("ARMOR +{:.0}%", ENGINEER_ARMOR * 100.0), SENTRY_COLOR)),
-        Passive::Overclock => effects.push((format!("ARMOR +{:.0}%", OVERCLOCK_ARMOR * 100.0), SENTRY_COLOR)),
+        Passive::Armor => effects.push((format!("ARMOR +{:.0}%", ARMOR_BONUS * 100.0), RIOT_COLOR)),
         Passive::Ricochet => effects.push((format!("RICOCHET {:.0}%", RICOCHET_CHANCE * 100.0), GUNNER_COLOR)),
         _ => {}
     }
@@ -1449,8 +1447,9 @@ fn spawn_hack_reticle(mut commands: Commands, assets: Res<AssetServer>) {
     commands.spawn((
         HackReticle::default(),
         Visibility::Hidden,
-        Sprite { image: assets.load("sprites/fx/shock_ring.png"), color: HACK_COLOR, ..default() },
-        Transform::from_xyz(0.0, 0.0, 49.0).with_scale(Vec3::splat(2.0 * HACK_RADIUS / RING_SIZE)),
+        // Drawn at HACK_RADIUS, 1:1.
+        Sprite { image: assets.load("sprites/fx/hack_ring.png"), color: HACK_COLOR, ..default() },
+        Transform::from_xyz(0.0, 0.0, 49.0),
     ));
 }
 
@@ -1469,12 +1468,12 @@ fn draw_hack_reticle(
     let (reticle, visibility, sprite, transform) = &mut *reticle;
     let playing = *state.get() == GameState::Playing;
     let in_reach = player.is_some_and(|p| p.translation.truncate().distance(local_aim.target) <= HACK_RANGE + HACK_RADIUS);
-    let peak = if in_reach { 0.45 } else { 0.15 };
+    let peak = if in_reach { 0.42 } else { 0.12 };
     if aiming.0 {
-        let pulse = 0.05 * (time.elapsed_secs() * 4.0).sin();
+        let pulse = 0.03 * (time.elapsed_secs() * 4.0).sin();
         reticle.left = 0.0;
         reticle.alpha = peak;
-        sprite.color = HACK_COLOR.with_alpha(if in_reach { 0.35 + pulse } else { 0.12 });
+        sprite.color = HACK_COLOR.with_alpha(if in_reach { 0.32 + pulse } else { 0.1 });
         transform.translation = local_aim.target.extend(49.0);
     } else if *was_aiming {
         // Let go (or called off): it fades where it was.
@@ -1494,13 +1493,12 @@ fn draw_hack_reticle(
 /// Hacker the ring that shows how far their passive reaches.
 fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<AssetServer>, players: Query<&Player>) {
     let Ok(player) = players.get(add.entity) else { return };
-    let ring = assets.load("sprites/fx/shock_ring.png");
     commands.entity(add.entity).with_children(|parent| {
         parent.spawn((
             WardBubble,
             Visibility::Hidden,
-            Sprite { image: ring.clone(), color: MEDIC_COLOR, ..default() },
-            Transform::from_xyz(0.0, 0.0, 0.5).with_scale(Vec3::splat(22.0 / RING_SIZE)),
+            Sprite { image: assets.load("sprites/fx/ward_ring.png"), color: MEDIC_COLOR, ..default() },
+            Transform::from_xyz(0.0, 0.0, 0.5),
         ));
         let reach = match player.passive {
             Passive::Healing => HEAL_RADIUS,
@@ -1509,8 +1507,9 @@ fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<A
         };
         parent.spawn((
             ClassAura,
-            Sprite { image: ring, color: player.class.color().with_alpha(0.12), ..default() },
-            Transform::from_xyz(0.0, -5.0, -0.2).with_scale(Vec3::splat(2.0 * reach / RING_SIZE)),
+            AuraRing::new(reach, 0.06),
+            Visibility::Hidden,
+            Transform::from_translation(RING_AT),
         ));
     });
 }
@@ -1518,11 +1517,11 @@ fn dress_medic_auras(add: On<Add, Player>, mut commands: Commands, assets: Res<A
 fn draw_medic_auras(
     time: Res<Time>,
     players: Query<(&Player, &Health)>,
-    mut bubbles: Query<(&ChildOf, &mut Visibility, &mut Sprite, &mut Transform), (With<WardBubble>, Without<ClassAura>)>,
-    mut auras: Query<(&ChildOf, &mut Visibility, &mut Sprite), With<ClassAura>>,
+    mut bubbles: Query<(&ChildOf, &mut Visibility, &mut Sprite), (With<WardBubble>, Without<ClassAura>)>,
+    mut auras: Query<(&ChildOf, &mut Visibility, &mut AuraRing), With<ClassAura>>,
 ) {
     let t = time.elapsed_secs();
-    for (parent, mut visibility, mut sprite, mut transform) in &mut bubbles {
+    for (parent, mut visibility, mut sprite) in &mut bubbles {
         let Ok((_, health)) = players.get(parent.parent()) else { continue };
         let warded = health.warded > 0.0 && !health.is_dead();
         visibility.set_if_neq(if warded { Visibility::Inherited } else { Visibility::Hidden });
@@ -1535,13 +1534,12 @@ fn draw_medic_auras(
             alpha *= 0.3;
         }
         sprite.color = MEDIC_COLOR.with_alpha(alpha);
-        transform.scale = Vec3::splat((22.0 + (t * 6.0).sin()) / RING_SIZE);
     }
-    for (parent, mut visibility, mut sprite) in &mut auras {
+    for (parent, mut visibility, mut ring) in &mut auras {
         let Ok((player, health)) = players.get(parent.parent()) else { continue };
         let on = can_act(player, health);
         visibility.set_if_neq(if on { Visibility::Inherited } else { Visibility::Hidden });
-        sprite.color = player.class.color().with_alpha(0.2 + 0.05 * (t * 2.0).sin());
+        ring.color = player.class.color().with_alpha(0.22 + 0.03 * (t * 2.0).sin());
     }
 }
 
@@ -1683,10 +1681,10 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
-    use crate::enemies::{EnemyKind, spawn_enemy};
+    use crate::enemies::{EnemyKind, EnemyLook, spawn_enemy, spawn_summoned};
     use crate::net::{HOST_ID, NetMode, StartSession};
-    use crate::player::CrewSize;
-    use crate::room::NextSeed;
+    use crate::player::{CrewSize, DASH_COOLDOWN, Dash};
+    use crate::room::{Heist, NextSeed, TILE};
     use crate::GamePlugins;
 
     const DT: f32 = 1.0 / 60.0;
@@ -1788,6 +1786,86 @@ mod tests {
     }
 
     #[test]
+    fn overclock_speeds_dashes_and_shield_refill() {
+        let mut app = engineer_and_doctor();
+        app.update();
+        let mut pirates = app.world_mut().query::<(&Player, &mut Health, &mut Dash)>();
+        for (_, mut health, mut dash) in pirates.iter_mut(app.world_mut()) {
+            dash.cooldown = DASH_COOLDOWN;
+            health.shield = 0.0;
+            health.since_hit = 0.0;
+        }
+        // The dash's 1.1 s, cut by 35%, and a bit.
+        for _ in 0..(0.8 / DT) as usize {
+            app.update();
+        }
+        for (player, _, dash) in pirates.iter(app.world()) {
+            assert_eq!(dash.cooldown, 0.0, "{:?} dash back in under {DASH_COOLDOWN}s", player.class);
+        }
+        // The usual 3 s wait before the shield refills, cut by 35%, and a bit.
+        for _ in 0..(1.3 / DT) as usize {
+            app.update();
+        }
+        for (player, health, _) in pirates.iter(app.world()) {
+            assert!(health.shield > 0.0, "{:?} shield refilling before 3s", player.class);
+        }
+    }
+
+    #[test]
+    fn armour_is_the_bulwarks() {
+        assert_eq!(Passive::Armor.class(), PirateClass::Bulwark);
+        assert_eq!(PirateClass::Bulwark.passives().next(), Some(Passive::Rally), "rally stays the default");
+        assert_eq!(PirateClass::Engineer.passives().collect::<Vec<_>>(), [Passive::Overclock]);
+        assert!(Passive::Armor.shield() > Passive::Overclock.shield());
+        assert_eq!(Passive::Overclock.shield(), MAX_SHIELD);
+    }
+
+    #[test]
+    fn hacked_summons_outlive_their_boss() {
+        let mut app = engineer_and_doctor();
+        let mut keepers = app.world_mut().query_filtered::<(Entity, &Transform), With<Keeper>>();
+        let (keeper, at) = keepers.single(app.world()).map(|(e, t)| (e, t.translation.truncate())).expect("a keeper");
+        let mut commands = app.world_mut().commands();
+        let turned = spawn_summoned(&mut commands, EnemyKind::Warden, at + Vec2::X * 30.0);
+        let loyal = spawn_summoned(&mut commands, EnemyKind::Warden, at - Vec2::X * 30.0);
+        app.world_mut().flush();
+        app.world_mut().get_mut::<Enemy>(turned).unwrap().hack();
+        app.world_mut().get_mut::<Health>(keeper).unwrap().current = 0.0;
+        app.update();
+        assert!(app.world().get_entity(loyal).is_err(), "its own guards go down with it");
+        assert!(app.world().get::<Enemy>(turned).is_some_and(Enemy::is_hacked), "the hacked one fights on");
+        assert!(app.world().get::<EnemyLook>(turned).unwrap().empowered, "still enraged");
+    }
+
+    #[test]
+    fn hacked_guards_ride_down_with_the_crew() {
+        let mut app = engineer_and_doctor();
+        let (.., at) = doctor_mut(&mut app);
+        let mut commands = app.world_mut().commands();
+        let turned = spawn_enemy(&mut commands, EnemyKind::Warden, at + Vec2::X * 20.0, false);
+        let station = spawn_enemy(&mut commands, EnemyKind::Warden, at - Vec2::X * 20.0, false);
+        app.world_mut().flush();
+        app.world_mut().get_mut::<Enemy>(turned).unwrap().hack();
+        app.update();
+
+        // The lift goes down.
+        app.world_mut().resource_mut::<Heist>().deck += 1;
+        let mut pirates = app.world_mut().query::<&mut Player>();
+        for mut player in pirates.iter_mut(app.world_mut()) {
+            player.deck += 1;
+        }
+        app.update();
+        app.update();
+
+        assert!(app.world().get_entity(station).is_err(), "the station's guards stay behind");
+        assert!(app.world().get::<Enemy>(turned).is_some_and(Enemy::is_hacked), "the hacked guard came along");
+        let spawn = app.world().resource::<RoomGrid>().crew_spawn;
+        let landed = app.world().get::<Transform>(turned).unwrap().translation.truncate();
+        assert!(landed.distance(spawn) < TILE * 6.0, "landed with the crew: {landed} vs {spawn}");
+        assert!(!app.world().resource::<RoomGrid>().collides(landed, Vec2::splat(6.0)), "on open floor");
+    }
+
+    #[test]
     fn loadouts_respect_slots() {
         let mut loadout = Loadout::new(PirateClass::Gunner);
         assert_eq!(loadout.guns.len(), 4);
@@ -1810,7 +1888,7 @@ mod tests {
         };
         let fixed = cheat.sanitized();
         assert_eq!(fixed.guns, [GunKind::RailLance, GunKind::BlasterPistol, GunKind::ScatterCannon]);
-        assert_eq!((fixed.passive, fixed.active), (Passive::Armor, Some(Active::Sentry)), "abilities must match the class");
+        assert_eq!((fixed.passive, fixed.active), (Passive::Overclock, Some(Active::Sentry)), "abilities must match the class");
         let empty = Loadout { guns: Vec::new(), ..Loadout::new(PirateClass::Gunner) }.sanitized();
         assert_eq!(empty.guns, [GunKind::BlasterPistol]);
         // From before the Gunner had actives: no pick means the spare gun.
