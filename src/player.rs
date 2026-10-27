@@ -45,6 +45,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CrewSize>()
+            .add_observer(refuse_impostors)
             .add_observer(on_client_joined)
             .add_observer(on_client_left)
             .add_systems(
@@ -314,10 +315,48 @@ fn spawn_joiner(
     spawn_player(commands, owner, loadout, slot, crew_spot(grid.crew_spawn, slot as usize), heist.deck);
 }
 
+/// Host-side: a client turned away by `refuse_impostors`. Its messages are
+/// ignored until it's gone, and its leaving touches nobody's pirate.
+#[derive(Component)]
+pub struct Refused;
+
+/// Whether a client claiming to be `id` would pass for a pirate already
+/// aboard: the host's own (`HOST_ID` and the rest of this machine's crew) or
+/// anyone's who has one. Joiners choose their own ids, so a modified client
+/// could otherwise take over someone else's pirate.
+pub fn impostor(id: u64, crew: &CrewSize, players: impl IntoIterator<Item = u64>) -> bool {
+    (HOST_ID..HOST_ID + crew.0 as u64).contains(&id) || players.into_iter().any(|owner| owner == id)
+}
+
+/// Turns away, as soon as they connect, clients whose id is already spoken for
+/// (see `impostor`).
+fn refuse_impostors(
+    add: On<Add, ConnectedClient>,
+    mut commands: Commands,
+    ids: Query<&NetworkId>,
+    crew: Res<CrewSize>,
+    players: Query<&Player>,
+) {
+    let Ok(id) = ids.get(add.entity) else { return };
+    if impostor(id.get(), &crew, players.iter().map(|p| p.owner)) {
+        warn!("refused client {}: that id is already aboard", id.get());
+        commands.entity(add.entity).insert(Refused);
+        commands.write_message(DisconnectRequest { client: add.entity });
+    }
+}
+
+/// The `Player::owner` id a message came from, `None` for a refused client.
+fn sender(client_id: &ClientId, ids: &Query<(&NetworkId, Has<Refused>)>) -> Option<u64> {
+    match client_id {
+        ClientId::Server => Some(HOST_ID),
+        ClientId::Client(entity) => ids.get(*entity).ok().filter(|(_, refused)| !refused).map(|(id, _)| id.get()),
+    }
+}
+
 fn on_client_joined(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
-    ids: Query<&NetworkId>,
+    ids: Query<&NetworkId, Without<Refused>>,
     loadouts: Res<Loadouts>,
     players: Query<&Player>,
     grid: Option<Res<RoomGrid>>,
@@ -342,7 +381,7 @@ fn send_loadout(local: Res<LocalLoadout>, mut messages: MessageWriter<ChooseLoad
 fn receive_loadouts(
     mut commands: Commands,
     mut messages: MessageReader<FromClient<ChooseLoadout>>,
-    clients: Query<(&NetworkId, Has<AuthorizedClient>)>,
+    clients: Query<(&NetworkId, Has<AuthorizedClient>), Without<Refused>>,
     local: Res<LocalLoadout>,
     mut loadouts: ResMut<Loadouts>,
     players: Query<&Player>,
@@ -376,7 +415,7 @@ fn receive_loadouts(
 fn on_client_left(
     remove: On<Remove, ConnectedClient>,
     mut commands: Commands,
-    ids: Query<&NetworkId>,
+    ids: Query<&NetworkId, Without<Refused>>,
     mut loadouts: ResMut<Loadouts>,
     mut order: ResMut<JoinOrder>,
     players: Query<(Entity, &Player)>,
@@ -513,21 +552,16 @@ fn gather_input(
 
 fn receive_input(
     mut inputs: MessageReader<FromClient<PlayerInput>>,
-    ids: Query<&NetworkId>,
+    ids: Query<(&NetworkId, Has<Refused>)>,
     mut players: Query<(&Player, &mut Controls)>,
     state: Res<State<GameState>>,
     mode: Res<NetMode>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for FromClient { client_id, message } in inputs.read() {
-        let owner = match client_id {
-            ClientId::Server => HOST_ID,
-            ClientId::Client(entity) => match ids.get(*entity) {
-                Ok(id) => id.get(),
-                Err(_) => continue,
-            },
-        };
-        if message.restart && *state.get() == GameState::Over {
+        let Some(owner) = sender(client_id, &ids) else { continue };
+        // Only the host moves everyone on from the results.
+        if message.restart && *client_id == ClientId::Server && *state.get() == GameState::Over {
             next_state.set(if *mode == NetMode::Solo { GameState::Playing } else { GameState::Lobby });
         }
         if let Some((_, mut controls)) = players.iter_mut().find(|(p, _)| p.owner == owner) {
@@ -566,8 +600,13 @@ pub fn move_players(
         }
 
         let pos = transform.translation.truncate();
-        aim.target = controls.aim;
-        if let Some(dir) = (controls.aim - pos).try_normalize() {
+        // Only touched when it moves, so an idle pirate's aim isn't resent.
+        if aim.target != controls.aim {
+            aim.target = controls.aim;
+        }
+        if let Some(dir) = (controls.aim - pos).try_normalize()
+            && aim.dir != dir
+        {
             aim.dir = dir;
         }
 
@@ -578,7 +617,9 @@ pub fn move_players(
 
         // Overclocked, the dash comes back sooner.
         let rate = boons.map_or(1.0, |b| b.cooldown_rate());
-        dash.cooldown = (dash.cooldown - dt * rate).max(0.0);
+        if dash.cooldown > 0.0 {
+            dash.cooldown = (dash.cooldown - dt * rate).max(0.0);
+        }
         if controls.dash && dash.cooldown <= 0.0 {
             // Dash where you're moving; standing still, dash toward the aim.
             dash.dir = controls.movement.try_normalize().unwrap_or(aim.dir);
@@ -599,8 +640,11 @@ pub fn move_players(
         };
 
         let new = grid.slide(pos + FEET_OFFSET, step, HITBOX_HALF) - FEET_OFFSET;
-        transform.translation.x = new.x;
-        transform.translation.y = new.y;
+        // Pushing into a wall goes nowhere: leave the transform be.
+        if new != pos {
+            transform.translation.x = new.x;
+            transform.translation.y = new.y;
+        }
     }
 }
 
@@ -724,4 +768,106 @@ fn follow_camera(
     let jolt = Vec2::new(rng.signed(), rng.signed()) * shake.0 * shake.0 * 5.0;
     shake.0 = (shake.0 - 2.5 * time.delta_secs()).max(0.0);
     camera.translation = (follow + jolt).extend(camera.translation.z);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+    use crate::net::StartSession;
+    use crate::room::NextSeed;
+    use crate::GamePlugins;
+
+    #[test]
+    fn ids_already_aboard_are_impostors() {
+        let crew = CrewSize(3);
+        assert!(impostor(HOST_ID, &crew, []), "the host's own");
+        assert!(impostor(HOST_ID + 2, &crew, []), "another local pirate");
+        assert!(!impostor(HOST_ID + 3, &crew, []), "past the local crew");
+        assert!(impostor(77, &crew, [5, 77]), "a pirate already aboard");
+        assert!(!impostor(1 << 63 | 12345, &CrewSize(1), [42]));
+    }
+
+    /// A host in a run, with the network left out: clients are faked by
+    /// spawning their entities.
+    fn host() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(1.0 / 60.0)))
+            .add_plugins(GamePlugins)
+            .insert_resource(NextSeed(3))
+            .insert_resource(Rng::new(3));
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+        app
+    }
+
+    fn host_controls(app: &mut App) -> Vec2 {
+        let mut pirates = app.world_mut().query::<(&Player, &Controls)>();
+        let (_, controls) = pirates.iter(app.world()).find(|(p, _)| p.owner == HOST_ID).expect("the host's pirate");
+        controls.movement
+    }
+
+    #[test]
+    fn a_client_posing_as_the_host_is_refused() {
+        let mut app = host();
+        let impostor = app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(HOST_ID))).id();
+        let honest = app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(1 << 63 | 9))).id();
+        assert!(app.world().entity(impostor).contains::<Refused>(), "refused on connecting");
+        assert!(!app.world().entity(honest).contains::<Refused>());
+
+        // Whatever it sends before it's gone doesn't steer the host's pirate.
+        let input = PlayerInput { movement: Vec2::X, ..default() };
+        app.world_mut().write_message(FromClient { client_id: ClientId::Client(impostor), message: input });
+        app.update();
+        assert_eq!(host_controls(&mut app), Vec2::ZERO);
+
+        // It's disconnected, and its leaving takes nobody's pirate with it.
+        assert!(app.world().get_entity(impostor).is_err(), "disconnected");
+        assert!(app.world().get_entity(honest).is_ok());
+        let mut pirates = app.world_mut().query::<&Player>();
+        assert!(pirates.iter(app.world()).any(|p| p.owner == HOST_ID), "the host keeps their pirate");
+    }
+
+    #[test]
+    fn standing_still_changes_nothing() {
+        let mut app = host();
+        let ticks = |app: &mut App| {
+            let mut pirates = app.world_mut().query::<(Ref<Aim>, Ref<Dash>, Ref<Walking>, Ref<Transform>)>();
+            let (aim, dash, walking, transform) = pirates.single(app.world()).expect("one pirate");
+            [aim.last_changed(), dash.last_changed(), walking.last_changed(), transform.last_changed()]
+        };
+        let before = ticks(&mut app);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(ticks(&mut app), before, "an idle pirate's state was marked changed");
+    }
+
+    #[test]
+    fn only_the_host_restarts() {
+        let mut app = host();
+        let client = app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(1 << 63 | 9))).id();
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Over);
+        app.update();
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Over);
+
+        let restart = PlayerInput { restart: true, ..default() };
+        app.world_mut().write_message(FromClient { client_id: ClientId::Client(client), message: restart.clone() });
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Over, "a joiner can't");
+
+        app.world_mut().write_message(FromClient { client_id: ClientId::Server, message: restart });
+        app.update();
+        app.update();
+        assert_ne!(*app.world().resource::<State<GameState>>().get(), GameState::Over, "the host can");
+    }
 }

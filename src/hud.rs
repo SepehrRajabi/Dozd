@@ -255,6 +255,8 @@ fn draw_meters(
     for (mut meter, children) in &mut meters {
         let frac = meter.frac.clamp(0.0, 1.0);
         let trail = if meter.trail <= frac { frac } else { meter.trail + (frac - meter.trail) * catch_up };
+        // Settled once it's within a hair, rather than creeping on forever.
+        let trail = if trail - frac < 0.001 { frac } else { trail };
         meter.bypass_change_detection().trail = trail;
         let mut parts = parts.iter_many_mut(children);
         while let Some((mut node, mut color, is_trail)) = parts.fetch_next() {
@@ -263,8 +265,12 @@ fn draw_meters(
             } else {
                 (frac, meter.color)
             };
-            node.width = Val::Percent(width * 100.0);
-            color.0 = tint;
+            // Only on a change, so a still meter doesn't redo the HUD's layout.
+            let width = Val::Percent(width * 100.0);
+            if node.width != width {
+                node.width = width;
+            }
+            color.set_if_neq(BackgroundColor(tint));
         }
     }
 }

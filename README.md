@@ -27,7 +27,7 @@ down, and the call lapses after 20 s). Once all have said yes, the whole crew
 is let in together and the gate locks behind you until the boss is down. You
 can't see the boss from outside its room.
 
-Three kinds of boss take turns down the decks, so every heist meets each once:
+Four kinds of boss take turns down the decks, so a heist meets three of them:
 
 - **Vault Keeper:** fights with two floating hands. Each hand either sweeps a
   laser across where you stand, after a warning line shows where it'll burn, or
@@ -43,13 +43,23 @@ Three kinds of boss take turns down the decks, so every heist meets each once:
   next lane showing. A dash does massive damage. It stands spent for a moment
   after either attack. Step off every route it shows, and out of the lane.
 
-- **Vault Brute:** a beefy, armoured brute with the most health of the three.
+- **Vault Brute:** a beefy, armoured brute with plenty of health.
   It only fights up close: it plods after you, raises its fists over a spot
   just in front of it, then slams it, hitting everyone in the circle hard.
   Every 12 s (9 s enraged, and once as it enrages) it roars and calls in
   guards to fight for it, a mix of every kind, all enraged as if by a Herald's war cry, more the bigger the crew and
   more again enraged; their spots glow while it roars. Summoned guards drop
   ammo but never credits, and they all fall with the Brute, except any a Hacker turned: those fight on, still enraged.
+- **Vault Prism:** a floating crystal with the most health of all, which
+  shifts between phases. Exposed, it can be hurt by anything. Under its amber
+  **aegis** it negates all damage. Behind its **mirror** shards it sends every
+  bullet, grenade and nova orb back at the crew, though arcs, lasers, mines and
+  blows still hurt it. It cycles exposed, aegis, exposed, mirror; enraged it
+  goes in and out of both at once, with shorter exposed windows. The phase
+  about to come flickers in just before it shifts, so stop shooting in time. It
+  blinks anywhere in its room in a split second, its landing spot showing a
+  moment before, and lashes the nearest pirates with arcs like a weaker Arc
+  Coil.
 
 A boss has a lot of health, more for a bigger crew, and enrages below half
 health. Each one further down has more health and hits harder, and the last
@@ -127,8 +137,8 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 ```sh
 cargo run --release                    # main menu
 cargo run --release -- solo            # straight into a solo run
-cargo run --release -- host [port]     # host a LAN game (default port 5000)
-cargo run --release -- join <address>  # join a host, e.g. 192.168.1.20 or host:5000
+cargo run --release -- host [port]            # host a game (default port 5000); prints its room code
+cargo run --release -- join <address> <code>  # join a host, e.g. 192.168.1.20 or host:5000, with its room code
 ```
 
 Release builds embed all assets, so `target/release/dozd` is a single file you
@@ -176,7 +186,11 @@ Online, a crew holds at most one of each class, so up to 5 pirates. Host or
 join one under **MULTIPLAYER**. Hosting opens a lobby where everyone picks a
 free class, their abilities and their guns, then the host starts the run;
 after each run the crew returns to the lobby. Someone joining mid-run picks
-from the classes still free.
+from the classes still free. Every time you host you get a fresh room code,
+shown with your address: friends need both to join, and the session is
+encrypted with it, so strangers who stumble on your port can't get in or
+listen in. It's an 8-character code, so treat it as a lock against
+passers-by rather than serious security.
 
 | Class | Passives | Actives (Q) |
 | --- | --- | --- |

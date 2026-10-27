@@ -506,10 +506,13 @@ fn update_class_picker(
                 if text.0 != note {
                     text.0.clone_from(&note);
                 }
-                color.0 = note_color;
+                color.set_if_neq(TextColor(note_color));
             }
             if let Ok(mut image) = images.get_mut(child) {
-                image.color = Color::WHITE.with_alpha(if holder.is_some() { 0.3 } else { 1.0 });
+                let tint = Color::WHITE.with_alpha(if holder.is_some() { 0.3 } else { 1.0 });
+                if image.color != tint {
+                    image.color = tint;
+                }
             }
         }
 
@@ -519,8 +522,8 @@ fn update_class_picker(
             (true, Interaction::None) => (hud::PANEL, class.color().with_alpha(0.4)),
             (true, _) => (Color::srgb(0.14, 0.15, 0.25), class.color()),
         };
-        background.0 = bg;
-        *border = BorderColor::all(edge);
+        background.set_if_neq(BackgroundColor(bg));
+        border.set_if_neq(BorderColor::all(edge));
 
         if free && *interaction == Interaction::Pressed && picked.0 != Some(class) {
             picked.0 = Some(class);

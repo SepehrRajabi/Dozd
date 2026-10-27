@@ -42,7 +42,7 @@ pub struct GunsViewPlugin;
 
 impl Plugin for GunsViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_crosshair, spawn_weapon_hud))
+        app.add_systems(Startup, (spawn_crosshair, spawn_weapon_hud, load_gun_images))
             .add_systems(Update, ((equip_held_gun, aim_held_guns, draw_charge_glows).chain(), update_weapon_hud));
     }
 }
@@ -460,6 +460,17 @@ struct WeaponPanel;
 #[derive(Component)]
 struct WeaponSlot(usize);
 
+/// Every gun's sprite, loaded once for the weapon panel rather than looked up
+/// by path every frame.
+#[derive(Resource)]
+struct GunImages(Vec<(GunKind, Handle<Image>)>);
+
+impl GunImages {
+    fn get(&self, kind: GunKind) -> &Handle<Image> {
+        &self.0.iter().find(|(k, _)| *k == kind).expect("every gun's image is loaded").1
+    }
+}
+
 /// The end of the barrel of the gun held by a pirate at `pos` aiming along `dir`.
 pub fn muzzle(pos: Vec2, dir: Vec2) -> Vec2 {
     pos + HAND + dir * (HOLD_DISTANCE + BARREL)
@@ -541,8 +552,11 @@ fn fire(
         // A Bulwark needs both hands for the riot shield, and a Gunner for the laser.
         let busy = riot_shields.iter().any(|s| s.owner == player.owner) || lasers.iter().any(|l| l.owner == player.owner);
         if !can_act(player, health) || busy {
-            arsenal.burst_left = 0;
-            arsenal.charge = 0.0;
+            // Only when there's something to drop: any write resends the arsenal.
+            if arsenal.burst_left != 0 || arsenal.charge != 0.0 {
+                arsenal.burst_left = 0;
+                arsenal.charge = 0.0;
+            }
             continue;
         }
 
@@ -554,7 +568,9 @@ fn fire(
             // Can't charge past what's in the magazine.
             let loaded = if infinite { stats.magazine } else { arsenal.gun().ammo };
             if arsenal.reloading.is_some() || loaded == 0 {
-                arsenal.charge = 0.0;
+                if arsenal.charge != 0.0 {
+                    arsenal.charge = 0.0;
+                }
                 if loaded == 0 && controls.fire_pressed {
                     arsenal.start_reload();
                 }
@@ -673,6 +689,7 @@ fn fire(
                 spawn_grenade(
                     &mut commands,
                     Grenade {
+                        team: Team::Player,
                         owner: Some(player.owner),
                         from: muzzle,
                         to,
@@ -693,6 +710,7 @@ fn fire(
                 spawn_nova(
                     &mut commands,
                     NovaOrb {
+                        team: Team::Player,
                         owner: Some(player.owner),
                         velocity: aim.dir * stats.speed,
                         remaining: stats.range,
@@ -901,8 +919,14 @@ fn spawn_weapon_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     });
 }
 
+fn load_gun_images(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.insert_resource(GunImages(GunKind::ALL.iter().map(|&kind| (kind, assets.load(kind.stats().sprite))).collect()));
+}
+
+/// Fills in the weapon panel. It only writes what changed, so the HUD isn't
+/// laid out afresh every frame.
 fn update_weapon_hud(
-    assets: Res<AssetServer>,
+    images: Res<GunImages>,
     arsenal: Option<Single<(&Player, &Arsenal, &Perks), With<LocalPlayer>>>,
     riot_shields: Query<&RiotShield>,
     mut panel: Single<&mut BorderColor, (With<WeaponPanel>, Without<WeaponSlot>)>,
@@ -919,30 +943,34 @@ fn update_weapon_hud(
     let gun = arsenal.gun();
     let stats = gun.kind.stats();
 
-    let image = assets.load(stats.sprite);
-    if icon.image != image {
-        icon.image = image;
+    let image = images.get(gun.kind);
+    if icon.image != *image {
+        icon.image = image.clone();
     }
-    panel.top = stats.color;
+    panel.set_if_neq(BorderColor { top: stats.color, ..BorderColor::all(hud::EDGE) });
     for (slot, mut node, mut image, mut border) in &mut strip {
-        let Some(carried) = arsenal.guns.get(slot.0) else {
-            node.display = Display::None;
-            continue;
-        };
-        node.display = Display::Flex;
-        let handle = assets.load(carried.kind.stats().sprite);
-        if image.image != handle {
-            image.image = handle;
+        let carried = arsenal.guns.get(slot.0);
+        let display = if carried.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let Some(carried) = carried else { continue };
+        let handle = images.get(carried.kind);
+        if image.image != *handle {
+            image.image = handle.clone();
         }
         let current = slot.0 == arsenal.current;
         let empty = carried.ammo == 0 && carried.spare == Some(0);
-        image.color = Color::WHITE.with_alpha(if current { 1.0 } else if empty { 0.2 } else { 0.45 });
-        *border = BorderColor::all(if current { stats.color } else { hud::EDGE });
+        let color = Color::WHITE.with_alpha(if current { 1.0 } else if empty { 0.2 } else { 0.45 });
+        if image.color != color {
+            image.color = color;
+        }
+        border.set_if_neq(BorderColor::all(if current { stats.color } else { hud::EDGE }));
     }
 
     let (mut name_text, mut name_color) = name.into_inner();
     name_text.set_if_neq(Text(format!("{}  {}", arsenal.current + 1, stats.name.to_uppercase())));
-    name_color.0 = stats.color;
+    name_color.set_if_neq(TextColor(stats.color));
 
     let (mut ammo_text, mut ammo_color) = ammo.into_inner();
     let red = Color::srgb(1.0, 0.35, 0.35);
@@ -971,10 +999,12 @@ fn update_weapon_hud(
         }
     };
     ammo_text.set_if_neq(Text(big));
-    ammo_color.0 = color;
+    ammo_color.set_if_neq(TextColor(color));
     spare.set_if_neq(Text(small));
-    magazine.frac = frac;
-    magazine.color = bar;
+    if magazine.frac != frac || magazine.color != bar {
+        magazine.frac = frac;
+        magazine.color = bar;
+    }
 }
 
 #[cfg(test)]

@@ -6,14 +6,14 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::abilities::{Active, Passive};
-use crate::boss::{KEEPER_COLOR, KeeperKind};
+use crate::boss::{KEEPER_COLOR, KeeperKind, PRISM_COLOR};
 use crate::class::{LocalLoadout, Loadout, PirateClass};
 use crate::guns::GunKind;
 use crate::crew::Roster;
 use crate::enemies::EnemyKind;
 use crate::net::{
-    ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, local_ip, parse_port,
-    resolve,
+    CODE_LEN, ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, local_ip,
+    parse_code, parse_port, resolve, room_code, show_code,
 };
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
@@ -152,11 +152,14 @@ enum MenuCommand {
 struct MenuMemory {
     port: String,
     address: String,
+    /// The last room code typed in. Only kept until the game closes: a host
+    /// gets a new one each time, so an old one would only mislead.
+    code: String,
 }
 
 impl Default for MenuMemory {
     fn default() -> Self {
-        let mut memory = Self { port: DEFAULT_PORT.to_string(), address: String::new() };
+        let mut memory = Self { port: DEFAULT_PORT.to_string(), address: String::new(), code: String::new() };
         for (key, value) in read_config(Self::FILE) {
             match key.as_str() {
                 "port" if parse_port(&value).is_ok() => memory.port = value,
@@ -176,13 +179,35 @@ impl MenuMemory {
     }
 }
 
+/// What a text field holds, which decides what can be typed into it. Tab
+/// steps through a screen's fields in this order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum FieldKind {
+    Port,
+    Address,
+    /// Typed in capitals, however it's keyed.
+    Code,
+}
+
+impl FieldKind {
+    fn allows(self, c: char) -> bool {
+        match self {
+            Self::Port => c.is_ascii_digit(),
+            Self::Address => c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'),
+            Self::Code => c.is_ascii_alphanumeric() || c == '-',
+        }
+    }
+}
+
 #[derive(Component)]
 struct TextField {
     value: String,
     max_len: usize,
-    digits_only: bool,
+    kind: FieldKind,
     /// Pressing Enter in the field runs this.
     submit: MenuCommand,
+    /// Takes the typing. One field on a screen has it; Tab or a click moves it.
+    focused: bool,
 }
 
 #[derive(Component)]
@@ -198,6 +223,11 @@ struct Placeholder;
 
 #[derive(Component)]
 struct HostHint;
+
+/// The room code the crew will need, shown on the host screen before hosting
+/// starts so it can be passed round early; START HOSTING uses it.
+#[derive(Component)]
+struct HostCode(String);
 
 #[derive(Component)]
 struct StatusText;
@@ -344,16 +374,27 @@ fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (Text::new(text), TextFont::from_font_size(size), TextColor(color))
 }
 
-fn text_field(value: &str, placeholder: &'static str, max_len: usize, digits_only: bool, submit: MenuCommand) -> impl Bundle {
+/// A box to type into, `width` wide; clicking it gives it the typing.
+fn text_field(
+    kind: FieldKind,
+    value: &str,
+    placeholder: &'static str,
+    max_len: usize,
+    width: f32,
+    focused: bool,
+    submit: MenuCommand,
+) -> impl Bundle {
     (
         TextField {
             value: value.to_string(),
             max_len,
-            digits_only,
+            kind,
             submit,
+            focused,
         },
+        Interaction::default(),
         Node {
-            width: Val::Px(320.0),
+            width: Val::Px(width),
             height: Val::Px(44.0),
             padding: UiRect::horizontal(Val::Px(12.0)),
             align_items: AlignItems::Center,
@@ -484,8 +525,15 @@ fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
     commands.entity(root).with_children(|parent| {
         parent.spawn(label("HOST A CREW", 24.0, GOLD));
         parent.spawn(label("Port", 14.0, DIM));
-        parent.spawn(text_field(&memory.port, "5000", 5, true, MenuCommand::StartHost));
+        parent.spawn(text_field(FieldKind::Port, &memory.port, "5000", 5, 320.0, true, MenuCommand::StartHost));
         parent.spawn((HostHint, label("", 16.0, TEXT)));
+        let code = room_code();
+        parent
+            .spawn(Node { column_gap: Val::Px(12.0), align_items: AlignItems::Baseline, ..default() })
+            .with_children(|row| {
+                row.spawn(label("and room code", 16.0, TEXT));
+                row.spawn((label(show_code(&code), 30.0, GOLD), HostCode(code)));
+            });
         parent.spawn(label(
             "Over the internet? Use Tailscale and share its IP.",
             13.0,
@@ -501,8 +549,39 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
     let root = screen_root(&mut commands, &assets, MenuScreen::Join);
     commands.entity(root).with_children(|parent| {
         parent.spawn(label("JOIN A CREW", 24.0, GOLD));
-        parent.spawn(label("Host address  (ip, ip:port or hostname)", 14.0, DIM));
-        parent.spawn(text_field(&memory.address, "192.168.1.23", 40, false, MenuCommand::Connect));
+        // Side by side, so the screen still fits a 720 px tall window.
+        let column = || Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(6.0), ..default() };
+        // Straight to the code when the address is already filled in from last time.
+        let code_first = !memory.address.is_empty() && memory.code.is_empty();
+        parent
+            .spawn(Node { column_gap: Val::Px(16.0), ..default() })
+            .with_children(|row| {
+                row.spawn(column()).with_children(|address| {
+                    address.spawn(label("Host address  (ip, ip:port or hostname)", 14.0, DIM));
+                    address.spawn(text_field(
+                        FieldKind::Address,
+                        &memory.address,
+                        "192.168.1.23",
+                        40,
+                        320.0,
+                        !code_first,
+                        MenuCommand::Connect,
+                    ));
+                });
+                row.spawn(column()).with_children(|code| {
+                    code.spawn(label("Room code  (from the host)", 14.0, DIM));
+                    code.spawn(text_field(
+                        FieldKind::Code,
+                        &memory.code,
+                        "XXXX-XXXX",
+                        CODE_LEN + 1,
+                        200.0,
+                        code_first,
+                        MenuCommand::Connect,
+                    ));
+                });
+            });
+        parent.spawn(label("TAB switches between the boxes", 13.0, DIM));
         parent.spawn(button("CONNECT", MenuCommand::Connect));
         parent.spawn(button("BACK", MenuCommand::Back));
         parent.spawn(status_line());
@@ -672,10 +751,16 @@ struct Entry {
     color: Color,
 }
 
-/// A run of cards on a codex screen, under an optional heading.
+/// A codex card's width: three a row, or two a row spanning the same.
+const CARD_WIDTH: f32 = 372.0;
+const WIDE_CARD_WIDTH: f32 = (3.0 * CARD_WIDTH + 16.0) / 2.0;
+
+/// A run of cards on a codex screen, under an optional heading, each
+/// `card_width` wide.
 struct Section {
     heading: Option<&'static str>,
     entries: Vec<Entry>,
+    card_width: f32,
 }
 
 /// A vault guardian's colour on its card.
@@ -685,6 +770,7 @@ fn boss_color(kind: KeeperKind) -> Color {
         // The orange of the marks it lays on its prey.
         KeeperKind::Stalker => Color::srgb(1.0, 0.4, 0.15),
         KeeperKind::Brute => Color::srgb(0.95, 0.6, 0.2),
+        KeeperKind::Prism => PRISM_COLOR,
     }
 }
 
@@ -704,7 +790,7 @@ fn perks_screen(mut commands: Commands, assets: Res<AssetServer>) {
         MenuScreen::Perks,
         "PERKS",
         "Found lying around each deck. Walk over one to use it.",
-        &[Section { heading: None, entries: entries.into() }],
+        &[Section { heading: None, entries: entries.into(), card_width: CARD_WIDTH }],
         128.0,
     );
 }
@@ -722,7 +808,8 @@ fn enemies_screen(mut commands: Commands, assets: Res<AssetServer>) {
     // Their health depends on the vault and the crew, so no figure.
     let bosses = KeeperKind::ALL.map(|kind| Entry {
         sprite: kind.sprite(),
-        art: 80.0,
+        // Twice its sprite: the prism's is a little bigger than the rest.
+        art: if kind == KeeperKind::Prism { 88.0 } else { 80.0 },
         name: kind.name(),
         tag: kind.role(),
         note: String::new(),
@@ -736,8 +823,10 @@ fn enemies_screen(mut commands: Commands, assets: Res<AssetServer>) {
         "ENEMIES",
         "The station's security, and what it throws at you.",
         &[
-            Section { heading: None, entries: guards.into() },
-            Section { heading: Some("BOSSES"), entries: bosses.into() },
+            Section { heading: None, entries: guards.into(), card_width: CARD_WIDTH },
+            // Two a row: their write-ups are long, and wider cards keep them
+            // short enough for every boss to fit a 720 px tall window.
+            Section { heading: Some("BOSSES"), entries: bosses.into(), card_width: WIDE_CARD_WIDTH },
         ],
         100.0,
     );
@@ -765,8 +854,8 @@ fn codex_screen(
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                padding: UiRect::top(Val::Px(40.0)),
-                row_gap: Val::Px(14.0),
+                padding: UiRect::top(Val::Px(24.0)),
+                row_gap: Val::Px(10.0),
                 ..default()
             },
         ))
@@ -791,7 +880,7 @@ fn codex_screen(
                         for entry in &section.entries {
                             grid.spawn((
                                 Node {
-                                    width: Val::Px(372.0),
+                                    width: Val::Px(section.card_width),
                                     min_height: Val::Px(card_height),
                                     align_items: AlignItems::Center,
                                     column_gap: Val::Px(16.0),
@@ -883,7 +972,8 @@ fn run_menu_command(
     mode: Res<NetMode>,
     mut memory: ResMut<MenuMemory>,
     mut notice: ResMut<Notice>,
-    fields: Query<&TextField>,
+    mut fields: Query<&mut TextField>,
+    host_code: Query<&HostCode>,
     // Absent outside the menu, e.g. in the lobby.
     current: Option<Res<State<MenuScreen>>>,
     mut screen: ResMut<NextState<MenuScreen>>,
@@ -893,7 +983,7 @@ fn run_menu_command(
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     let joining = matches!(*mode, NetMode::Join { .. });
-    let field = fields.iter().next().map(|f| f.value.clone()).unwrap_or_default();
+    let field = |kind: FieldKind| fields.iter().find(|f| f.kind == kind).map(|f| f.value.clone()).unwrap_or_default();
 
     match *command {
         MenuCommand::Solo => commands.trigger(StartSession(NetMode::Solo)),
@@ -926,24 +1016,36 @@ fn run_menu_command(
             exit.write(AppExit::Success);
         }
         MenuCommand::StartHost => {
-            memory.port = field.clone();
-            match parse_port(&field) {
+            let port = field(FieldKind::Port);
+            memory.port = port.clone();
+            match parse_port(&port) {
                 Ok(port) => {
                     memory.save();
-                    commands.trigger(StartSession(NetMode::Host { port }));
+                    let code = host_code.iter().next().map_or_else(room_code, |c| c.0.clone());
+                    commands.trigger(StartSession(NetMode::Host { port, code }));
                 }
                 Err(message) => notice.0 = Some(message),
             }
         }
         MenuCommand::Connect if joining => {}
         MenuCommand::Connect => {
-            memory.address = field.clone();
-            match resolve(&field) {
-                Ok(addr) => {
+            let (address, code) = (field(FieldKind::Address), field(FieldKind::Code));
+            memory.address = address.clone();
+            memory.code = code.clone();
+            // Checked here too, so a bad code sends the typing back to its box.
+            match (resolve(&address), parse_code(&code)) {
+                (Ok(addr), Ok(code)) => {
                     memory.save();
-                    commands.trigger(StartSession(NetMode::Join { addr }));
+                    commands.trigger(StartSession(NetMode::Join { addr, code }));
                 }
-                Err(message) => notice.0 = Some(message),
+                (Err(message), _) => notice.0 = Some(message),
+                (Ok(_), Err(message)) => {
+                    notice.0 = Some(message);
+                    // Straight back to the box that needs fixing.
+                    for mut field in &mut fields {
+                        field.focused = field.kind == FieldKind::Code;
+                    }
+                }
             }
         }
         MenuCommand::StartRun => match roster.as_deref().and_then(|r| waiting_on(r)) {
@@ -1039,7 +1141,7 @@ fn style_choices(
         if text.0 != content {
             text.0 = content;
         }
-        color.0 = tint;
+        color.set_if_neq(TextColor(tint));
     }
 
     let loadout = &loadout.0;
@@ -1058,8 +1160,8 @@ fn style_choices(
             (Interaction::Hovered, false) => (BUTTON_HOVER, GOLD_FAINT),
             (Interaction::None, false) => (BUTTON, Color::NONE),
         };
-        background.0 = bg;
-        *border = BorderColor::all(edge);
+        background.set_if_neq(BackgroundColor(bg));
+        border.set_if_neq(BorderColor::all(edge));
     }
     for (badge, mut text) in &mut badges {
         let slot = loadout.guns.iter().position(|&g| g == badge.0);
@@ -1111,24 +1213,45 @@ fn update_slot_count(loadout: Res<LocalLoadout>, mut text: Query<&mut Text, With
     }
 }
 
-fn edit_fields(mut commands: Commands, mut keys: MessageReader<KeyboardInput>, mut fields: Query<&mut TextField>) {
-    let Some(mut field) = fields.iter_mut().next() else {
-        keys.clear();
-        return;
-    };
+fn edit_fields(
+    mut commands: Commands,
+    mut keys: MessageReader<KeyboardInput>,
+    held: Res<ButtonInput<KeyCode>>,
+    mut fields: Query<(&mut TextField, &Interaction)>,
+) {
+    // A click gives that field the typing.
+    if let Some(clicked) = fields.iter().find(|(_, i)| **i == Interaction::Pressed).map(|(f, _)| f.kind) {
+        for (mut field, _) in &mut fields {
+            if field.focused != (field.kind == clicked) {
+                field.focused = field.kind == clicked;
+            }
+        }
+    }
     for key in keys.read() {
         if !key.state.is_pressed() {
             continue;
         }
+        if key.logical_key == Key::Tab {
+            // To the next field, or the one before with Shift.
+            let mut kinds: Vec<FieldKind> = fields.iter().map(|(f, _)| f.kind).collect();
+            kinds.sort();
+            let Some(at) = fields.iter().find(|(f, _)| f.focused).and_then(|(f, _)| kinds.iter().position(|k| *k == f.kind))
+            else {
+                continue;
+            };
+            let back = held.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+            let next = kinds[if back { at + kinds.len() - 1 } else { at + 1 } % kinds.len()];
+            for (mut field, _) in &mut fields {
+                field.focused = field.kind == next;
+            }
+            continue;
+        }
+        let Some((mut field, _)) = fields.iter_mut().find(|(f, _)| f.focused) else { continue };
         match &key.logical_key {
             Key::Character(text) => {
                 for c in text.chars() {
-                    let allowed = if field.digits_only {
-                        c.is_ascii_digit()
-                    } else {
-                        c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-')
-                    };
-                    if allowed && field.value.len() < field.max_len {
+                    let c = if field.kind == FieldKind::Code { c.to_ascii_uppercase() } else { c };
+                    if field.kind.allows(c) && field.value.len() < field.max_len {
                         field.value.push(c);
                     }
                 }
@@ -1144,13 +1267,15 @@ fn edit_fields(mut commands: Commands, mut keys: MessageReader<KeyboardInput>, m
 
 fn draw_fields(
     time: Res<Time>,
-    fields: Query<(&TextField, &Children)>,
+    mut fields: Query<(&TextField, &Children, &mut BorderColor)>,
     mut texts: Query<&mut Text, With<FieldText>>,
     mut carets: Query<&mut Visibility, (With<Caret>, Without<Placeholder>)>,
     mut placeholders: Query<&mut Visibility, With<Placeholder>>,
 ) {
     let caret_on = (time.elapsed_secs() * 2.0).fract() < 0.5;
-    for (field, children) in &fields {
+    for (field, children, mut border) in &mut fields {
+        // The field taking the typing is the one outlined in full gold.
+        border.set_if_neq(BorderColor::all(if field.focused { GOLD } else { GOLD_FAINT }));
         for child in children.iter() {
             if let Ok(mut text) = texts.get_mut(child)
                 && text.0 != field.value
@@ -1158,7 +1283,8 @@ fn draw_fields(
                 text.0.clone_from(&field.value);
             }
             if let Ok(mut visibility) = carets.get_mut(child) {
-                visibility.set_if_neq(if caret_on { Visibility::Inherited } else { Visibility::Hidden });
+                let shown = caret_on && field.focused;
+                visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
             }
             if let Ok(mut visibility) = placeholders.get_mut(child) {
                 let shown = field.value.is_empty();
@@ -1171,7 +1297,7 @@ fn draw_fields(
 fn update_host_hint(fields: Query<&TextField>, mut hint: Query<&mut Text, With<HostHint>>, mut ip: Local<Option<String>>) {
     let Ok(mut hint) = hint.single_mut() else { return };
     let ip = ip.get_or_insert_with(|| local_ip().map_or("<your IP>".into(), |ip| ip.to_string()));
-    let port = fields.iter().next().map(|f| f.value.as_str()).unwrap_or("");
+    let port = fields.iter().find(|f| f.kind == FieldKind::Port).map_or("", |f| f.value.as_str());
     let content = match port.parse::<u16>() {
         Ok(port) if port == DEFAULT_PORT => format!("Your crew joins with:  {ip}"),
         Ok(port) => format!("Your crew joins with:  {ip}:{port}"),
@@ -1192,7 +1318,7 @@ fn update_status(
     let Ok((mut text, mut color)) = status.single_mut() else { return };
     let connecting = matches!(*mode, NetMode::Join { .. }) && *state.get() == GameState::Menu;
     let (content, tint) = match (&*mode, &notice.0) {
-        (NetMode::Join { addr }, _) if connecting => (
+        (NetMode::Join { addr, .. }, _) if connecting => (
             format!("Connecting to {addr}...  {:.0}s", connection.waited),
             GOLD,
         ),
@@ -1202,7 +1328,7 @@ fn update_status(
     if text.0 != content {
         text.0 = content;
     }
-    color.0 = tint;
+    color.set_if_neq(TextColor(tint));
 }
 
 fn back_on_escape(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>, screen: Res<State<MenuScreen>>) {
@@ -1404,11 +1530,11 @@ fn update_session_hud(
     let crew = players.iter().count();
     let content = match &*mode {
         NetMode::Solo => String::new(),
-        NetMode::Host { port } => {
+        NetMode::Host { port, code } => {
             let ip = ip.get_or_insert_with(|| local_ip().map_or("?".into(), |ip| ip.to_string()));
-            format!("HOSTING  {ip}:{port}    CREW {crew}")
+            format!("HOSTING  {ip}:{port}  CODE {}    CREW {crew}", show_code(code))
         }
-        NetMode::Join { addr } => format!("CREW {crew}    host {addr}"),
+        NetMode::Join { addr, code } => format!("CREW {crew}    host {addr}  CODE {}", show_code(code)),
     };
     if session.0 != content {
         session.0 = content;
@@ -1463,6 +1589,10 @@ fn leave_on_escape(
 #[derive(Component)]
 struct LobbyInfo;
 
+/// Beside that, big enough to read out: the room code joiners need.
+#[derive(Component)]
+struct LobbyCode;
+
 /// A crewmate's tag in the lobby, by place in the roster.
 #[derive(Component)]
 struct CrewChip(usize);
@@ -1495,7 +1625,12 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
         ))
         .with_children(|parent| {
             parent.spawn(label("CREW LOBBY", 28.0, GOLD));
-            parent.spawn((LobbyInfo, label("", 15.0, DIM)));
+            parent
+                .spawn(Node { column_gap: Val::Px(12.0), align_items: AlignItems::Baseline, ..default() })
+                .with_children(|row| {
+                    row.spawn((LobbyInfo, label("", 15.0, DIM)));
+                    row.spawn((LobbyCode, label("", 24.0, GOLD)));
+                });
             parent
                 .spawn(Node { column_gap: Val::Px(10.0), ..default() })
                 .with_children(|chips| {
@@ -1529,22 +1664,28 @@ fn update_lobby(
     mode: Res<NetMode>,
     local: Res<LocalId>,
     roster: Option<Single<&Roster>>,
-    mut info: Single<&mut Text, (With<LobbyInfo>, Without<LobbyHint>)>,
+    mut info: Single<&mut Text, (With<LobbyInfo>, Without<LobbyHint>, Without<LobbyCode>)>,
+    mut code: Single<&mut Text, (With<LobbyCode>, Without<LobbyHint>)>,
     mut hint: Single<&mut Text, (With<LobbyHint>, Without<LobbyInfo>)>,
     mut chips: Query<(&CrewChip, &mut Node, &mut BorderColor, &Children)>,
-    mut chip_texts: Query<(&mut Text, &mut TextColor), (Without<LobbyInfo>, Without<LobbyHint>)>,
+    mut chip_texts: Query<(&mut Text, &mut TextColor), (Without<LobbyInfo>, Without<LobbyHint>, Without<LobbyCode>)>,
     mut ip: Local<Option<String>>,
 ) {
-    let content = match &*mode {
-        NetMode::Host { port } => {
+    let (content, room) = match &*mode {
+        NetMode::Host { port, code } => {
             let ip = ip.get_or_insert_with(|| local_ip().map_or("?".into(), |ip| ip.to_string()));
-            format!("Friends join at  {ip}:{port}")
+            let at = if *port == DEFAULT_PORT { ip.clone() } else { format!("{ip}:{port}") };
+            (format!("Friends join at  {at}  with room code"), show_code(code))
         }
-        NetMode::Join { addr } => format!("Aboard {addr}'s crew"),
-        NetMode::Solo => String::new(),
+        // So a joiner can pass it on too.
+        NetMode::Join { addr, code } => (format!("Aboard {addr}'s crew  -  room code"), show_code(code)),
+        NetMode::Solo => (String::new(), String::new()),
     };
     if info.0 != content {
         info.0 = content;
+    }
+    if code.0 != room {
+        code.0 = room;
     }
 
     let Some(roster) = roster else { return };
@@ -1560,12 +1701,12 @@ fn update_lobby(
             Some(class) => (format!("P{}  {}{you}", chip.0 + 1, class.name()), class.color()),
             None => (format!("P{}  choosing...{you}", chip.0 + 1), DIM),
         };
-        *border = BorderColor { top: color, ..BorderColor::all(hud::EDGE) };
+        border.set_if_neq(BorderColor { top: color, ..BorderColor::all(hud::EDGE) });
         if let Some(Ok((mut text, mut tint))) = children.first().map(|c| chip_texts.get_mut(*c)) {
             if text.0 != content {
                 text.0 = content;
             }
-            tint.0 = color;
+            tint.set_if_neq(TextColor(color));
         }
     }
 

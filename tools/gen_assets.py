@@ -2590,6 +2590,247 @@ def brute_boss():
     return portrait, sheet, glow, [f[0] for f in frames]
 
 
+# The vault prism: a great faceted crystal sentinel, drawn like the keeper in
+# near-white glass and steel so the game can tint it by the vault's tier, with
+# a floating pylon at each flank. Its body comes in two halves that part to
+# bare its heart, a separate glowing layer the game colours by phase; and the
+# overlays it raises: the aegis bubble and the mirror panes that orbit it.
+PRISM_GLASS = rgb(196, 226, 240)
+PRISM_N = 44
+# The seam between its halves runs between columns 21 and 22.
+PRISM_CX = 21.5
+# Its heart, behind the window in its middle.
+PRISM_HEART = (21.5, 21.0)
+
+
+def inside(x, y, points):
+    """Whether `(x, y)` lies inside the polygon through `points`."""
+    hit = False
+    for (ax, ay), (bx, by) in zip(points, points[1:] + points[:1]):
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            hit = not hit
+    return hit
+
+
+def facets(px, faces, seed, ids=None):
+    """Fills each `(points, light)` face, lit by `light`, brighter toward the
+    top, with a little grain; `ids` records which face each pixel took."""
+    for i, (points, light) in enumerate(faces):
+        for y in range(len(px)):
+            for x in range(len(px[0])):
+                if inside(x, y, points):
+                    px[y][x] = shade(PRISM_GLASS, light - y * 0.8 + 14 + (noise(x, y, seed) - 0.5) * 7)
+                    if ids is not None:
+                        ids[y][x] = i
+
+
+def crystal_edges(px, ids):
+    """Catches the light along the ridges between faces: lit where a face
+    meets the one to its left or above, shadowed on the far side."""
+    h, w = len(px), len(px[0])
+    for y in range(1, h):
+        for x in range(1, w):
+            here = ids[y][x]
+            if here < 0:
+                continue
+            if ids[y][x - 1] not in (-1, here) or ids[y - 1][x] not in (-1, here):
+                px[y][x] = shade(px[y][x], 34 if x < PRISM_CX else -22)
+
+
+def prism_boss():
+    """The vault prism, 44x44, and its parts: the body's left and right
+    halves (each the full canvas, empty past the seam) with the window its
+    heart shows through, the heart layer, and the composite for the menus,
+    halves closed; also the composite with its halves parted, for the preview."""
+    n = PRISM_N
+    cx = PRISM_CX
+    body = canvas(n, n)
+
+    # The great crystal: a tall six-sided gem, a crown over a girdle band over
+    # a long pavilion, each split into four faces lit from the top left.
+    T, B = (cx, 1.0), (cx, 42.5)
+    ul, ur, ll, lr = (11.0, 13.0), (32.0, 13.0), (12.0, 29.0), (31.0, 29.0)
+    il, ir, jl, jr = (16.5, 13.0), (26.5, 13.0), (17.0, 29.0), (26.0, 29.0)
+    mt, mb = (cx, 13.0), (cx, 29.0)
+    faces = [
+        ([T, ul, il], 40), ([T, il, mt], 56), ([T, mt, ir], 6), ([T, ir, ur], -22),
+        ([ul, il, jl, ll], 16), ([il, mt, mb, jl], 28), ([mt, ir, jr, mb], -6), ([ir, ur, lr, jr], -36),
+        ([ll, jl, B], -8), ([jl, mb, B], 4), ([mb, jr, B], -30), ([jr, lr, B], -58),
+    ]
+    part = canvas(n, n)
+    ids = [[-1] * n for _ in range(n)]
+    facets(part, faces, 91, ids)
+    crystal_edges(part, ids)
+    # A few glints on the lit faces.
+    for x, y in ((18, 6), (19, 7), (14, 17), (13, 18), (18, 33), (24, 9)):
+        part[y][x] = WHITE
+    stamp(body, part)
+
+    # Steel bands strapped round the girdle, top and bottom, capped past its
+    # edges and studded with glowing pips: the vault's leash on it.
+    steel = KEEPER_METAL
+    for (gl, gr), y0 in (((ul, ur), 12), ((ll, lr), 28)):
+        part = canvas(n, n)
+        for y in (y0, y0 + 1):
+            for x in range(int(gl[0]) - 1, int(gr[0]) + 2):
+                part[y][x] = shade(steel, (14 if y == y0 else -30) + (noise(x, y, 93) - 0.5) * 8 - (x - cx) * 0.8)
+        for x in (int(gl[0]) + 2, int(cx) - 4, int(cx) + 5, int(gr[0]) - 2):
+            part[y0][x] = rgb(150, 235, 255)
+            part[y0 + 1][x] = shade(rgb(150, 235, 255), -90)
+        stamp(body, part)
+
+    # The window its heart shows through: a dark glass socket ringed by a
+    # bright bevel, cut after the outline so the heart fills it.
+    hx, hy = PRISM_HEART
+    for y in range(n):
+        for x in range(n):
+            d = ((x - hx) / 4.0) ** 2 + ((y - hy) / 6.4) ** 2
+            if d <= 1.0:
+                body[y][x] = CLEAR
+            elif d <= 1.45:
+                body[y][x] = rgb(46, 70, 92)
+            elif d <= 2.1 and body[y][x][3]:
+                body[y][x] = shade(body[y][x], 36 if x < cx else 8)
+
+    # A floating pylon at each flank: a slim gem with a spark of light inside.
+    for side in (-1, 1):
+        px0 = cx + side * 17.0
+        top, bottom, mid = (px0, 9.0), (px0, 35.0), 20.0
+        left, right = (px0 - 3.8, mid), (px0 + 3.8, mid)
+        centre = (px0, mid)
+        part = canvas(n, n)
+        ids = [[-1] * n for _ in range(n)]
+        facets(part, [([top, left, centre], 34), ([top, centre, right], -8), ([left, bottom, centre], 0), ([centre, bottom, right], -40)], 92 + side, ids)
+        crystal_edges(part, ids)
+        x = int(px0 - 0.5)
+        for y in range(17, 24):
+            part[y][x] = rgb(150, 235, 255) if 18 < y < 22 else shade(rgb(150, 235, 255), -50)
+        part[19][x] = part[20][x] = WHITE
+        stamp(body, part)
+
+    # The ridge down its middle, where the halves meet.
+    for y in range(n):
+        if body[y][21][3] and body[y][21] != OUTLINE:
+            body[y][21] = shade(body[y][21], -16)
+        if body[y][22][3] and body[y][22] != OUTLINE:
+            body[y][22] = shade(body[y][22], 18)
+    left = [[c if x < 22 else CLEAR for x, c in enumerate(row)] for row in body]
+    right = [[c if x >= 22 else CLEAR for x, c in enumerate(row)] for row in body]
+
+    # Its heart: a white-hot gem in a soft halo, and a thread of light up the
+    # seam that shows when the halves part.
+    heart = canvas(n, n)
+    for y in range(n):
+        for x in range(n):
+            d = ((x - hx) / 4.6) ** 2 + ((y - hy) / 7.0) ** 2
+            halo = ((x - hx) / 8.0) ** 2 + ((y - hy) / 12.0) ** 2
+            if d < 0.35:
+                heart[y][x] = WHITE
+            elif d < 0.7:
+                heart[y][x] = rgb(214, 248, 255)
+            elif d <= 1.0:
+                heart[y][x] = rgb(140, 222, 255)
+            elif halo <= 1.0:
+                heart[y][x] = rgb(140, 222, 255, int(110 * (1.0 - halo) + 30))
+            elif 3 <= y <= 40 and x in (21, 22):
+                heart[y][x] = rgb(200, 240, 255, 150)
+            elif 4 <= y <= 39 and x in (20, 23):
+                heart[y][x] = rgb(140, 222, 255, 60)
+
+    def compose(gap):
+        out = [row[:] for row in heart]
+        for half, dx in ((left, -gap), (right, gap)):
+            for y in range(n):
+                for x in range(n):
+                    c = half[y][x]
+                    if c[3] and 0 <= x + dx < n:
+                        out[y][x + dx] = c
+        return out
+
+    return compose(0), left, right, heart, compose(3)
+
+
+def prism_aegis():
+    """The bubble a negating prism raises, 56x64, white for the game to tint:
+    a pointy-topped hexagon with a bright rim, faint honeycomb inside,
+    thickening toward the rim, and a glint at its top left."""
+    w, h = 56, 64
+    cx, cy = 27.5, 31.5
+    r_in = 30.0 * math.sqrt(3) / 2
+    cell = 6.0
+    s3 = math.sqrt(3)
+
+    def hex_norm(x, y):
+        return max(abs(x), abs(x / 2 + y * s3 / 2), abs(x / 2 - y * s3 / 2))
+
+    px = canvas(w, h)
+    for y in range(h):
+        for x in range(w):
+            dx, dy = x - cx, y - cy
+            hn = hex_norm(dx, dy)
+            if hn > r_in:
+                continue
+            edge = hn / r_in
+            # Light from the top left.
+            lit = (-dx - dy) / (r_in * 2) * 0.5 + 0.5
+            grey = int(190 + 65 * lit)
+            if hn > r_in - 1.0:
+                px[y][x] = (grey, grey, grey, 235)
+                continue
+            if hn > r_in - 2.0:
+                px[y][x] = (grey, grey, grey, 150)
+                continue
+            # Honeycomb: how near this pixel is to its cell's edge.
+            q = (s3 / 3 * dx - dy / 3) / cell
+            r = (2 / 3 * dy) / cell
+            xx, zz = q, r
+            yy = -xx - zz
+            rx, ry, rz = round(xx), round(yy), round(zz)
+            ex, ey, ez = abs(rx - xx), abs(ry - yy), abs(rz - zz)
+            if ex > ey and ex > ez:
+                rx = -ry - rz
+            elif ey > ez:
+                ry = -rx - rz
+            else:
+                rz = -rx - ry
+            ccx = cell * s3 * (rx + rz / 2)
+            ccy = cell * 1.5 * rz
+            lattice = hex_norm(dx - ccx, dy - ccy) > cell * s3 / 2 - 0.9
+            a = 14 + 48 * edge ** 3
+            if lattice:
+                a += 30 + 50 * edge
+            px[y][x] = (grey, grey, grey, int(min(255, a)))
+    # A curved glint inside the top left of the rim.
+    for t in range(14):
+        ang = math.radians(200 + t * 4.5)
+        x = int(round(cx + math.cos(ang) * (r_in - 5)))
+        y = int(round(cy + math.sin(ang) * (r_in - 3)))
+        px[y][x] = (255, 255, 255, 170 if 2 < t < 11 else 90)
+    return px
+
+
+def prism_shard():
+    """One of the mirror panes that orbit a reflecting prism, 10x15: a shard
+    of silvered glass with a glint across it, bright so the game can dim it
+    between glints."""
+    w, h = 10, 15
+    pts = [(5.0, 0.5), (9.3, 5.0), (5.6, 14.4), (0.6, 9.0)]
+    part = canvas(w, h)
+    for y in range(h):
+        for x in range(w):
+            if inside(x, y, pts):
+                k = (x * 0.4 + y * 0.6) / 11.0
+                c = mix(rgb(240, 246, 255), rgb(140, 160, 196), min(1.0, k))
+                if abs((x - y * 0.55) - 1.2) < 0.8:
+                    c = WHITE
+                elif x >= 6 and y <= 6:
+                    c = mix(c, rgb(170, 230, 255), 0.5)
+                elif x <= 3:
+                    c = shade(c, -24)
+                part[y][x] = c
+    return outlined(part)
+
+
 def gate_tiles():
     """The vault's gate, 32x16 across two wall tiles: a sealed bulkhead with
     hazard-striped leaves meeting at a locked seam, and the same frame once
@@ -2764,6 +3005,15 @@ def main():
     write_png(os.path.join(ROOT, "boss", "brute.png"), brute)
     write_png(os.path.join(ROOT, "boss", "brute_sheet.png"), brute_sheet)
     write_png(os.path.join(ROOT, "boss", "brute_glow.png"), brute_glow)
+    prism, prism_left, prism_right, prism_core, prism_open = prism_boss()
+    write_png(os.path.join(ROOT, "boss", "prism.png"), prism)
+    write_png(os.path.join(ROOT, "boss", "prism_left.png"), prism_left)
+    write_png(os.path.join(ROOT, "boss", "prism_right.png"), prism_right)
+    write_png(os.path.join(ROOT, "boss", "prism_core.png"), prism_core)
+    aegis = prism_aegis()
+    write_png(os.path.join(ROOT, "boss", "prism_aegis.png"), aegis)
+    shard = prism_shard()
+    write_png(os.path.join(ROOT, "boss", "prism_shard.png"), shard)
     gate, gate_open = gate_tiles()
     write_png(os.path.join(ROOT, "tiles", "gate.png"), gate)
     write_png(os.path.join(ROOT, "tiles", "gate_open.png"), gate_open)
@@ -2785,6 +3035,7 @@ def main():
     write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
     write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))
     write_png(os.path.join(preview, "brute.png"), contact_sheet(brute_frames, scale=4))
+    write_png(os.path.join(preview, "prism.png"), contact_sheet([prism, prism_open, prism_core, aegis, shard], scale=4))
     write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
     write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
     write_png(

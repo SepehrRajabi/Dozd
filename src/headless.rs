@@ -15,7 +15,9 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::abilities::{Active, Passive};
-use crate::boss::{BRUTE_SLAM_RADIUS, BruteLook, BruteState, Keeper, KeeperBeam, KeeperHand, KeeperKind, spawn_keeper};
+use crate::boss::{
+    BRUTE_SLAM_RADIUS, BruteLook, BruteState, Keeper, KeeperBeam, KeeperHand, KeeperKind, PRISM_ARC_RANGE, PrismLook, PrismPhase, spawn_keeper,
+};
 use crate::breach::{Breach, BreachState, GATE_REACH};
 use crate::challenge::{ChallengeLog, Rewards};
 use crate::class::{Loadout, Loadouts, PirateClass};
@@ -30,19 +32,20 @@ use crate::vault::{VAULT_REACH, Vault};
 use crate::{GamePlugins, GameState, Rng};
 
 const USAGE: &str = "usage: dozd headless [--seed N] [--runs N] [--crew 1-8] [--class gunner|engineer|bulwark|hacker|doctor|mixed] \
-                      [--passive NAME] [--active NAME] [--bot random|idle] [--boss hands|stalker|brute|mixed] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
+                      [--passive NAME] [--active NAME] [--bot random|idle] [--boss hands|stalker|brute|prism|mixed] [--time SECS] [--hz N] [--csv] [--quiet] [--trace]";
 // Column docs: tools/README.md. Keep these headers in sync with that table.
 const CSV_HEADER: &str = "class,run,seed,ending,extracted,left_early,dead,still_in,deck,decks,credits,payout,\
                           pool,bonus,bars_silver,bars_gold,bars_platinum,kills,alarm,seconds,pirates,\
                           ch_offered,ch_completed,ch_failed,reward_secs,pirate_kills,\
                           breaches,keepers,keeper_secs,keeper_deaths,\
-                          breaches_hands,breaches_stalker,breaches_brute,\
-                          keepers_hands,keepers_stalker,keepers_brute,\
-                          keeper_secs_hands,keeper_secs_stalker,keeper_secs_brute,\
-                          keeper_deaths_hands,keeper_deaths_stalker,keeper_deaths_brute";
+                          breaches_hands,breaches_stalker,breaches_brute,breaches_prism,\
+                          keepers_hands,keepers_stalker,keepers_brute,keepers_prism,\
+                          keeper_secs_hands,keeper_secs_stalker,keeper_secs_brute,keeper_secs_prism,\
+                          keeper_deaths_hands,keeper_deaths_stalker,keeper_deaths_brute,keeper_deaths_prism";
 /// Short names of `KeeperKind::ALL`, in order, for the per-kind columns and
 /// `--boss`. Keep in sync with `KeeperKind::ALL` and the CSV header.
-const KIND_NAMES: [&str; 3] = ["hands", "stalker", "brute"];
+const KIND_NAMES: [&str; KINDS] = ["hands", "stalker", "brute", "prism"];
+const KINDS: usize = KeeperKind::ALL.len();
 /// Per-tick rows: one per pirate and one per enemy, every tick. `kind` tells
 /// you which columns apply — `ai_state` is enemy-only, `move_x..dash` are
 /// pirate-only, blank on the other kind.
@@ -77,6 +80,19 @@ const SLAM_CLEAR: f32 = 20.0;
 const GUARD_THREAT: f32 = 110.0;
 /// Fighting the Vault Brute, bots edge away from guards this close.
 const GUARD_SPACE: f32 = 45.0;
+/// Fighting the Vault Prism, bots keep about this far from it while it's
+/// guarded, just out of its arcs, and close in to `PRISM_PUNISH` while it's
+/// exposed, taking its arcs to get every gun in range.
+const PRISM_RANGE: f32 = PRISM_ARC_RANGE + 25.0;
+const PRISM_PUNISH: f32 = 70.0;
+/// A bot this much past `PRISM_ARC_RANGE` from a Vault Prism gathering an arc
+/// still steps further away.
+const ARC_CLEAR: f32 = 15.0;
+/// Fighting the Vault Prism while it's guarded, bots only shoot guards at
+/// least this far from it, so a miss doesn't fly on into it.
+const PRISM_SHADOW: f32 = 40.0;
+/// Bots edge away from crewmates this close, so one arc doesn't catch them all.
+const CREW_SPACE: f32 = 40.0;
 /// Below this share of health a bot makes for the pad for good.
 const HURT: f32 = 0.3;
 /// The crew taking the last pad out gather within this distance of it before
@@ -260,10 +276,10 @@ struct Batch {
     /// Pirates who went down this run while locked in with a keeper.
     keeper_deaths: u32,
     /// The same four, split by the kind of keeper (indexed as `KeeperKind::ALL`).
-    kind_breaches: [u32; 3],
-    kind_keepers: [u32; 3],
-    kind_secs: [f32; 3],
-    kind_deaths: [u32; 3],
+    kind_breaches: [u32; KINDS],
+    kind_keepers: [u32; KINDS],
+    kind_secs: [f32; KINDS],
+    kind_deaths: [u32; KINDS],
     /// Locked in with a keeper as of the last tick.
     fighting: bool,
     /// The kind of keeper the crew is (or was last) locked in with.
@@ -273,8 +289,8 @@ struct Batch {
     /// Over the whole batch, for the summary.
     total_breaches: u32,
     total_keepers: u32,
-    total_kind_breaches: [u32; 3],
-    total_kind_keepers: [u32; 3],
+    total_kind_breaches: [u32; KINDS],
+    total_kind_keepers: [u32; KINDS],
 }
 
 /// Where `kind` sits in `KeeperKind::ALL` (and the per-kind columns).
@@ -299,6 +315,21 @@ struct Bot {
     bail: bool,
     /// Which way it circles the keeper: 1 counterclockwise, -1 clockwise.
     orbit: f32,
+}
+
+/// A keeper the bots fight from a distance rather than circling close.
+#[derive(Clone, Copy)]
+struct Kite {
+    /// Where it is (or, for a blinking prism, is about to be).
+    at: Vec2,
+    /// How far out bots circle it.
+    range: f32,
+    /// Closer than this, bots back straight off rather than circle.
+    too_close: f32,
+    /// Where a blow is about to land and how far from it bots step away.
+    danger: Option<(Vec2, f32)>,
+    /// Shooting it now would do nothing or come back, so bots hold fire.
+    guarded: bool,
 }
 
 /// Paths across the deck being played, rebuilt whenever its grid changes (a new
@@ -542,7 +573,7 @@ fn drive_bots(
     heist: Res<Heist>,
     vaults: Query<&Vault>,
     breaches: Query<&Breach>,
-    keepers: Query<(&Transform, &Health, &Keeper, Option<&BruteLook>)>,
+    keepers: Query<(&Transform, &Health, &Keeper, Option<&BruteLook>, Option<&PrismLook>)>,
     beams: Query<&KeeperBeam>,
     mut nav: Local<Nav>,
 ) {
@@ -602,18 +633,51 @@ fn drive_bots(
     let looting = vaults.iter().any(|v| v.bars > 0) && nav.open_for.is_some_and(|t| t < LOOT_TIME);
     let give_up_lift = nav.open_for.unwrap_or(nav.since) >= DECK_TIME;
     let keeper = keepers.iter().find(|(_, h, ..)| !h.is_dead());
-    // Against the Vault Brute: where it is, and where a raised slam will land.
-    let brute = keeper.filter(|(_, _, k, _)| k.kind == KeeperKind::Brute).map(|(t, _, _, look)| {
-        let slam = look.filter(|l| matches!(l.state, BruteState::WindUp { .. })).map(|l| l.at);
-        (t.translation.truncate(), slam)
+    // Against the Vault Brute or the Vault Prism, the crew keeps its distance.
+    let kite = keeper.and_then(|(t, _, k, brute, prism)| {
+        let at = t.translation.truncate();
+        match k.kind {
+            // Where it is, and where a raised slam will land.
+            KeeperKind::Brute => Some(Kite {
+                at,
+                range: BRUTE_RANGE,
+                too_close: BRUTE_TOO_CLOSE,
+                danger: brute
+                    .filter(|l| matches!(l.state, BruteState::WindUp { .. }))
+                    .map(|l| (l.at, BRUTE_SLAM_RADIUS + SLAM_CLEAR)),
+                guarded: false,
+            }),
+            // Where it is (or is blinking to), the reach of an arc it's
+            // gathering, and whether shooting it now would do nothing or come
+            // back. A coming shift counts too, so shots in flight don't bounce.
+            KeeperKind::Prism => prism.map(|l| {
+                let at = l.warp.unwrap_or(at);
+                let guarded = |p: PrismPhase| p.negates() || p.reflects();
+                let guarded = guarded(l.phase) || guarded(l.next);
+                Kite {
+                    at,
+                    range: if guarded { PRISM_RANGE } else { PRISM_PUNISH },
+                    too_close: if guarded { PRISM_ARC_RANGE } else { PRISM_PUNISH * 0.6 },
+                    danger: (guarded && l.charging).then_some((at, PRISM_ARC_RANGE + ARC_CLEAR)),
+                    guarded,
+                }
+            }),
+            _ => None,
+        }
     });
     let guards: Vec<Vec2> = enemies
         .iter()
         .filter(|(_, _, h, team, _)| **team == Team::Enemy && !h.is_dead())
         .map(|(_, t, ..)| t.translation.truncate())
         .collect();
-    // Guards near the brute are what the crew is shooting, not a sign their guns are dry.
-    let busy = brute.is_some_and(|(b, _)| guards.iter().any(|g| g.distance(b) <= ENGAGE * 2.0));
+    // Guards near the brute or prism are what the crew is shooting, not a sign
+    // their guns are dry; nor is a prism nobody is meant to be shooting.
+    let busy = kite.is_some_and(|k| k.guarded || guards.iter().any(|g| g.distance(k.at) <= ENGAGE * 2.0));
+    let crew: Vec<Vec2> = pirates
+        .iter()
+        .filter(|(_, player, _, health, ..)| player.status == PirateStatus::Active && !health.is_dead())
+        .map(|(_, _, t, ..)| t.translation.truncate())
+        .collect();
     if let Some((_, hp, ..)) = keeper {
         nav.stalled = if nav.keeper_hp.is_none_or(|old| hp.current < old) {
             0.0
@@ -678,33 +742,40 @@ fn drive_bots(
             // Locked in, the keeper is the target from anywhere in its room.
             let target = if fighting { keeper.or(nearest) } else { nearest };
 
-            if let Some((b, slam)) = brute.filter(|_| fighting) {
-                // Kites the brute: circles well out of its reach, backs off
-                // when it gets close, steps out of a raised slam, and shoots
-                // its guards first when they come near.
+            if let Some(kite) = kite.filter(|_| fighting) {
+                // Kites the brute or prism: circles well out of its reach,
+                // backs off when it gets close, steps out of a raised slam or
+                // a gathering arc, keeps clear of guards and crewmates, and
+                // shoots its guards first when they come near.
+                let b = kite.at;
                 let out = (pos - b).normalize_or(Vec2::X);
                 let dist = pos.distance(b);
-                let mut movement = if dist < BRUTE_TOO_CLOSE {
+                let mut movement = if dist < kite.too_close {
                     out
                 } else {
-                    let radial = ((BRUTE_RANGE - dist) / 40.0).clamp(-1.0, 1.0);
+                    let radial = ((kite.range - dist) / 40.0).clamp(-1.0, 1.0);
                     (out * radial + out.perp() * bot.orbit).normalize_or_zero()
                 };
                 for g in guards.iter().filter(|g| g.distance(pos) < GUARD_SPACE) {
                     movement += (pos - *g).normalize_or_zero() * 0.5;
                 }
+                if kite.guarded || kite.danger.is_some() {
+                    for c in crew.iter().filter(|c| c.distance(pos) < CREW_SPACE) {
+                        movement += (pos - *c).normalize_or_zero() * 0.5;
+                    }
+                }
                 let mut dodging = false;
-                if let Some(at) = slam.filter(|at| at.distance(pos) < BRUTE_SLAM_RADIUS + SLAM_CLEAR) {
+                if let Some((at, _)) = kite.danger.filter(|(at, reach)| at.distance(pos) < *reach) {
                     movement = (pos - at).normalize_or(out);
                     dodging = true;
                 }
                 let mut movement = movement.normalize_or_zero();
                 // Blocked (backed into a wall or corner): slide whichever open
-                // way gains the most room from the brute and its slam.
+                // way gains the most room from the keeper and its blow.
                 if movement != Vec2::ZERO && grid.is_solid_at(pos + movement * TILE) {
                     let room = |d: Vec2| {
                         let to = pos + d * TILE;
-                        to.distance(b) + slam.map_or(0.0, |at| to.distance(at))
+                        to.distance(b) + kite.danger.map_or(0.0, |(at, _)| to.distance(at))
                     };
                     let open = (0..16)
                         .map(|i| Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0))
@@ -712,17 +783,21 @@ fn drive_bots(
                         .max_by(|&x, &y| room(x).total_cmp(&room(y)));
                     movement = open.unwrap_or(movement);
                     // Circling into a wall: circle the other way from now on.
-                    if !dodging && dist >= BRUTE_TOO_CLOSE {
+                    if !dodging && dist >= kite.too_close {
                         bot.orbit = -bot.orbit;
                     }
                 }
-                dodging |= dist < BRUTE_TOO_CLOSE;
-                let aim = nearest.filter(|g| g.distance(pos) <= GUARD_THREAT).unwrap_or(b);
+                dodging |= dist < kite.too_close;
+                let guard = nearest.filter(|g| g.distance(pos) <= GUARD_THREAT);
+                // A guarded prism isn't shot at all; its guards only well clear of it.
+                let guard = guard.filter(|g| !kite.guarded || g.distance(b) >= PRISM_SHADOW);
+                let fire = guard.is_some() || !kite.guarded;
+                let aim = guard.unwrap_or(b);
                 break 'input PlayerInput {
                     movement,
                     aim,
-                    fire: true,
-                    fire_pressed: true,
+                    fire,
+                    fire_pressed: fire,
                     dash: movement != Vec2::ZERO && rng.unit() < if dodging { 0.08 } else { 0.01 },
                     reload: rng.unit() < 0.002,
                     slot: (rng.unit() < if stalled { 0.02 } else { 0.004 }).then(|| (rng.unit() * 4.0) as u8 % 4),
@@ -965,7 +1040,7 @@ fn next_run(
     let ending = if batch.timed_out { "TIMEOUT" } else { "OVER" };
     let seconds = batch.ticks as f32 / config.hz;
     let [silver, gold, platinum] = batch.bars;
-    let join = |values: [String; 3]| values.join(",");
+    let join = |values: [String; KINDS]| values.join(",");
     let per_kind = [
         join(batch.kind_breaches.map(|n| n.to_string())),
         join(batch.kind_keepers.map(|n| n.to_string())),
@@ -1020,10 +1095,10 @@ fn next_run(
         batch.total_kind_breaches[k] += batch.kind_breaches[k];
         batch.total_kind_keepers[k] += batch.kind_keepers[k];
     }
-    batch.kind_breaches = [0; 3];
-    batch.kind_keepers = [0; 3];
-    batch.kind_secs = [0.0; 3];
-    batch.kind_deaths = [0; 3];
+    batch.kind_breaches = [0; KINDS];
+    batch.kind_keepers = [0; KINDS];
+    batch.kind_secs = [0.0; KINDS];
+    batch.kind_deaths = [0; KINDS];
     batch.kind = None;
     batch.breaches = 0;
     batch.keepers = 0;

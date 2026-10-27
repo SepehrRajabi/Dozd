@@ -1,16 +1,19 @@
 //! How a vault's guardian looks: the keeper's body, hands, beams and charging
 //! orbs, the stalker's crouch, routes and lunge, its rampage lanes, the
-//! brute's stomp, slam and roar, and the health bar while the crew fights any of them. None of it shows unless the camera is in the vault room:
-//! what guards a vault is meant to be a surprise.
+//! brute's stomp, slam and roar, the prism's phases, blinks and arc charges,
+//! and the health bar while the crew fights any of them. None of it shows
+//! unless the camera is in the vault room: what guards a vault is meant to be
+//! a surprise.
 
 use bevy::prelude::*;
 
 use crate::boss::{
-    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, SLAMS, StalkerLook,
-    StalkerState, slam_wind_up,
+    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, PRISM_ARC_RANGE,
+    PRISM_COLOR, PrismLook, PrismPhase, SLAMS, StalkerLook, StalkerState, slam_wind_up,
 };
 use crate::combat::{Fade, Health, Shake};
 use crate::hud::{self, HudSlot, Meter};
+use crate::ring_view::{AuraRing, RING_AT};
 use crate::room::RoomGrid;
 use crate::vault::VaultTier;
 use crate::{Level, PIXEL_SCALE, Rng};
@@ -86,6 +89,29 @@ const ROAR_HOLD: f32 = 0.2;
 /// What its eyes and furnace burn: a hot orange, at rest.
 const BRUTE_GLOW: Color = Color::srgb(1.0, 0.5, 0.18);
 const DUST_COLOR: Color = Color::srgba(0.75, 0.7, 0.65, 0.8);
+/// The prism's aegis, while nothing hurts it: a warm amber, so "immune" reads
+/// well apart from its cold crystal.
+const AEGIS_COLOR: Color = Color::srgb(1.0, 0.72, 0.22);
+/// Its mirror panes, while it sends shots back: polished silver, a touch violet.
+const MIRROR_COLOR: Color = Color::srgb(0.86, 0.86, 1.0);
+/// The bar's word for its open window: a bright "go" green.
+const EXPOSED_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
+/// How far each half of the prism slides out while it's exposed, baring its heart.
+const PRISM_OPEN: f32 = 3.0;
+/// How many mirror panes orbit it, the ellipse they orbit on, and how fast
+/// they go round, in radians a second, calm and frantic.
+const SHARDS: usize = 6;
+const SHARD_ORBIT: Vec2 = Vec2::new(27.0, 10.0);
+const SHARD_SPIN: f32 = 1.6;
+const FRANTIC_SPIN: f32 = 3.4;
+/// Roughly how long its warning before a shift, its blink and its arc charge
+/// last, for their looks to run over; how long it takes to swell back in after
+/// a blink, and how long its reach ring lingers once the arcs fly.
+const SHIFT_LOOK: f32 = 0.8;
+const WARP_LOOK: f32 = 0.3;
+const CHARGE_LOOK: f32 = 0.3;
+const ARRIVE_LOOK: f32 = 0.18;
+const REACH_LINGER: f32 = 0.3;
 
 pub struct BossViewPlugin;
 
@@ -99,6 +125,7 @@ impl Plugin for BossViewPlugin {
             .add_observer(dress_lane)
             .add_observer(dress_brute)
             .add_observer(dress_brute_body)
+            .add_observer(dress_prism)
             .add_systems(Startup, spawn_boss_bar)
             .add_systems(
                 Update,
@@ -113,6 +140,8 @@ impl Plugin for BossViewPlugin {
                         draw_marks,
                         draw_lane,
                         draw_brute,
+                        draw_prism,
+                        draw_warp,
                         lunge_ghosts,
                         fade_ghosts,
                         update_boss_bar,
@@ -290,6 +319,53 @@ enum SigilPart {
     Core,
 }
 
+/// The prism's floating body, a child so it can bob, tremble and blink out
+/// without moving the keeper; its parts are its children.
+#[derive(Component, Default)]
+struct PrismRig {
+    /// How far its halves have parted, 0 shut to 1 open.
+    open: f32,
+    /// How far round its mirror panes have gone, in radians.
+    orbit: f32,
+    shift: StateClock<(PrismPhase, PrismPhase)>,
+    warp: StateClock<bool>,
+    charge: StateClock<bool>,
+    /// It has blinked, or gathered an arc, at least once: so the swell back
+    /// in, or the reach ring's fade, isn't played when it first shows up.
+    warped: bool,
+    charged: bool,
+}
+
+/// One of the prism's parts, in its rig.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum PrismPart {
+    /// Its left (`-1`) or right (`1`) half, which part to bare its heart.
+    Half(f32),
+    /// The glow at its heart, behind its halves.
+    Heart,
+    /// The amber bubble round it while nothing hurts it.
+    Aegis,
+    /// The `0`th, `1`st... mirror pane orbiting it while it reflects.
+    Shard(usize),
+}
+
+/// The ring on the floor round the prism showing how far its arcs reach,
+/// while it gathers one.
+#[derive(Component)]
+struct PrismReach;
+
+/// Where a blinking prism will land: drawn on the spot, in world space.
+#[derive(Component)]
+struct PrismMarks(Entity);
+
+/// The rings closing in on a blinking prism's landing spot (the later one
+/// starts `delay` into the blink), or the faint copy of it growing there.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum WarpPart {
+    Ring { delay: f32 },
+    Ghost,
+}
+
 /// A fading copy of the stalker left behind as it lunges.
 #[derive(Component)]
 struct Ghost {
@@ -315,12 +391,14 @@ fn dim(color: Srgba, amount: f32) -> Srgba {
 /// Dressed hidden: `hide_boss` shows it once the camera is in its room.
 fn dress_keeper(add: On<Add, Keeper>, mut commands: Commands, assets: Res<AssetServer>, keepers: Query<&Keeper>) {
     let Ok(keeper) = keepers.get(add.entity) else { return };
+    // The prism floats higher, its shadow well below it.
+    let shadow = if keeper.kind == KeeperKind::Prism { -11.0 } else { -9.0 };
     commands.entity(add.entity).insert(Visibility::Hidden).with_children(|parent| {
         parent.spawn((
             Sprite::from_image(assets.load("sprites/shadow.png")),
-            Transform::from_xyz(0.0, -9.0, -0.1).with_scale(Vec3::new(3.2, 2.4, 1.0)),
+            Transform::from_xyz(0.0, shadow, -0.1).with_scale(Vec3::new(3.2, 2.4, 1.0)),
         ));
-        if keeper.kind != KeeperKind::Brute {
+        if !matches!(keeper.kind, KeeperKind::Brute | KeeperKind::Prism) {
             parent.spawn((KeeperSprite, Sprite::from_image(assets.load(keeper.kind.sprite()))));
         }
     });
@@ -344,6 +422,39 @@ fn dress_brute_body(
             ))
             .with_child((BruteGlow, atlas("sprites/boss/brute_glow.png"), Transform::from_xyz(0.0, 0.0, 0.1)));
     });
+}
+
+/// Gives the prism its rig: two halves over its heart, the aegis bubble and
+/// the mirror panes (hidden until it raises them), and the ring showing its
+/// arcs' reach; and, in world space, the marks for where it blinks to.
+fn dress_prism(add: On<Add, PrismLook>, mut commands: Commands, assets: Res<AssetServer>) {
+    let sprite = |image: &str| Sprite::from_image(assets.load(image.to_string()));
+    commands.entity(add.entity).with_children(|parent| {
+        parent.spawn((
+            PrismReach,
+            AuraRing::new(PRISM_ARC_RANGE, 0.08),
+            Transform::from_translation(RING_AT),
+            Visibility::Hidden,
+        ));
+        parent.spawn((PrismRig::default(), Transform::default(), Visibility::default())).with_children(|rig| {
+            rig.spawn((PrismPart::Heart, sprite("sprites/boss/prism_core.png"), Transform::from_xyz(0.0, 0.0, -0.05)));
+            rig.spawn((PrismPart::Half(-1.0), sprite("sprites/boss/prism_left.png")));
+            rig.spawn((PrismPart::Half(1.0), sprite("sprites/boss/prism_right.png")));
+            rig.spawn((PrismPart::Aegis, sprite("sprites/boss/prism_aegis.png"), Transform::from_xyz(0.0, 0.0, 0.5), Visibility::Hidden));
+            for i in 0..SHARDS {
+                rig.spawn((PrismPart::Shard(i), sprite("sprites/boss/prism_shard.png"), Visibility::Hidden));
+            }
+        });
+    });
+    commands
+        .spawn((Level, PrismMarks(add.entity), StateClock::<bool>::default(), Transform::default(), Visibility::Hidden))
+        .with_children(|parent| {
+            let ring = assets.load("sprites/fx/shock_ring.png");
+            for (part, z) in [(WarpPart::Ring { delay: 0.0 }, 0.0), (WarpPart::Ring { delay: 0.35 }, 0.1)] {
+                parent.spawn((part, Sprite::from_image(ring.clone()), Transform::from_xyz(0.0, 0.0, z)));
+            }
+            parent.spawn((WarpPart::Ghost, sprite(KeeperKind::Prism.sprite()), Transform::from_xyz(0.0, 0.0, 0.2)));
+        });
 }
 
 fn dress_hand(add: On<Add, KeeperHand>, mut commands: Commands, assets: Res<AssetServer>) {
@@ -1230,6 +1341,272 @@ fn draw_brute(
     }
 }
 
+/// How much of one of the prism's overlays shows, given whether its phase has
+/// it `now` and whether the one it's shifting to will: all of it while it
+/// keeps it, none while it never had it, and over a warning `warn` of the way
+/// through, flickering in as it's coming (quicker and stronger toward the
+/// end) or out as it's going.
+fn presence(now: bool, next: bool, warn: f32, t: f32) -> f32 {
+    let on = (t * (14.0 + 22.0 * warn)).sin() > 0.0;
+    match (now, next) {
+        (true, true) => 1.0,
+        (false, false) => 0.0,
+        (true, false) if on => 1.0 - 0.6 * warn,
+        (true, false) => 0.2 * (1.0 - warn),
+        (false, true) if on => 0.25 + 0.6 * warn,
+        (false, true) => 0.0,
+    }
+}
+
+/// How the prism looks this frame.
+struct PrismPlan {
+    open: f32,
+    body: Color,
+    heart: Color,
+    aegis: f32,
+    /// A hit just landed on its aegis: the bubble flares instead of the crystal flashing.
+    flare: bool,
+    shards: f32,
+    orbit: f32,
+    /// Enraged, or both guarding at once: everything quicker and shakier.
+    frantic: bool,
+}
+
+/// The prism hovers. Asleep it rests dim, breathing slowly. Exposed, its
+/// halves part, the crystal dims and its heart throbs bright: the crew's
+/// window. Guarding, it shuts, its heart banked, behind the amber aegis bubble
+/// (negating: hits on it flare the bubble instead of flashing red) or with its
+/// mirror panes orbiting and glinting (reflecting), or both, frantic, once
+/// enraged. Before a shift the coming phase's overlay flickers in, the going
+/// one's out, and it shuts or starts to crack open. Blinking, it draws in to a
+/// bright sliver and fades, then swells back in where it lands. Gathering an
+/// arc it trembles and crackles white, and a ring shows how far its arcs reach.
+#[allow(clippy::type_complexity)]
+fn draw_prism(
+    mut commands: Commands,
+    time: Res<Time>,
+    seen: Res<BossSeen>,
+    mut rng: Local<Rng>,
+    prisms: Query<(&Keeper, &Health, &PrismLook, &Transform), Without<PrismRig>>,
+    mut rigs: Query<(Entity, &ChildOf, &mut PrismRig, &mut Transform), (Without<Keeper>, Without<PrismPart>)>,
+    mut parts: Query<(&ChildOf, &PrismPart, &mut Sprite, &mut Transform, &mut Visibility), (Without<Keeper>, Without<PrismRig>)>,
+    mut reaches: Query<(&ChildOf, &mut AuraRing, &mut Visibility), (With<PrismReach>, Without<PrismPart>)>,
+) {
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let catch_up = 1.0 - (-14.0 * dt).exp();
+    let crystal = Srgba::from(PRISM_COLOR);
+    let mut plans = Vec::new();
+    let mut reach = Vec::new();
+    for (entity, parent, mut rig, mut transform) in &mut rigs {
+        let Ok((keeper, health, look, body)) = prisms.get(parent.parent()) else { continue };
+        let since_shift = rig.shift.tick((look.phase, look.next), dt);
+        let since_warp = rig.warp.tick(look.warp.is_some(), dt);
+        let since_charge = rig.charge.tick(look.charging, dt);
+        // Tinted by its tier, but lightly, so the glass stays glass.
+        let tint = Srgba::from(tier_tint(keeper.tier)).mix(&Srgba::WHITE, 0.6);
+
+        if !keeper.awake || health.is_dead() {
+            rig.open += (0.0 - rig.open) * catch_up;
+            let breath = (t * 1.3).sin();
+            let level = if health.is_dead() { 0.4 } else { 0.5 + 0.06 * breath };
+            transform.translation = Vec3::new(0.0, (-1.0 + breath).round(), 0.0);
+            transform.scale = Vec3::ONE;
+            let heart = dim(crystal, if health.is_dead() { 0.2 } else { 0.35 + 0.05 * breath });
+            plans.push((entity, PrismPlan {
+                open: rig.open,
+                body: dim(tint, level).into(),
+                heart: heart.into(),
+                aegis: 0.0,
+                flare: false,
+                shards: 0.0,
+                orbit: rig.orbit,
+                frantic: false,
+            }));
+            reach.push((parent.parent(), 0.0));
+            continue;
+        }
+
+        let shifting = look.next != look.phase;
+        let warn = if shifting { (since_shift / SHIFT_LOOK).clamp(0.0, 1.0) } else { 0.0 };
+        let exposed = look.phase == PrismPhase::Exposed;
+        let frantic = keeper.enraged || look.phase == PrismPhase::Both;
+        let open = match (exposed, look.next == PrismPhase::Exposed) {
+            (true, true) => 1.0,
+            // Shutting before it guards again.
+            (true, false) => 1.0 - warn,
+            // A hairline crack before it opens.
+            (false, true) => 0.3 * warn,
+            (false, false) => 0.0,
+        };
+        rig.open += (open - rig.open) * catch_up;
+        rig.orbit += dt * if frantic { FRANTIC_SPIN } else { SHARD_SPIN };
+
+        let mut color = if keeper.enraged { seethe(tint, t) } else { tint };
+        if exposed {
+            color = dim(color, 0.72);
+        }
+        let mut offset = Vec2::new(0.0, if frantic { 2.5 * (t * 3.4).sin() } else { 2.0 * (t * 2.2).sin() });
+        if look.phase == PrismPhase::Both {
+            offset += 0.4 * Vec2::new((t * 37.0).sin(), (t * 29.0).cos());
+        }
+        let pulse = 0.5 + 0.5 * (t * 7.0).sin();
+        let mut heart = if exposed { dim(crystal, 0.55).mix(&Srgba::WHITE, pulse) } else { dim(crystal, 0.75) };
+
+        // Gathering an arc: trembling, crackling white.
+        let mut lit = 0.0;
+        if look.charging {
+            rig.charged = true;
+            let charge = (since_charge / CHARGE_LOOK).clamp(0.0, 1.0);
+            let flicker = 0.5 + 0.5 * (t * 47.0).sin();
+            lit = 0.3 + 0.5 * charge * flicker;
+            heart = crystal.mix(&Srgba::WHITE, 0.6 + 0.4 * flicker);
+            offset += (0.5 + charge) * Vec2::new((t * 57.0).sin(), (t * 43.0).cos() * 0.5);
+            if seen.0 && rng.unit() < 0.6 {
+                let at = body.translation.truncate() + offset + Vec2::new(rng.signed() * 14.0, rng.signed() * 19.0);
+                let spark = crystal.mix(&Srgba::WHITE, 0.6);
+                commands.spawn((
+                    Level,
+                    Fade { age: 0.0, life: 0.1 + rng.unit() * 0.1 },
+                    Sprite::from_color(spark, Vec2::new(2.0 + rng.unit().round(), 1.0)),
+                    Transform::from_translation(at.round().extend(15.0)).with_rotation(Quat::from_rotation_z(rng.signed() * 1.6)),
+                ));
+            }
+        }
+        let reach_alpha = if look.charging {
+            0.25 + 0.5 * (since_charge / CHARGE_LOOK).clamp(0.0, 1.0)
+        } else if rig.charged && since_charge < REACH_LINGER {
+            0.75 * (1.0 - since_charge / REACH_LINGER)
+        } else {
+            0.0
+        };
+        reach.push((parent.parent(), reach_alpha));
+
+        // Blinking out: drawn in to a bright sliver, fading; then swelling back in.
+        let mut scale = Vec2::ONE;
+        let mut alpha = 1.0;
+        if look.warp.is_some() {
+            rig.warped = true;
+            let p = (since_warp / WARP_LOOK).clamp(0.0, 1.0);
+            scale = Vec2::new(1.0 - 0.85 * p, 1.0 + 0.3 * p);
+            alpha = 1.0 - p * p;
+            lit = lit.max(p);
+        } else if rig.warped && since_warp < ARRIVE_LOOK {
+            let p = since_warp / ARRIVE_LOOK;
+            let ease = 1.0 - (1.0 - p).powi(2);
+            scale = Vec2::new(0.15 + 0.85 * ease, 1.3 - 0.3 * ease);
+            lit = lit.max(1.0 - p);
+        }
+        color = color.mix(&crystal.mix(&Srgba::WHITE, 0.5), lit);
+
+        let hit = health.flash > 0.0 && !look.phase.negates();
+        let body_color = if hit { HIT_COLOR } else { color.into() };
+        transform.translation = offset.round().extend(0.0);
+        transform.scale = scale.extend(1.0);
+        plans.push((entity, PrismPlan {
+            open: rig.open,
+            body: body_color.with_alpha(alpha),
+            heart: Color::from(heart).with_alpha(alpha),
+            aegis: presence(look.phase.negates(), look.next.negates(), warn, t) * alpha,
+            flare: health.flash > 0.0 && look.phase.negates(),
+            shards: presence(look.phase.reflects(), look.next.reflects(), warn, t + 0.37) * alpha,
+            orbit: rig.orbit,
+            frantic,
+        }));
+    }
+    let plan = |rig: Entity| plans.iter().find(|(entity, _)| *entity == rig).map(|(_, plan)| plan);
+
+    for (parent, part, mut sprite, mut transform, mut visibility) in &mut parts {
+        let Some(plan) = plan(parent.parent()) else { continue };
+        match *part {
+            PrismPart::Half(side) => {
+                transform.translation.x = (side * plan.open * PRISM_OPEN).round();
+                sprite.color = plan.body;
+            }
+            PrismPart::Heart => sprite.color = plan.heart,
+            PrismPart::Aegis => {
+                visibility.set_if_neq(if plan.aegis > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
+                let beat = 0.5 + 0.5 * (t * if plan.frantic { 9.0 } else { 4.0 }).sin();
+                sprite.color = if plan.flare {
+                    Srgba::from(AEGIS_COLOR).mix(&Srgba::WHITE, 0.6).with_alpha(plan.aegis).into()
+                } else {
+                    AEGIS_COLOR.with_alpha(plan.aegis * (0.6 + 0.3 * beat))
+                };
+            }
+            PrismPart::Shard(i) => {
+                visibility.set_if_neq(if plan.shards > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
+                let angle = plan.orbit + i as f32 * std::f32::consts::TAU / SHARDS as f32;
+                // Frantic, they swing in and out as they go.
+                let sway = if plan.frantic { 1.0 + 0.12 * (t * 9.0 + i as f32 * 2.3).sin() } else { 1.0 };
+                let at = Vec2::new(angle.cos(), angle.sin()) * SHARD_ORBIT * sway + Vec2::Y;
+                // In front of the crystal on the near side of their orbit, behind it on the far.
+                transform.translation = at.round().extend(if at.y < 1.0 { 0.6 } else { -0.3 });
+                // Each pane turns as it goes, glinting as it faces out.
+                let turn = (t * 3.0 + i as f32 * 1.3).sin();
+                transform.scale = Vec3::new(0.35 + 0.65 * turn.abs(), 1.0, 1.0);
+                sprite.flip_x = turn < 0.0;
+                let shine = if turn.abs() > 0.93 { Color::WHITE } else { Color::from(dim(Srgba::from(MIRROR_COLOR), 0.8)) };
+                sprite.color = shine.with_alpha(plan.shards);
+            }
+        }
+    }
+
+    for (parent, mut ring, mut visibility) in &mut reaches {
+        let alpha = reach.iter().find(|(prism, _)| *prism == parent.parent()).map_or(0.0, |(_, alpha)| *alpha);
+        visibility.set_if_neq(if alpha > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
+        ring.color = PRISM_COLOR.with_alpha(alpha);
+    }
+}
+
+/// While the prism blinks, marks where it'll land: two dashed rings closing
+/// in on the spot, one after the other, and a faint copy of it growing there,
+/// all brightening until it arrives.
+#[allow(clippy::type_complexity)]
+fn draw_warp(
+    mut commands: Commands,
+    time: Res<Time>,
+    seen: Res<BossSeen>,
+    prisms: Query<(&PrismLook, &Health)>,
+    mut marks: Query<(Entity, &PrismMarks, &mut StateClock<bool>, &mut Transform, &mut Visibility), Without<WarpPart>>,
+    mut parts: Query<(&ChildOf, &WarpPart, &mut Sprite, &mut Transform), Without<PrismMarks>>,
+) {
+    let t = time.elapsed_secs();
+    let mut shown = Vec::new();
+    for (entity, look, mut clock, mut transform, mut visibility) in &mut marks {
+        let Ok((prism, health)) = prisms.get(look.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let since = clock.tick(prism.warp.is_some(), time.delta_secs());
+        let Some(to) = prism.warp.filter(|_| seen.0 && !health.is_dead()) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        transform.translation = to.round().extend(12.5);
+        shown.push((entity, (since / WARP_LOOK).clamp(0.0, 1.0)));
+    }
+
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Some(&(_, p)) = shown.iter().find(|(entity, _)| *entity == parent.parent()) else { continue };
+        let glow = Srgba::from(PRISM_COLOR).mix(&Srgba::WHITE, 0.6 * p);
+        match *part {
+            WarpPart::Ring { delay } => {
+                let q = ((p - delay) / (1.0 - delay)).clamp(0.0, 1.0);
+                // From wide to snug round its body.
+                transform.scale = Vec3::splat(1.1 - 0.7 * q);
+                transform.rotation = Quat::from_rotation_z(if delay > 0.0 { -t * 5.0 } else { t * 4.0 });
+                let alpha = if p < delay { 0.0 } else { 0.35 + 0.65 * q };
+                sprite.color = glow.with_alpha(alpha).into();
+            }
+            WarpPart::Ghost => {
+                transform.scale = Vec3::splat(0.5 + 0.5 * p);
+                sprite.color = glow.with_alpha(0.12 + 0.4 * p).into();
+            }
+        }
+    }
+}
+
 /// Leaves fading copies of the stalker behind it as it lunges or rampages.
 fn lunge_ghosts(
     mut commands: Commands,
@@ -1293,6 +1670,29 @@ struct BossRage;
 #[derive(Component)]
 struct BossMeter;
 
+/// Under the prism's meter, how it's guarding itself: shown only for the prism.
+#[derive(Component)]
+struct BossPhaseRow;
+
+/// The prism's phase in a word, or, while it's about to shift, the arrow and
+/// the word for what it's shifting to.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum BossPhase {
+    Now,
+    Arrow,
+    Next,
+}
+
+/// What the bar calls a prism phase, and in what colour.
+fn phase_label(phase: PrismPhase) -> (&'static str, Color) {
+    match phase {
+        PrismPhase::Exposed => ("EXPOSED", EXPOSED_COLOR),
+        PrismPhase::Aegis => ("IMMUNE", AEGIS_COLOR),
+        PrismPhase::Mirror => ("REFLECTING", MIRROR_COLOR),
+        PrismPhase::Both => ("IMMUNE + REFLECTING", Srgba::from(AEGIS_COLOR).mix(&Srgba::from(MIRROR_COLOR), 0.4).into()),
+    }
+}
+
 fn spawn_boss_bar(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     commands.entity(hud::slot(&slots, HudSlot::Boss)).with_child((
         BossBar,
@@ -1322,6 +1722,20 @@ fn spawn_boss_bar(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
                 ],
             ),
             (BossMeter, hud::meter(BAR_WIDTH - 18.0, 9.0, hud::TEXT)),
+            (
+                BossPhaseRow,
+                Node {
+                    column_gap: Val::Px(6.0),
+                    align_items: AlignItems::Baseline,
+                    display: Display::None,
+                    ..default()
+                },
+                children![
+                    (BossPhase::Now, hud::text("", 12.0, hud::TEXT), TextLayout::no_wrap()),
+                    (BossPhase::Arrow, hud::text(">", 12.0, hud::DIM), TextLayout::no_wrap()),
+                    (BossPhase::Next, hud::text("", 12.0, hud::TEXT), TextLayout::no_wrap()),
+                ],
+            ),
         ],
     ));
 }
@@ -1330,20 +1744,22 @@ fn spawn_boss_bar(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 fn update_boss_bar(
     time: Res<Time>,
     seen: Res<BossSeen>,
-    keepers: Query<(&Keeper, &Health)>,
+    keepers: Query<(&Keeper, &Health, Option<&PrismLook>)>,
     mut bar: Single<(&mut Node, &mut BorderColor), With<BossBar>>,
+    mut phase_row: Single<&mut Node, (With<BossPhaseRow>, Without<BossBar>)>,
+    mut phases: Query<(&BossPhase, &mut Text, &mut TextColor), (Without<BossName>, Without<BossTier>, Without<BossRage>)>,
     mut name: Single<(&mut Text, &mut TextColor), (With<BossName>, Without<BossTier>, Without<BossRage>)>,
     mut tier: Single<(&mut Text, &mut TextColor), (With<BossTier>, Without<BossName>, Without<BossRage>)>,
     mut rage: Single<&mut TextColor, (With<BossRage>, Without<BossName>, Without<BossTier>)>,
     mut meter: Single<&mut Meter, With<BossMeter>>,
 ) {
-    let fighting = keepers.iter().find(|(k, h)| seen.0 && k.awake && !h.is_dead());
+    let fighting = keepers.iter().find(|(k, h, _)| seen.0 && k.awake && !h.is_dead());
     let (node, border) = &mut *bar;
     let display = if fighting.is_some() { Display::Flex } else { Display::None };
     if node.display != display {
         node.display = display;
     }
-    let Some((keeper, health)) = fighting else { return };
+    let Some((keeper, health, prism)) = fighting else { return };
 
     let color = keeper.tier.color();
     let accent = if keeper.enraged { ENRAGED_COLOR } else { color };
@@ -1370,4 +1786,31 @@ fn update_boss_bar(
     rage.set_if_neq(TextColor(rage_color));
     meter.frac = (health.current / health.max.max(1.0)).clamp(0.0, 1.0);
     meter.color = accent;
+
+    // The prism's phase; exposed it throbs, and a coming shift blinks after an arrow.
+    let display = if prism.is_some() { Display::Flex } else { Display::None };
+    if phase_row.display != display {
+        phase_row.display = display;
+    }
+    let Some(prism) = prism else { return };
+    let throb = 0.65 + 0.35 * (time.elapsed_secs() * 7.0).sin();
+    let shifting = prism.next != prism.phase;
+    for (part, mut text, mut tint) in &mut phases {
+        let (label, color) = match part {
+            BossPhase::Now => {
+                let (label, color) = phase_label(prism.phase);
+                let alpha = if prism.phase == PrismPhase::Exposed { throb } else { 1.0 };
+                (label, color.with_alpha(alpha))
+            }
+            BossPhase::Arrow => (">", if shifting { hud::DIM } else { Color::NONE }),
+            BossPhase::Next => {
+                let (label, color) = phase_label(prism.next);
+                (if shifting { label } else { "" }, if blink { color } else { color.with_alpha(0.4) })
+            }
+        };
+        if text.0 != label {
+            text.0 = label.into();
+        }
+        tint.set_if_neq(TextColor(color));
+    }
 }

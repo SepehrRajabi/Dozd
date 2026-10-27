@@ -945,8 +945,11 @@ fn move_enemies(
         }
 
         let new = grid.slide(pos, velocity * dt, Vec2::splat(stats.half));
-        transform.translation.x = new.x;
-        transform.translation.y = new.y;
+        // Pinned against a wall it goes nowhere: leave the transform be.
+        if new != pos {
+            transform.translation.x = new.x;
+            transform.translation.y = new.y;
+        }
     }
 }
 

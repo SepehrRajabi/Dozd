@@ -747,8 +747,13 @@ fn use_abilities(
         let health = &*health;
         // Overclock speeds up the recharge, not the effect.
         let rate = boons.cooldown_rate();
-        ability.cooldown = (ability.cooldown - dt * rate).max(0.0);
-        ability.active = (ability.active - dt).max(0.0);
+        // Only ticked while running, so a ready ability isn't resent every frame.
+        if ability.cooldown > 0.0 {
+            ability.cooldown = (ability.cooldown - dt * rate).max(0.0);
+        }
+        if ability.active > 0.0 {
+            ability.active = (ability.active - dt).max(0.0);
+        }
         let Some(active) = player.active else { continue };
         let Some(stats) = active.stats() else { continue };
         let pos = transform.translation.truncate();
@@ -756,7 +761,7 @@ fn use_abilities(
         // The riot shield toggles, running on its charge rather than a cooldown.
         if active == Active::RiotShield {
             let raised = riot_shields.iter().find(|(_, s)| s.owner == player.owner).map(|(e, _)| e);
-            if raised.is_none() {
+            if raised.is_none() && ability.charge < RIOT_LIFE {
                 ability.charge = (ability.charge + dt * rate * RIOT_LIFE / RIOT_RECHARGE).min(RIOT_LIFE);
             }
             if !controls.ability || !can_act(player, health) {
@@ -1670,7 +1675,7 @@ fn update_ability_hud(
     if text.0 != label {
         text.0 = label;
     }
-    text_color.0 = label_color;
+    text_color.set_if_neq(TextColor(label_color));
 }
 
 #[cfg(test)]

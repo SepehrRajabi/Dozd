@@ -1,20 +1,24 @@
 //! The vault's guardians: a hulking boss waiting in every sealed vault room
-//! (see `breach.rs`), one of three kinds taking turns down the decks. The vault
+//! (see `breach.rs`), one of four kinds taking turns down the decks. The vault
 //! keeper fights with two floating hands, each sweeping lasers and hurling
 //! nova orbs; badly hurt, it enrages and both hands attack together. The
 //! vault stalker crouches showing several routes it might lunge along (one
 //! through up to three pirates in a row), then takes one at random; now and
 //! then it rampages instead, dashing wall to wall across the room again and
 //! again. The vault brute plods after the crew and slams whoever it reaches,
-//! and keeps roaring for guards to do its fighting for it. Each one further
-//! down is tougher and hits harder (see `might`).
+//! and keeps roaring for guards to do its fighting for it. The vault prism,
+//! the beefiest, shifts phases: exposed, then an aegis negating every sort of
+//! damage, exposed again, then a mirror sending the crew's shots, grenades and
+//! orbs back at them; enraged, it goes in and out of both at once. It blinks
+//! anywhere in its room in a moment and lashes the nearest of the crew with
+//! arcs. Each one further down is tougher and hits harder (see `might`).
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::class::{HACK_COLOR, RiotShield};
-use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Team, fx, hits_shield, shield_between, shield_covers, shield_outlines};
+use crate::combat::{FxKind, Health, Hurtbox, Knockback, ProjectileLook, Reflector, Team, fx, hits_shield, shield_between, shield_covers, shield_outlines};
 use crate::drops::{EnemyDrop, pick_ammo, spawn_drops};
 use crate::enemies::{Enemy, EnemyKind, Summoned, spawn_summoned, whiffs};
 use crate::guns::Arsenal;
@@ -220,10 +224,60 @@ const SUMMON_SPREAD: f32 = 22.0;
 /// A summoned guard's collision half-extent, for keeping it out of walls: the biggest guard's.
 const SUMMON_HALF: f32 = 6.0;
 
+/// The Vault Prism's phases: calm, it holds each guard (aegis or mirror, in
+/// turn) this long, with `PRISM_EXPOSED_TIME` exposed between them.
+pub const PRISM_GUARD_TIME: f32 = 4.0;
+pub const PRISM_EXPOSED_TIME: f32 = 4.5;
+/// Enraged, it goes in and out of both guards at once: this long in both,
+/// then this long exposed.
+pub const PRISM_BOTH_TIME: f32 = 3.5;
+pub const PRISM_ENRAGED_EXPOSED_TIME: f32 = 3.0;
+/// For this long before each shift, `PrismLook::next` shows what's coming.
+pub const PRISM_WARN: f32 = 0.8;
+/// Seconds a blink takes, from vanishing to reappearing at `PrismLook::warp`.
+pub const PRISM_BLINK_TIME: f32 = 0.3;
+/// Seconds between blinks, plus up to `BLINK_JITTER` more; it also blinks as
+/// each guard goes up.
+const BLINK_GAP: f32 = 3.5;
+const ENRAGED_BLINK_GAP: f32 = 2.4;
+const BLINK_JITTER: f32 = 0.8;
+/// A pirate this close sends it blinking away, at most every `DODGE_GAP` seconds.
+const DODGE_NEAR: f32 = 30.0;
+const DODGE_GAP: f32 = 1.2;
+/// It reappears at least `BLINK_CLEAR` from every pirate and `BLINK_MIN` from
+/// where it was. With odds `BLINK_HUNT` it first looks for a spot within
+/// `LASH_SPOT` of its arcs' reach of a pirate it would see, to lash them;
+/// it gives up after `BLINK_TRIES` spots each way and stays put.
+const BLINK_CLEAR: f32 = 40.0;
+const BLINK_MIN: f32 = 60.0;
+const BLINK_HUNT: f32 = 0.6;
+const LASH_SPOT: f32 = 0.8;
+const BLINK_TRIES: usize = 48;
+/// Otherwise it hardly moves: a slow drift toward the nearest pirate it can
+/// see once they're past `PRISM_DRIFT_FROM` of its arcs' reach.
+const PRISM_DRIFT: f32 = 8.0;
+const PRISM_DRIFT_FROM: f32 = 0.7;
+/// Seconds between its arcs; it gathers each for `prism_arc_charge` first.
+const PRISM_ARC_GAP: f32 = 1.1;
+const ENRAGED_PRISM_ARC_GAP: f32 = 0.8;
+/// Each arc's damage to each of the nearest `PRISM_ARC_TARGETS` in reach (not
+/// shared out, unlike the Arc Coil's), and how hard it throws them.
+pub const PRISM_ARC_HIT: f32 = 14.0;
+const PRISM_ARC_TARGETS: usize = 3;
+const ENRAGED_PRISM_ARC_TARGETS: usize = 4;
+const PRISM_ARC_KNOCKBACK: f32 = 60.0;
+/// Seconds it gathers each arc before it lashes out (see `prism_arc_charge`).
+const PRISM_ARC_CHARGE: f32 = 0.35;
+const ENRAGED_PRISM_ARC_CHARGE: f32 = 0.25;
+
 /// Credit drops it leaves behind, sharing its bounty, and ammo boxes.
 const BOUNTY_DROPS: u32 = 10;
 const BOUNTY_AMMO: u32 = 2;
 pub const KEEPER_COLOR: Color = Color::srgb(1.0, 0.3, 0.5);
+/// The Vault Prism's cold crystal light: its arcs, blinks and reflected shots.
+pub const PRISM_COLOR: Color = Color::srgb(0.6, 0.85, 1.0);
+/// How far the Vault Prism's arcs reach.
+pub const PRISM_ARC_RANGE: f32 = 110.0;
 
 pub struct BossPlugin;
 
@@ -231,7 +285,7 @@ impl Plugin for BossPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (drive_keeper, drive_stalker, drive_brute, move_keeper_orbs, keeper_deaths)
+            (drive_keeper, drive_stalker, drive_brute, drive_prism, move_keeper_orbs, keeper_deaths)
                 .chain()
                 .run_if(in_state(GameState::Playing))
                 .run_if(authority),
@@ -289,13 +343,18 @@ pub enum KeeperKind {
     /// A beefy, buffed-up brute: melee only, it has to get up close to slam,
     /// and keeps calling in guards to do its fighting for it.
     Brute,
+    /// A very beefy crystal that shifts between phases (see `PrismPhase`):
+    /// negating all damage, or sending the crew's shots back at them. It
+    /// blinks anywhere in its room in a moment and lashes the crew with arcs.
+    Prism,
 }
 
 impl KeeperKind {
-    pub const ALL: [KeeperKind; 3] = [Self::Hands, Self::Stalker, Self::Brute];
+    pub const ALL: [KeeperKind; 4] = [Self::Hands, Self::Stalker, Self::Brute, Self::Prism];
 
     /// The guardian of `deck`'s vault in the heist from `seed`. The kinds take
-    /// turns down the decks, so a heist meets each of them once.
+    /// turns down the decks, so a heist's three decks meet three different
+    /// ones, and which one it misses changes from seed to seed.
     pub fn pick(seed: u32, deck: u8) -> Self {
         Self::ALL[(seed as usize + deck as usize) % Self::ALL.len()]
     }
@@ -305,6 +364,7 @@ impl KeeperKind {
             Self::Hands => KEEPER_NAME,
             Self::Stalker => "VAULT STALKER",
             Self::Brute => "VAULT BRUTE",
+            Self::Prism => "VAULT PRISM",
         }
     }
 
@@ -314,6 +374,7 @@ impl KeeperKind {
             Self::Hands => "BOSS - RANGED",
             Self::Stalker => "BOSS - MELEE",
             Self::Brute => "BOSS - SUMMONER",
+            Self::Prism => "BOSS - SHIFTER",
         }
     }
 
@@ -323,6 +384,7 @@ impl KeeperKind {
             Self::Hands => "Guards a vault. Two floating hands sweep lasers and hurl nova orbs; badly hurt, both attack at once.",
             Self::Stalker => "Guards a vault. Shows several ways it might lunge, then takes one at random: get off them all. Sometimes rampages wall to wall instead. Riot shields stop it.",
             Self::Brute => "Guards a vault. A beefy brute that slams whoever it reaches, and keeps calling in guards to fight for it.",
+            Self::Prism => "Guards a vault. Shifts between negating all damage and reflecting every shot back; hit it while it's exposed. Blinks anywhere in a moment and lashes the crew with arcs.",
         }
     }
 
@@ -331,6 +393,7 @@ impl KeeperKind {
             Self::Hands => "sprites/boss/keeper.png",
             Self::Stalker => "sprites/boss/stalker.png",
             Self::Brute => "sprites/boss/brute.png",
+            Self::Prism => "sprites/boss/prism.png",
         }
     }
 }
@@ -393,6 +456,7 @@ fn keeper_health(kind: KeeperKind, tier: VaultTier, crew: usize) -> f32 {
         KeeperKind::Hands => 1800.0,
         KeeperKind::Stalker => 2400.0,
         KeeperKind::Brute => 3000.0,
+        KeeperKind::Prism => 3600.0,
     };
     base * might(tier).health * (0.4 + 0.6 * crew.max(1) as f32)
 }
@@ -490,6 +554,65 @@ pub struct BruteLook {
     pub summons: Vec<Vec2>,
 }
 
+/// How a Vault Prism is guarding itself, for the crew's weapons, the view and the bots.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrismPhase {
+    /// Open to everything: the crew's window to hurt it.
+    Exposed,
+    /// Negates every sort of damage.
+    Aegis,
+    /// Sends the crew's shots, grenades and orbs back at them; anything else
+    /// (arcs, blows, mines, fields) still hurts it.
+    Mirror,
+    /// Enraged only: negating and reflecting at once.
+    Both,
+}
+
+impl PrismPhase {
+    /// Nothing hurts it.
+    pub fn negates(self) -> bool {
+        matches!(self, Self::Aegis | Self::Both)
+    }
+
+    /// The crew's shots, grenades and orbs bounce back off it.
+    pub fn reflects(self) -> bool {
+        matches!(self, Self::Mirror | Self::Both)
+    }
+}
+
+/// Beside a Vault Prism's `Keeper`: how it's guarding itself, what it's about
+/// to do, and where it's blinking to. Replicated.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct PrismLook {
+    pub phase: PrismPhase,
+    /// The phase it shifts into next: differs from `phase` only for the
+    /// moment before it shifts, as a warning.
+    pub next: PrismPhase,
+    /// While it blinks out, where it'll reappear. `None` otherwise.
+    pub warp: Option<Vec2>,
+    /// Gathering an arc: it lashes out when this ends.
+    pub charging: bool,
+}
+
+/// Seconds a Vault Prism gathers each arc (`PrismLook::charging`) before it
+/// lashes out.
+pub fn prism_arc_charge(enraged: bool) -> f32 {
+    if enraged { ENRAGED_PRISM_ARC_CHARGE } else { PRISM_ARC_CHARGE }
+}
+
+/// The phase a Vault Prism shifts into after `phase`, and how long it holds
+/// it. Calm, it puts up aegis and mirror in turn (`last` is the guard it put
+/// up last), exposed between; enraged, both at once, exposed between.
+fn prism_shift(phase: PrismPhase, last: PrismPhase, enraged: bool) -> (PrismPhase, f32) {
+    match (phase, enraged) {
+        (PrismPhase::Exposed, true) => (PrismPhase::Both, PRISM_BOTH_TIME),
+        (_, true) => (PrismPhase::Exposed, PRISM_ENRAGED_EXPOSED_TIME),
+        (PrismPhase::Exposed, false) if last == PrismPhase::Aegis => (PrismPhase::Mirror, PRISM_GUARD_TIME),
+        (PrismPhase::Exposed, false) => (PrismPhase::Aegis, PRISM_GUARD_TIME),
+        (_, false) => (PrismPhase::Exposed, PRISM_EXPOSED_TIME),
+    }
+}
+
 /// A hand's laser: a warning line while it aims, then the burning beam, from
 /// `from` along `dir` until the first wall (or riot shield) `length` away.
 /// Replicated.
@@ -579,8 +702,27 @@ struct BruteBrain {
     velocity: Vec2,
 }
 
+/// Host only: the vault prism's hidden side; what it's doing is its `PrismLook`.
+#[derive(Component)]
+struct PrismBrain {
+    /// Seconds into its current phase, and how long that lasts.
+    timer: f32,
+    span: f32,
+    /// The guard it put up last: calm, the next is the other.
+    last_guard: PrismPhase,
+    /// Seconds until it blinks again, and until a pirate close by may send it
+    /// blinking away.
+    blink_cd: f32,
+    dodge_cd: f32,
+    /// Seconds into the blink under way, while `PrismLook::warp` is set.
+    blink: f32,
+    /// Seconds until it may gather its next arc, and into gathering it.
+    arc_cd: f32,
+    charge: f32,
+}
+
 /// Host only: puts the sleeping guardian of `deck`'s vault at `pos`: the
-/// keeper with its two hands, the stalker, or the brute.
+/// keeper with its two hands, the stalker, the brute or the prism.
 pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKind) {
     let tier = VaultTier::for_deck(deck);
     let body = commands
@@ -609,6 +751,24 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
                 rampaged: false,
             },
             StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), lane: None },
+        ));
+        return;
+    }
+    if kind == KeeperKind::Prism {
+        let phase = PrismPhase::Exposed;
+        commands.entity(body).insert((
+            PrismBrain {
+                timer: 0.0,
+                span: PRISM_EXPOSED_TIME,
+                last_guard: PrismPhase::Mirror,
+                blink_cd: BLINK_GAP,
+                dodge_cd: 0.0,
+                blink: 0.0,
+                arc_cd: WAKE_PAUSE,
+                charge: 0.0,
+            },
+            PrismLook { phase, next: phase, warp: None, charging: false },
+            Reflector { active: false, color: PRISM_COLOR },
         ));
         return;
     }
@@ -923,6 +1083,49 @@ fn slam_angle(rng: &mut Rng, last: Option<f32>) -> f32 {
 /// Whether a slam landing at `at` reaches someone at `victim` with a hurtbox of `hurtbox`.
 fn slam_reaches(at: Vec2, victim: Vec2, hurtbox: f32) -> bool {
     victim.distance(at) <= BRUTE_SLAM_RADIUS + hurtbox
+}
+
+/// Where a Vault Prism at `pos` blinks to on the room floor `room`: a spot
+/// `open` says it fits, at least `BLINK_CLEAR` from every pirate at `crew`
+/// and `BLINK_MIN` from where it is, in whole pixels. Mostly (`BLINK_HUNT`)
+/// it looks first for one within lashing reach of a pirate it `sees` from
+/// there. `None` if it finds nowhere.
+fn blink_spot(room: Rect, pos: Vec2, crew: &[Vec2], open: impl Fn(Vec2) -> bool, sees: impl Fn(Vec2, Vec2) -> bool, rng: &mut Rng) -> Option<Vec2> {
+    let half = Vec2::splat(KEEPER_HALF);
+    let floor = Rect { min: room.min + half, max: room.max - half };
+    if floor.width() <= 0.0 || floor.height() <= 0.0 {
+        return None;
+    }
+    let fits = |p: Vec2| floor.contains(p) && open(p) && p.distance(pos) >= BLINK_MIN && crew.iter().all(|c| c.distance(p) >= BLINK_CLEAR);
+    let lash = LASH_SPOT * PRISM_ARC_RANGE;
+    if !crew.is_empty() && rng.unit() < BLINK_HUNT {
+        for _ in 0..BLINK_TRIES {
+            let target = crew[roll(rng, crew.len())];
+            let dir = Vec2::from_angle(rng.unit() * std::f32::consts::TAU);
+            let p = (target + dir * (BLINK_CLEAR + rng.unit() * (lash - BLINK_CLEAR))).clamp(floor.min, floor.max).round();
+            if fits(p) && p.distance(target) <= lash && sees(p, target) {
+                return Some(p);
+            }
+        }
+    }
+    for _ in 0..BLINK_TRIES {
+        let p = Vec2::new(floor.min.x.lerp(floor.max.x, rng.unit()), floor.min.y.lerp(floor.max.y, rng.unit())).round();
+        if fits(p) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Keeps a Vault Prism's defences in step with `phase`, touching them only
+/// when they change (its `Health` is replicated).
+fn prism_guard(health: &mut Mut<Health>, mirror: &mut Mut<Reflector>, phase: PrismPhase) {
+    if health.negating != phase.negates() {
+        health.negating = phase.negates();
+    }
+    if mirror.active != phase.reflects() {
+        mirror.active = phase.reflects();
+    }
 }
 
 /// The most of its guards alive at once, facing `crew` pirates.
@@ -1700,6 +1903,178 @@ fn drive_brute(
     look.set_if_neq(BruteLook { state, at, summons });
 }
 
+/// Wakes, moves and fights the vault prism: it shifts phases (calm, aegis
+/// and mirror in turn with exposed spells between; enraged, both at once in
+/// and out), keeping its `Health::negating` and `Reflector` in step. It blinks
+/// across its room as each guard goes up, every so often, and away from
+/// anyone who gets close, and otherwise barely drifts, gathering arcs and
+/// lashing the nearest of the crew in reach. Riot shields stop its arcs.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn drive_prism(
+    mut commands: Commands,
+    time: Res<Time>,
+    grid: Res<RoomGrid>,
+    mut rng: ResMut<Rng>,
+    mut banner: ResMut<Banner>,
+    mut prisms: Query<(
+        &mut Keeper,
+        &KeeperJam,
+        &mut Health,
+        &mut Transform,
+        &mut Knockback,
+        &mut PrismBrain,
+        &mut PrismLook,
+        &mut Reflector,
+    )>,
+    mut crew: Crew,
+    riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
+) {
+    let Ok((mut keeper, jam, mut health, mut body, mut knockback, mut brain, mut look, mut mirror)) = prisms.single_mut() else { return };
+    let jammed = jam.0;
+    let dt = time.delta_secs();
+    // Nothing pushes it around.
+    if knockback.0 != Vec2::ZERO {
+        knockback.0 = Vec2::ZERO;
+    }
+    if !keeper.awake {
+        let phase = PrismPhase::Exposed;
+        look.set_if_neq(PrismLook { phase, next: phase, warp: None, charging: false });
+        prism_guard(&mut health, &mut mirror, phase);
+        return;
+    }
+    let start = body.translation.truncate();
+    let mut pos = start;
+
+    if !keeper.enraged && health.current <= health.max * ENRAGE_AT {
+        keeper.enraged = true;
+        fx(&mut commands, FxKind::Explosion, pos, 0.0, KEEPER_COLOR);
+        banner.show(format!("THE {} IS ENRAGED", keeper.kind.name()), KEEPER_COLOR, 3.0);
+    }
+    let enraged = keeper.enraged;
+    let power = might(keeper.tier).power;
+    let half = Vec2::splat(KEEPER_HALF);
+    let room = grid.vault_room;
+
+    let mut phase = look.phase;
+    let mut warp = look.warp;
+    let mut charging = look.charging;
+
+    // Shifts once this phase runs out; each guard goes up with a blink.
+    brain.timer += dt;
+    let mut guard_up = false;
+    if brain.timer >= brain.span {
+        let (shift, span) = prism_shift(phase, brain.last_guard, enraged);
+        phase = shift;
+        brain.timer = 0.0;
+        brain.span = span;
+        if phase != PrismPhase::Exposed {
+            brain.last_guard = phase;
+            guard_up = true;
+        }
+        fx(&mut commands, FxKind::Burst, pos, 0.0, PRISM_COLOR);
+    }
+    let next = if brain.span - brain.timer <= PRISM_WARN { prism_shift(phase, brain.last_guard, enraged).0 } else { phase };
+
+    // Every pirate in play, who it blinks clear of (and near).
+    let pirates: Vec<Vec2> = crew
+        .iter()
+        .filter(|(_, team, _, _, health, player, _)| player.is_some() && in_play(team, health, *player))
+        .map(|(_, _, _, t, ..)| t.translation.truncate())
+        .collect();
+
+    brain.blink_cd -= dt;
+    brain.dodge_cd -= dt;
+    if let Some(dest) = warp {
+        brain.blink += dt;
+        if brain.blink >= PRISM_BLINK_TIME {
+            pos = dest;
+            warp = None;
+            fx(&mut commands, FxKind::Burst, dest, 0.0, PRISM_COLOR);
+        }
+    } else {
+        let crowded = brain.dodge_cd <= 0.0 && pirates.iter().any(|p| p.distance(pos) <= DODGE_NEAR);
+        if guard_up || crowded || brain.blink_cd <= 0.0 {
+            brain.blink_cd = if enraged { ENRAGED_BLINK_GAP } else { BLINK_GAP } + rng.unit() * BLINK_JITTER;
+            if crowded {
+                brain.dodge_cd = DODGE_GAP;
+            }
+            let open = |p: Vec2| !grid.collides(p, half);
+            let sees = |a: Vec2, b: Vec2| grid.line_of_sight(a, b);
+            if let Some(dest) = blink_spot(room, pos, &pirates, open, sees, &mut rng) {
+                // Gone in a flash: no arcs while it blinks.
+                warp = Some(dest);
+                brain.blink = 0.0;
+                charging = false;
+                brain.charge = 0.0;
+                fx(&mut commands, FxKind::Burst, pos, 0.0, PRISM_COLOR);
+            }
+        }
+    }
+
+    // Otherwise it barely moves: a slow drift toward the nearest pirate it sees, if far off.
+    if warp.is_none()
+        && let Some(target) = pirates
+            .iter()
+            .filter(|at| at.distance(pos) <= SIGHT && grid.line_of_sight(pos, **at))
+            .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+        && target.distance(pos) > PRISM_DRIFT_FROM * PRISM_ARC_RANGE
+    {
+        pos = in_room(room, half, grid.slide(pos, (*target - pos).normalize_or_zero() * PRISM_DRIFT * dt, half));
+    }
+
+    // Gathers an arc while anyone on the crew's side is in reach, then lashes the nearest few.
+    if warp.is_none() {
+        brain.arc_cd -= dt;
+        let mut in_reach: Vec<(f32, Entity)> = crew
+            .iter()
+            .filter(|(_, team, hurtbox, t, health, player, _)| {
+                let at = t.translation.truncate();
+                in_play(team, health, *player) && at.distance(pos) <= PRISM_ARC_RANGE + hurtbox.0 && grid.line_of_sight(pos, at)
+            })
+            .map(|(e, _, _, t, ..)| (t.translation.truncate().distance(pos), e))
+            .collect();
+        if charging {
+            brain.charge += dt;
+            if brain.charge >= prism_arc_charge(enraged) {
+                charging = false;
+                brain.arc_cd = if enraged { ENRAGED_PRISM_ARC_GAP } else { PRISM_ARC_GAP };
+                in_reach.sort_by(|a, b| a.0.total_cmp(&b.0));
+                in_reach.truncate(if enraged { ENRAGED_PRISM_ARC_TARGETS } else { PRISM_ARC_TARGETS });
+                let shields = shield_outlines(&riot_shields);
+                let held = raised_shields(&riot_shields);
+                for (_, target) in in_reach {
+                    let Ok((_, _, _, t, mut victim, player, victim_knockback)) = crew.get_mut(target) else { continue };
+                    let at = t.translation.truncate();
+                    if shield_between(&shields, pos, at) || covered(&held, player, at, pos) {
+                        fx(&mut commands, FxKind::Spark, at, (at - pos).to_angle(), PRISM_COLOR);
+                        continue;
+                    }
+                    if whiffs(&mut rng, jammed) {
+                        fx(&mut commands, FxKind::Zap(at), pos, 0.0, HACK_COLOR);
+                        continue;
+                    }
+                    if victim.hurt(PRISM_ARC_HIT * power) {
+                        fx(&mut commands, FxKind::Zap(at), pos, 0.0, PRISM_COLOR);
+                        if let Some(mut victim_knockback) = victim_knockback {
+                            victim_knockback.0 += (at - pos).normalize_or_zero() * PRISM_ARC_KNOCKBACK;
+                        }
+                    }
+                }
+            }
+        } else if brain.arc_cd <= 0.0 && !in_reach.is_empty() {
+            charging = true;
+            brain.charge = 0.0;
+        }
+    }
+
+    prism_guard(&mut health, &mut mirror, phase);
+    if pos != start {
+        body.translation.x = pos.x;
+        body.translation.y = pos.y;
+    }
+    look.set_if_neq(PrismLook { phase, next, warp, charging });
+}
+
 /// Drifts the keeper's orbs on, lashing nearby pirates with arcs, and bursts
 /// them on the first wall, pirate or riot shield they meet. Neither arcs nor
 /// bursts reach anyone through a riot shield.
@@ -1717,9 +2092,8 @@ fn move_keeper_orbs(
     let dt = time.delta_secs();
     let shields = shield_outlines(&riot_shields);
     let held = raised_shields(&riot_shields);
+    // They churn in the view, like the crew's nova orbs (see `combat::Spin`).
     'orbs: for (entity, mut orb, mut transform) in &mut orbs {
-        transform.rotate_z(dt * 5.0);
-
         // Lashes the nearest pirate in reach that it can see.
         orb.arc_timer -= dt;
         if orb.arc_timer <= 0.0 {
@@ -1856,6 +2230,7 @@ mod tests {
                 KeeperKind::Hands => 1800.0,
                 KeeperKind::Stalker => 2400.0,
                 KeeperKind::Brute => 3000.0,
+                KeeperKind::Prism => 3600.0,
             };
             assert_eq!(keeper_health(kind, VaultTier::Silver, 1), base);
             assert_eq!(keeper_health(kind, VaultTier::Silver, 0), keeper_health(kind, VaultTier::Silver, 1), "never less than solo");
@@ -1896,11 +2271,18 @@ mod tests {
         for seed in [0, 1, 500, 501] {
             let mut met: Vec<_> = (1..=3).map(|deck| KeeperKind::pick(seed, deck)).collect();
             met.sort_by_key(|k| *k as u8);
-            assert_eq!(met, KeeperKind::ALL, "every heist meets each of them once");
+            met.dedup();
+            assert_eq!(met.len(), 3, "a heist never meets the same one twice");
         }
-        assert_eq!(KeeperKind::pick(0, 3), KeeperKind::Hands);
+        for deck in 1..=3 {
+            let mut met: Vec<_> = (0..4).map(|seed| KeeperKind::pick(seed, deck)).collect();
+            met.sort_by_key(|k| *k as u8);
+            assert_eq!(met, KeeperKind::ALL, "each of them guards every deck in some heist");
+        }
         assert_eq!(KeeperKind::pick(0, 1), KeeperKind::Stalker);
         assert_eq!(KeeperKind::pick(0, 2), KeeperKind::Brute);
+        assert_eq!(KeeperKind::pick(0, 3), KeeperKind::Prism);
+        assert_eq!(KeeperKind::pick(1, 3), KeeperKind::Hands);
     }
 
     #[test]
@@ -2136,5 +2518,309 @@ mod tests {
         assert!((q.length() - 1.0).abs() < 1e-5);
         assert!(q.angle_to(dir).abs() <= AIM_STEP / 2.0 + 1e-5);
         assert_eq!(q, quantize(Vec2::from_angle(0.124), AIM_STEP), "small turns don't change it");
+    }
+
+    #[test]
+    fn prism_takes_turns_guarding_then_goes_in_and_out_of_both() {
+        let cycle = |enraged: bool| {
+            let (mut phase, mut last) = (PrismPhase::Exposed, PrismPhase::Mirror);
+            (0..6)
+                .map(|_| {
+                    let (next, span) = prism_shift(phase, last, enraged);
+                    if next != PrismPhase::Exposed {
+                        last = next;
+                    }
+                    phase = next;
+                    (next, span)
+                })
+                .collect::<Vec<_>>()
+        };
+        use PrismPhase::*;
+        let (guard, open) = (PRISM_GUARD_TIME, PRISM_EXPOSED_TIME);
+        assert_eq!(cycle(false), [(Aegis, guard), (Exposed, open), (Mirror, guard), (Exposed, open), (Aegis, guard), (Exposed, open)]);
+        let (both, open) = (PRISM_BOTH_TIME, PRISM_ENRAGED_EXPOSED_TIME);
+        assert_eq!(cycle(true), [(Both, both), (Exposed, open), (Both, both), (Exposed, open), (Both, both), (Exposed, open)]);
+        // Enraging mid-guard, it drops it and goes on to both.
+        assert_eq!(prism_shift(Mirror, Mirror, true), (Exposed, open));
+        assert!(Aegis.negates() && !Aegis.reflects() && Mirror.reflects() && !Mirror.negates());
+        assert!(Both.negates() && Both.reflects() && !Exposed.negates() && !Exposed.reflects());
+        assert!(prism_arc_charge(true) < prism_arc_charge(false));
+    }
+
+    #[test]
+    fn prism_blinks_onto_open_floor_clear_of_the_crew() {
+        let vault = Rect::new(104.0, 72.0, 136.0, 104.0);
+        let open = |p: Vec2| !vault.inflate(KEEPER_HALF).contains(p);
+        let sees = |_: Vec2, _: Vec2| true;
+        let pos = Vec2::new(60.0, 88.0);
+        let crew = [Vec2::new(70.0, 100.0), Vec2::new(190.0, 50.0)];
+        let mut near = 0;
+        for seed in 1..300 {
+            let mut rng = Rng::new(seed);
+            let p = blink_spot(ROOM, pos, &crew, open, sees, &mut rng).expect("room to blink");
+            assert!(on_floor(p) && open(p) && p == p.round(), "seed {seed}: on open floor, whole pixels");
+            assert!(p.distance(pos) >= BLINK_MIN, "seed {seed}: well away from where it was");
+            assert!(crew.iter().all(|c| c.distance(p) >= BLINK_CLEAR), "seed {seed}: clear of the crew");
+            if crew.iter().any(|c| c.distance(p) <= LASH_SPOT * PRISM_ARC_RANGE) {
+                near += 1;
+            }
+        }
+        assert!(near > 200, "mostly lands within lashing reach of someone: {near}");
+        // Nowhere open, or no floor: it stays put.
+        let mut rng = Rng::new(3);
+        assert_eq!(blink_spot(ROOM, pos, &crew, |_| false, sees, &mut rng), None);
+        assert_eq!(blink_spot(Rect::new(0.0, 0.0, 16.0, 16.0), pos, &[], open, sees, &mut rng), None);
+    }
+
+    mod prism {
+        use std::time::Duration;
+
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::TimeUpdateStrategy;
+
+        use super::*;
+        use crate::class::{Loadout, Loadouts, PirateClass};
+        use crate::combat::{Grenade, Projectile, Reflector, spawn_grenade, spawn_projectile};
+        use crate::net::{HOST_ID, NetMode, StartSession};
+        use crate::player::CrewSize;
+        use crate::room::NextSeed;
+        use crate::GamePlugins;
+
+        const DT: f32 = 1.0 / 60.0;
+
+        /// A solo host whose first vault holds an awake prism, guarding with
+        /// `phase` and keeping it, never blinking nor arcing; no guards about.
+        /// Returns the app, the prism and the pirate.
+        fn prism_in(phase: PrismPhase) -> (App, Entity, Entity) {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, StatesPlugin))
+                .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(DT)))
+                .add_plugins(GamePlugins)
+                .insert_resource(CrewSize(1))
+                .insert_resource(Loadouts([(HOST_ID, Loadout::new(PirateClass::Gunner))].into_iter().collect()))
+                .insert_resource(NextSeed(7))
+                .insert_resource(Rng::new(7));
+            app.world_mut().trigger(StartSession(NetMode::Solo));
+            for _ in 0..5 {
+                app.update();
+            }
+            assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+            let mut old = app.world_mut().query_filtered::<Entity, Or<(With<Keeper>, With<Enemy>)>>();
+            for e in old.iter(app.world()).collect::<Vec<_>>() {
+                app.world_mut().despawn(e);
+            }
+            let at = app.world().resource::<RoomGrid>().gate.keeper;
+            spawn_keeper(&mut app.world_mut().commands(), at, 1, KeeperKind::Prism);
+            app.world_mut().flush();
+            let mut prisms = app.world_mut().query_filtered::<Entity, With<PrismBrain>>();
+            let prism = prisms.single(app.world()).unwrap();
+            let mut pirates = app.world_mut().query_filtered::<Entity, With<Player>>();
+            let pirate = pirates.single(app.world()).unwrap();
+            let mut keeper = *app.world().get::<Keeper>(prism).unwrap();
+            keeper.wake(&mut app.world_mut().get_mut::<Health>(prism).unwrap(), 1);
+            *app.world_mut().get_mut::<Keeper>(prism).unwrap() = keeper;
+            hold(&mut app, prism, phase);
+            app.update();
+            (app, prism, pirate)
+        }
+
+        /// Puts the prism in `phase` for good, blinks and arcs held off.
+        fn hold(app: &mut App, prism: Entity, phase: PrismPhase) {
+            let mut e = app.world_mut().entity_mut(prism);
+            let mut brain = e.get_mut::<PrismBrain>().unwrap();
+            brain.span = 1e6;
+            brain.blink_cd = 1e6;
+            brain.dodge_cd = 1e6;
+            brain.arc_cd = 1e6;
+            e.get_mut::<PrismLook>().unwrap().phase = phase;
+        }
+
+        fn at(app: &App, e: Entity) -> Vec2 {
+            app.world().get::<Transform>(e).unwrap().translation.truncate()
+        }
+
+        fn hp(app: &App, e: Entity) -> f32 {
+            let h = app.world().get::<Health>(e).unwrap();
+            h.current + h.shield
+        }
+
+        /// An open spot `distance` from the prism, in sight of it, and which way that is.
+        fn beside(app: &App, prism: Entity, distance: f32) -> (Vec2, Vec2) {
+            let grid = app.world().resource::<RoomGrid>();
+            let from = at(app, prism);
+            (0..16)
+                .map(|i| Vec2::from_angle(i as f32 / 16.0 * std::f32::consts::TAU))
+                .map(|dir| (from + dir * distance, dir))
+                .find(|(p, _)| !grid.collides(*p, Vec2::splat(KEEPER_HALF)) && grid.line_of_sight(from, *p) && grid.in_vault_room(*p))
+                .expect("open floor beside it")
+        }
+
+        fn place(app: &mut App, e: Entity, p: Vec2) {
+            let mut t = app.world_mut().get_mut::<Transform>(e).unwrap();
+            t.translation.x = p.x;
+            t.translation.y = p.y;
+        }
+
+        fn shoot(app: &mut App, from: Vec2, dir: Vec2) {
+            let shot = Projectile {
+                team: Team::Player,
+                owner: Some(HOST_ID),
+                velocity: dir * 200.0,
+                remaining: 300.0,
+                damage: 30.0,
+                knockback: 0.0,
+                pierce: false,
+                color: Color::WHITE,
+                hits: Vec::new(),
+                ricochet: 0.0,
+            };
+            spawn_projectile(&mut app.world_mut().commands(), shot, ProjectileLook::CyanBolt, from);
+            app.world_mut().flush();
+        }
+
+        fn shots(app: &mut App) -> Vec<(Team, Vec2, Color, f32)> {
+            let mut q = app.world_mut().query::<&Projectile>();
+            q.iter(app.world()).map(|p| (p.team, p.velocity, p.color, p.damage)).collect()
+        }
+
+        #[test]
+        fn aegis_negates_shots_and_every_blow() {
+            let (mut app, prism, pirate) = prism_in(PrismPhase::Aegis);
+            assert!(app.world().get::<Health>(prism).unwrap().negating);
+            let (far, _) = beside(&app, prism, 120.0);
+            place(&mut app, pirate, far);
+            let (spot, dir) = beside(&app, prism, 30.0);
+            let full = hp(&app, prism);
+            shoot(&mut app, spot, -dir);
+            for _ in 0..20 {
+                app.update();
+            }
+            assert_eq!(hp(&app, prism), full, "the shot did nothing");
+            assert!(shots(&mut app).is_empty(), "and stopped dead against it");
+            assert!(!app.world_mut().get_mut::<Health>(prism).unwrap().hurt(500.0), "nor does anything else");
+            assert_eq!(hp(&app, prism), full);
+
+            // Exposed again, it hurts.
+            hold(&mut app, prism, PrismPhase::Exposed);
+            app.update();
+            assert!(!app.world().get::<Health>(prism).unwrap().negating);
+            assert!(app.world_mut().get_mut::<Health>(prism).unwrap().hurt(50.0));
+            assert_eq!(hp(&app, prism), full - 50.0);
+        }
+
+        #[test]
+        fn mirror_sends_shots_back_at_the_crew() {
+            let (mut app, prism, pirate) = prism_in(PrismPhase::Mirror);
+            assert!(app.world().get::<Reflector>(prism).unwrap().active);
+            let (spot, dir) = beside(&app, prism, 60.0);
+            place(&mut app, pirate, spot);
+            let full = hp(&app, prism);
+            let crew_full = hp(&app, pirate);
+            let muzzle = at(&app, prism) + dir * 30.0;
+            shoot(&mut app, muzzle, -dir);
+            let mut sent_back = false;
+            for _ in 0..40 {
+                app.update();
+                if let Some((_, velocity, color, damage)) = shots(&mut app).into_iter().find(|s| s.0 == Team::Enemy) {
+                    assert!(velocity.normalize().dot(dir) > 0.9, "heading back the way it came");
+                    assert_eq!(color, PRISM_COLOR);
+                    assert!((damage - 30.0 * crate::combat::REFLECT_DAMAGE).abs() < 1e-4);
+                    sent_back = true;
+                }
+            }
+            assert!(sent_back, "the shot came back hostile");
+            assert_eq!(hp(&app, prism), full, "and didn't hurt it");
+            assert!(hp(&app, pirate) < crew_full, "but did hurt the pirate");
+
+            // Anything but a shot still hurts it.
+            assert!(app.world_mut().get_mut::<Health>(prism).unwrap().hurt(50.0));
+            assert_eq!(hp(&app, prism), full - 50.0);
+
+            // A grenade landing by it is lobbed back at the crew.
+            let (far, _) = beside(&app, prism, 90.0);
+            place(&mut app, pirate, far);
+            let target = at(&app, prism) + dir * 8.0;
+            let grenade = Grenade {
+                team: Team::Player,
+                owner: Some(HOST_ID),
+                from: far,
+                to: target,
+                age: 0.0,
+                flight: 0.3,
+                damage: 40.0,
+                radius: 20.0,
+                knockback: 0.0,
+                color: Color::WHITE,
+            };
+            spawn_grenade(&mut app.world_mut().commands(), grenade);
+            app.world_mut().flush();
+            let hurt = hp(&app, prism);
+            for _ in 0..25 {
+                app.update();
+            }
+            let mut grenades = app.world_mut().query::<&Grenade>();
+            let back = grenades.single(app.world()).expect("still in the air");
+            assert_eq!((back.team, back.owner, back.to), (Team::Enemy, None, far), "on its way back at the pirate");
+            assert_eq!(hp(&app, prism), hurt, "without going off on it");
+        }
+
+        #[test]
+        fn arcs_lash_the_crew_in_reach_weaker_than_an_arc_coil() {
+            let (mut app, prism, pirate) = prism_in(PrismPhase::Exposed);
+            let (spot, _) = beside(&app, prism, 60.0);
+            place(&mut app, pirate, spot);
+            app.world_mut().get_mut::<PrismBrain>(prism).unwrap().arc_cd = 0.0;
+            let blow = PRISM_ARC_HIT * might(app.world().get::<Keeper>(prism).unwrap().tier).power;
+            let mut last = hp(&app, pirate);
+            let mut hits = 0;
+            for _ in 0..(1.5 / DT) as usize {
+                app.update();
+                let now = hp(&app, pirate);
+                if now < last - 0.01 {
+                    hits += 1;
+                    let took = last - now;
+                    assert!((took - blow).abs() < 1e-3, "each arc hits for {blow}, not {took}");
+                    assert!(took < 40.0, "less than the Arc Coil's 40");
+                }
+                last = now;
+                // Kept in place.
+                place(&mut app, pirate, spot);
+            }
+            assert!(hits >= 1, "lashed at least once in 1.5 s");
+
+            // Out of reach, it gathers nothing.
+            let (far, _) = beside(&app, prism, PRISM_ARC_RANGE + 40.0);
+            for frame in 0..(2.0 / DT) as usize {
+                place(&mut app, pirate, far);
+                app.update();
+                // Any arc it was already gathering goes off first.
+                if frame < 30 {
+                    continue;
+                }
+                assert!(!app.world().get::<PrismLook>(prism).unwrap().charging);
+            }
+        }
+
+        #[test]
+        fn blinks_away_inside_its_room() {
+            let (mut app, prism, pirate) = prism_in(PrismPhase::Exposed);
+            let (spot, _) = beside(&app, prism, 20.0);
+            place(&mut app, pirate, spot);
+            let from = at(&app, prism);
+            app.world_mut().get_mut::<PrismBrain>(prism).unwrap().dodge_cd = 0.0;
+            app.update();
+            let warp = app.world().get::<PrismLook>(prism).unwrap().warp.expect("blinking away from a pirate so close");
+            assert_eq!(at(&app, prism), from, "still there mid-blink");
+            for _ in 0..(PRISM_BLINK_TIME / DT) as usize + 2 {
+                place(&mut app, pirate, spot);
+                app.update();
+            }
+            let to = at(&app, prism);
+            assert!(to.distance(warp) < 1.0, "reappeared where it showed (give or take its drift)");
+            assert!(app.world().get::<PrismLook>(prism).unwrap().warp.is_none());
+            let grid = app.world().resource::<RoomGrid>();
+            assert!(grid.in_vault_room(to) && !grid.collides(to, Vec2::splat(KEEPER_HALF)), "on open floor in its room");
+            assert!(to.distance(spot) >= BLINK_CLEAR && to.distance(from) >= BLINK_MIN);
+        }
     }
 }

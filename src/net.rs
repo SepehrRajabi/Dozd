@@ -4,13 +4,14 @@ use std::time::SystemTime;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon_renet::netcode::{
-    ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig,
+    ClientAuthentication, ConnectToken, NETCODE_KEY_BYTES, NetcodeClientTransport, NetcodeDisconnectReason,
+    NetcodeServerTransport, ServerAuthentication, ServerConfig, generate_random_bytes,
 };
 use bevy_replicon_renet::renet::ConnectionConfig;
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 use serde::{Deserialize, Serialize};
 
-use crate::boss::{BruteLook, Keeper, KeeperBeam, KeeperHand, StalkerLook};
+use crate::boss::{BruteLook, Keeper, KeeperBeam, KeeperHand, PrismLook, StalkerLook};
 use crate::breach::Breach;
 use crate::challenge::{Challenge, Rewards};
 use crate::class::{Ability, Boons, Laser, LeechMine, Loadout, PirateClass, RiotShield, Sentry};
@@ -34,16 +35,98 @@ const MAX_CLIENTS: usize = PirateClass::ALL.len() - 1;
 const CONNECT_TIMEOUT: f32 = 10.0;
 /// Player id of the host (or solo player); joining clients get random non-zero ids.
 pub const HOST_ID: u64 = 0;
+/// What every connect token lists after the address the joiner really dials,
+/// and all a host claims as its public address. Netcode only lets in a token
+/// naming one of the host's public addresses, but behind NAT a host can't know
+/// the address its crew dials, so both sides name this stand-in instead. It's
+/// in TEST-NET-1 (RFC 5737), where nothing answers: a joiner that ever falls
+/// back to it (netcode tries a token's addresses in turn) just times out.
+const SENTINEL: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45)), 0xD02D);
+/// How long a joiner's connect token is good for. Generous, as the host checks
+/// it against its own clock, which may be off from the joiner's.
+const TOKEN_LIFE: u64 = 7 * 24 * 60 * 60;
+/// Seconds of silence before netcode drops a connection.
+const TOKEN_TIMEOUT: i32 = 15;
+/// Rounds of mixing that turn a room code into a key (see `room_key`).
+const KEY_ROUNDS: u32 = 1 << 20;
 
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub enum NetMode {
     Solo,
-    Host { port: u16 },
-    Join { addr: SocketAddr },
+    /// Hosting on `port`; joiners need the room `code` (see `room_code`).
+    Host { port: u16, code: String },
+    /// Joining the host at `addr` with its room `code`, as `parse_code` leaves it.
+    Join { addr: SocketAddr, code: String },
+}
+
+/// The letters a room code is made of: no 0/O, 1/I/L to mix up.
+const CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+/// How many letters a room code has.
+pub const CODE_LEN: usize = 8;
+
+/// A fresh random room code for a host to hand its crew, e.g. `K7QF29XA`.
+pub fn room_code() -> String {
+    generate_random_bytes::<CODE_LEN>()
+        .iter()
+        .map(|b| CODE_ALPHABET[*b as usize % CODE_ALPHABET.len()] as char)
+        .collect()
+}
+
+/// A room code as typed: any case, with or without dashes and spaces.
+pub fn parse_code(raw: &str) -> Result<String, String> {
+    let code: String = raw.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
+    if code.is_empty() {
+        Err("enter the host's room code".into())
+    } else if code.len() == CODE_LEN && code.bytes().all(|b| CODE_ALPHABET.contains(&b)) {
+        Ok(code)
+    } else {
+        Err(format!("`{raw}` isn't a room code: ask the host for theirs ({CODE_LEN} letters and digits)"))
+    }
+}
+
+/// A room code split in two for reading out, e.g. `K7QF-29XA`.
+pub fn show_code(code: &str) -> String {
+    let (a, b) = code.split_at(code.len() / 2);
+    format!("{a}-{b}")
+}
+
+/// The netcode key a room code stands for, the same on every machine: the host
+/// encrypts with it and joiners sign their connect tokens with it, so only
+/// those who know the code get in or can read the traffic.
+///
+/// The code is the whole secret; `PROTOCOL_ID` only keeps keys apart between
+/// versions. Its 8 letters from 31 carry about 40 bits, plenty against a
+/// stranger guessing, and `KEY_ROUNDS` of mixing make each guess cost a few
+/// milliseconds for someone trying every code against a captured handshake,
+/// but it's no match for a determined attacker: a fresh code every session
+/// keeps what they could learn short-lived.
+pub fn room_key(code: &str) -> [u8; NETCODE_KEY_BYTES] {
+    // SplitMix64's finaliser: every input bit flips about half the output bits.
+    fn mix(mut x: u64) -> u64 {
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    }
+    let mut lanes = [PROTOCOL_ID, 0x9E37_79B9_7F4A_7C15, 0x6A09_E667_F3BC_C908, 0xBB67_AE85_84CA_A73B];
+    for (i, b) in code.bytes().enumerate() {
+        let lane = i % lanes.len();
+        lanes[lane] = mix(lanes[lane] ^ u64::from(b) ^ ((i as u64) << 8));
+    }
+    for round in 0..KEY_ROUNDS {
+        for i in 0..lanes.len() {
+            let next = lanes[(i + 1) % lanes.len()];
+            lanes[i] = mix(lanes[i] ^ next.rotate_left(17) ^ u64::from(round));
+        }
+    }
+    let mut key = [0; NETCODE_KEY_BYTES];
+    for (chunk, lane) in key.as_chunks_mut::<8>().0.iter_mut().zip(lanes) {
+        *chunk = lane.to_le_bytes();
+    }
+    key
 }
 
 impl NetMode {
-    /// `dozd` | `dozd host [port]` | `dozd join <address>`; `None` means show the menu.
+    /// `dozd` | `dozd host [port]` | `dozd join <address> <room code>`; `None` means show the menu.
     pub fn from_args() -> Result<Option<Self>, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(String::as_str) {
@@ -54,14 +137,16 @@ impl NetMode {
                     Some(p) => parse_port(p)?,
                     None => DEFAULT_PORT,
                 };
-                Ok(Some(Self::Host { port }))
+                Ok(Some(Self::Host { port, code: room_code() }))
             }
             Some("join") => {
-                let raw = args.get(1).ok_or("usage: dozd join <ip or hostname>[:port]")?;
-                Ok(Some(Self::Join { addr: resolve(raw)? }))
+                const USAGE: &str = "usage: dozd join <ip or hostname>[:port] <room code>";
+                let raw = args.get(1).ok_or(USAGE)?;
+                let code = parse_code(args.get(2).ok_or(USAGE)?)?;
+                Ok(Some(Self::Join { addr: resolve(raw)?, code }))
             }
             Some(other) => Err(format!(
-                "unknown mode `{other}`\nusage: dozd [solo | host [port] | join <address>]"
+                "unknown mode `{other}`\nusage: dozd [solo | host [port] | join <address> <room code>]"
             )),
         }
     }
@@ -207,6 +292,7 @@ impl Plugin for NetPlugin {
             .replicate::<KeeperBeam>()
             .replicate::<StalkerLook>()
             .replicate::<BruteLook>()
+            .replicate::<PrismLook>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)
@@ -234,37 +320,50 @@ fn start_session(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
 
-    let result: Result<u64, String> = match mode {
+    let result: Result<u64, String> = match &mode {
         NetMode::Solo => Ok(HOST_ID),
-        NetMode::Host { port } => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
-            .map_err(|e| format!("couldn't host on port {port}: {e}"))
-            .and_then(|socket| {
+        NetMode::Host { port, code } => parse_code(code)
+            .and_then(|code| {
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, *port))
+                    .map_err(|e| format!("couldn't host on port {port}: {e}"))?;
                 let config_server = ServerConfig {
                     current_time: now,
                     max_clients: MAX_CLIENTS,
                     protocol_id: PROTOCOL_ID,
-                    authentication: ServerAuthentication::Unsecure,
-                    public_addresses: Default::default(),
+                    authentication: ServerAuthentication::Secure { private_key: room_key(&code) },
+                    // Joiners' tokens name the sentinel, whatever address they dial.
+                    public_addresses: vec![SENTINEL],
                 };
                 NetcodeServerTransport::new(config_server, socket).map_err(|e| e.to_string())
             })
             .map(|transport| {
                 commands.insert_resource(RenetServer::new(config()));
                 commands.insert_resource(transport);
-                info!("hosting on UDP port {port}");
+                // Printed too, for whoever started the host from a terminal.
+                println!("hosting on UDP port {port}, room code {}", show_code(code));
+                info!("hosting on UDP port {port}, room code {}", show_code(code));
                 HOST_ID
             }),
-        NetMode::Join { addr } => {
-            let id = (now.as_nanos() as u64).max(1);
-            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-                .map_err(|e| e.to_string())
-                .and_then(|socket| {
-                    let authentication = ClientAuthentication::Unsecure {
-                        client_id: id,
-                        protocol_id: PROTOCOL_ID,
-                        server_addr: addr,
-                        user_data: None,
-                    };
+        NetMode::Join { addr, code } => {
+            // Random, with the top bit set: well clear of the host's own ids
+            // (`HOST_ID` and up), which the host refuses anyway.
+            let id = u64::from_le_bytes(generate_random_bytes()) | 1 << 63;
+            parse_code(code)
+                .and_then(|code| {
+                    let token = ConnectToken::generate(
+                        now,
+                        PROTOCOL_ID,
+                        TOKEN_LIFE,
+                        id,
+                        TOKEN_TIMEOUT,
+                        // The host only accepts tokens naming the sentinel (see `SENTINEL`).
+                        vec![*addr, SENTINEL],
+                        None,
+                        &room_key(&code),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
+                    let authentication = ClientAuthentication::Secure { connect_token: token };
                     NetcodeClientTransport::new(now, authentication, socket).map_err(|e| e.to_string())
                 })
                 .map(|transport| {
@@ -324,33 +423,65 @@ fn end_session(
     }
     commands.insert_resource(NetMode::Solo);
     commands.insert_resource(LocalId(HOST_ID));
+    if let Some(reason) = &end.0 {
+        info!("session ended: {reason}");
+    }
     notice.0.clone_from(&end.0);
     // `if_neq`: a failed join ends the session while already in the menu.
     NextState::set_if_neq(&mut *next_state, GameState::Menu);
 }
 
-/// Sends a joiner back to the menu if the host can't be reached or goes away.
+/// Sends a joiner back to the menu if the host can't be reached, turns them
+/// away or goes away.
 fn watch_connection(
     mut commands: Commands,
     time: Res<Time>,
     mode: Res<NetMode>,
     state: Res<State<ClientState>>,
+    transport: Option<Res<NetcodeClientTransport>>,
     mut connection: ResMut<Connection>,
 ) {
-    let NetMode::Join { addr } = *mode else { return };
+    let NetMode::Join { addr, .. } = *mode else { return };
+    let reason = transport.and_then(|t| t.disconnect_reason());
     match state.get() {
         ClientState::Connected => connection.connected = true,
         _ if connection.connected => {
             connection.connected = false;
-            commands.trigger(EndSession(Some("Lost connection to the host".into())));
+            let message = if reason == Some(NetcodeDisconnectReason::DisconnectedByServer) {
+                "The host closed the connection"
+            } else {
+                "Lost connection to the host"
+            };
+            commands.trigger(EndSession(Some(message.into())));
+        }
+        // The only refusal netcode sends: every seat is taken.
+        _ if reason == Some(NetcodeDisconnectReason::ConnectionDenied) => {
+            commands.trigger(EndSession(Some("The host's crew is full".into())));
         }
         _ => {
+            // A wrong room code looks just like no host at all: a host can't
+            // read the request, so it never answers.
             connection.waited += time.delta_secs();
             if connection.waited > CONNECT_TIMEOUT {
                 commands.trigger(EndSession(Some(format!(
-                    "Couldn't reach a host at {addr}. Is it running, and is the port open?"
+                    "No answer from a host at {addr}. Check the room code, that the host is running, and that its port is open"
                 ))));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_codes_round_trip_and_key_sessions() {
+        let code = room_code();
+        assert_eq!(parse_code(&show_code(&code).to_lowercase()), Ok(code.clone()));
+        assert!(parse_code("").is_err());
+        assert!(parse_code("ABCD-EFG0").is_err(), "0 isn't in a code");
+        assert_eq!(room_key(&code), room_key(&code), "every machine derives the same key");
+        assert_ne!(room_key("ABCDEFGH"), room_key("ABCDEFGJ"), "one letter off is another key");
     }
 }

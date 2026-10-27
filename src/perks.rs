@@ -431,17 +431,23 @@ fn update_perk_hud(
     let blink = (time.elapsed_secs() * 8.0).sin() > 0.0;
     for (tag, mut text, mut color) in &mut times {
         let Some(perk) = active(tag.0) else { continue };
-        if tag.0.duration().is_some() {
-            text.0 = format!("{:.1}s", perk.left.max(0.0));
-            color.0 = if perk.left < 2.0 && blink { Color::srgb(1.0, 0.4, 0.35) } else { Color::WHITE };
+        let (label, tint) = if tag.0.duration().is_some() {
+            let tint = if perk.left < 2.0 && blink { Color::srgb(1.0, 0.4, 0.35) } else { Color::WHITE };
+            (format!("{:.1}s", perk.left.max(0.0)), tint)
         } else {
-            text.0 = "INSTANT".into();
-            color.0 = Color::srgba(1.0, 1.0, 1.0, 0.8);
+            ("INSTANT".into(), Color::srgba(1.0, 1.0, 1.0, 0.8))
+        };
+        if text.0 != label {
+            text.0 = label;
         }
+        color.set_if_neq(TextColor(tint));
     }
     for (fill, mut meter) in &mut fills {
         let Some(perk) = active(fill.0) else { continue };
-        meter.frac = perk.left / perk.total;
+        let frac = perk.left / perk.total;
+        if meter.frac != frac {
+            meter.frac = frac;
+        }
     }
 }
 

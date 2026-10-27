@@ -856,7 +856,7 @@ fn update_alarm_hud(
     if text.0 != content {
         text.0 = content.into();
     }
-    color.0 = tint;
+    color.set_if_neq(TextColor(tint));
 
     let waves = if left_early {
         "watching the crew".into()
@@ -887,12 +887,12 @@ fn update_banner(
     if node.display != display {
         node.display = display;
     }
-    background.0 = hud::PANEL.with_alpha(0.7 * status.banner_alpha);
+    background.set_if_neq(BackgroundColor(hud::PANEL.with_alpha(0.7 * status.banner_alpha)));
     let (mut text, mut color) = text.into_inner();
     if text.0 != status.banner {
         text.0.clone_from(&status.banner);
     }
-    color.0 = status.banner_color.with_alpha(status.banner_alpha);
+    color.set_if_neq(TextColor(status.banner_color.with_alpha(status.banner_alpha)));
 }
 
 fn update_extraction_hud(
@@ -940,7 +940,7 @@ fn update_extraction_hud(
     if text.0 != content {
         text.0 = content;
     }
-    text_color.0 = color;
+    text_color.set_if_neq(TextColor(color));
 }
 
 /// While this machine's pirate is out early and the crew plays on, says what

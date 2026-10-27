@@ -34,7 +34,7 @@ impl Plugin for CombatViewPlugin {
             .add_observer(spawn_fx)
             .add_observer(dress_projectile)
             .add_systems(OnEnter(GameState::Playing), reset_shake)
-            .add_systems(Update, (fade_fx, float_popups, shake_on_local_damage));
+            .add_systems(Update, (fade_fx, float_popups, shake_on_local_damage, spin_sprites.run_if(in_state(GameState::Playing))));
     }
 }
 
@@ -51,7 +51,9 @@ pub struct Health {
     /// Absorbs damage before `current`; regenerates after a quiet period.
     pub shield: f32,
     pub max_shield: f32,
-    /// Seconds since the last hit, for shield regen.
+    /// Seconds since the last hit, for shield regen. Host-only bookkeeping:
+    /// ticking it doesn't mark the component changed (see `tick_health`), so
+    /// clients only see it when something else changes.
     pub(crate) since_hit: f32,
     /// Seconds left on the hit flash.
     pub flash: f32,
@@ -62,6 +64,9 @@ pub struct Health {
     /// Seconds left on a Doctor's ward: unhurtable, like `invulnerable`, but
     /// drawn as a bubble rather than the post-hit blink.
     pub warded: f32,
+    /// Shrugs off every hit while set, of every sort: a Vault Prism's aegis,
+    /// kept in step with its phase.
+    pub negating: bool,
     /// Grace period granted after each hit.
     grace: f32,
 }
@@ -82,6 +87,7 @@ impl Health {
             shield_hit: false,
             invulnerable: 0.0,
             warded: 0.0,
+            negating: false,
             grace,
         }
     }
@@ -103,7 +109,7 @@ impl Health {
         }
     }
 
-    /// Returns false if the hit was ignored (dead, invulnerable or warded).
+    /// Returns false if the hit was ignored (dead, invulnerable, warded or negating).
     pub fn hurt(&mut self, damage: f32) -> bool {
         self.hurt_for(damage).is_some()
     }
@@ -112,6 +118,11 @@ impl Health {
     /// never more than was left, so overkill doesn't count. `None` if ignored.
     pub fn hurt_for(&mut self, damage: f32) -> Option<f32> {
         if self.invulnerable > 0.0 || self.warded > 0.0 || self.is_dead() {
+            return None;
+        }
+        if self.negating {
+            // Shrugged off, but still flashes, so the view can show it landed.
+            self.flash = 0.12;
             return None;
         }
         let dealt = damage.min(self.shield + self.current);
@@ -129,6 +140,24 @@ impl Health {
 /// Circular hit area.
 #[derive(Component)]
 pub struct Hurtbox(pub f32);
+
+/// Host only: while `active`, the other side's shots, grenades and nova orbs
+/// that reach this bounce back at them as this side's own, weaker, in `color`
+/// (a Vault Prism's mirror). Anything else still hurts it.
+#[derive(Component, Clone, Copy)]
+pub struct Reflector {
+    pub active: bool,
+    pub color: Color,
+}
+
+/// Shots, grenades and orbs a `Reflector` sends back hit this much as hard.
+pub const REFLECT_DAMAGE: f32 = 0.6;
+/// How far a reflected shot or orb flies.
+const REFLECT_RANGE: f32 = 260.0;
+/// A reflected shot or orb heads straight back the way it came, unless
+/// someone on the other side is within this many radians of that line: then
+/// it's nudged onto the nearest of them.
+const REFLECT_AIM: f32 = 25.0 * std::f32::consts::PI / 180.0;
 
 /// Knockback velocity applied by the owner's movement code, decays over time.
 #[derive(Component, Default)]
@@ -208,6 +237,8 @@ pub fn spawn_projectile(commands: &mut Commands, projectile: Projectile, look: P
 /// Host-side grenade in flight: follows an arc from `from` and explodes at `to`.
 #[derive(Component)]
 pub struct Grenade {
+    /// The thrower's side: its blast hurts the other.
+    pub team: Team,
     /// `Player::owner` of the pirate who threw it.
     pub owner: Option<u64>,
     pub from: Vec2,
@@ -237,9 +268,12 @@ pub fn spawn_grenade(commands: &mut Commands, grenade: Grenade) {
 }
 
 /// Host-side Nova Cannon orb: drifts straight on, lashing out with arcs at
-/// guards it passes, and bursts on the first wall, guard or riot shield it meets.
+/// guards it passes, and bursts on the first wall, guard or riot shield it
+/// meets. Sent back by a `Reflector`, the same goes for the crew.
 #[derive(Component)]
 pub struct NovaOrb {
+    /// Whose side loosed it: its arcs and burst hurt the other.
+    pub team: Team,
     /// `Player::owner` of the pirate who loosed it.
     pub owner: Option<u64>,
     pub velocity: Vec2,
@@ -271,11 +305,35 @@ pub fn spawn_nova(commands: &mut Commands, orb: NovaOrb, pos: Vec2, scale: f32) 
     ));
 }
 
+/// A sprite turning on the spot at this many radians a second, all on this
+/// machine: a grenade tumbling or an orb churning. It sits on a child of the
+/// replicated entity, as the host's updates replace that one's whole
+/// transform, and the host never turns the projectile itself, so spinning
+/// costs no bandwidth.
+#[derive(Component)]
+struct Spin(f32);
+
 fn dress_projectile(add: On<Add, ProjectileLook>, mut commands: Commands, assets: Res<AssetServer>, looks: Query<&ProjectileLook>) {
     let Ok(look) = looks.get(add.entity) else { return };
-    commands
-        .entity(add.entity)
-        .insert(Sprite::from_image(assets.load(look.sprite())));
+    let sprite = Sprite::from_image(assets.load(look.sprite()));
+    let spin = match look {
+        ProjectileLook::Grenade => Some(12.0),
+        ProjectileLook::NovaOrb => Some(6.0),
+        _ => None,
+    };
+    let mut entity = commands.entity(add.entity);
+    match spin {
+        // The parent's scale (a charged nova's size) still carries to the child.
+        Some(rate) => entity.insert(Visibility::default()).with_child((Spin(rate), sprite, Transform::default())),
+        // Bolts are pointed along their flight by the host's rotation.
+        None => entity.insert(sprite),
+    };
+}
+
+fn spin_sprites(time: Res<Time>, mut sprites: Query<(&Spin, &mut Transform)>) {
+    for (spin, mut transform) in &mut sprites {
+        transform.rotate_z(spin.0 * time.delta_secs());
+    }
 }
 
 /// A cosmetic effect the host broadcasts so every machine draws it locally.
@@ -447,11 +505,20 @@ fn reset_shake(mut shake: ResMut<Shake>) {
 
 fn tick_health(time: Res<Time>, mut health: Query<(&mut Health, Option<&Boons>)>) {
     let dt = time.delta_secs();
+    // Replication resends a `Health` whenever it's marked changed, so it's
+    // only marked when something the crew can see moves: timers that have run
+    // out are left alone, and the host-only `since_hit` doesn't count.
     for (mut h, boons) in &mut health {
-        h.flash = (h.flash - dt).max(0.0);
-        h.invulnerable = (h.invulnerable - dt).max(0.0);
-        h.warded = (h.warded - dt).max(0.0);
-        h.since_hit += dt;
+        if h.flash > 0.0 {
+            h.flash = (h.flash - dt).max(0.0);
+        }
+        if h.invulnerable > 0.0 {
+            h.invulnerable = (h.invulnerable - dt).max(0.0);
+        }
+        if h.warded > 0.0 {
+            h.warded = (h.warded - dt).max(0.0);
+        }
+        h.bypass_change_detection().since_hit += dt;
         // Overclocked, the shield starts back sooner and fills faster.
         let rate = boons.map_or(1.0, |b| b.cooldown_rate());
         if h.since_hit * rate >= SHIELD_DELAY && !h.is_dead() && h.shield < h.max_shield {
@@ -460,13 +527,18 @@ fn tick_health(time: Res<Time>, mut health: Query<(&mut Health, Option<&Boons>)>
     }
 }
 
+/// What a shot can hit: anyone with a hurtbox, some of them mirrors.
+type ShotTargets<'w, 's> =
+    Query<'w, 's, (Entity, &'static Team, &'static Hurtbox, &'static Transform, Option<&'static Reflector>), Without<Projectile>>;
+
+#[allow(clippy::too_many_arguments)]
 fn move_projectiles(
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut projectiles: Query<(Entity, &mut Projectile, &ProjectileLook, &mut Transform)>,
-    targets: Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
+    targets: ShotTargets,
     mut victims: Query<(&mut Health, Option<&mut Knockback>)>,
     riot_shields: Query<(&RiotShield, &Transform), Without<Projectile>>,
     mut crew_hits: MessageWriter<CrewHit>,
@@ -490,12 +562,29 @@ fn move_projectiles(
                 continue 'projectiles;
             }
 
-            for (target, team, hurtbox, target_transform) in &targets {
+            for (target, team, hurtbox, target_transform, reflector) in &targets {
                 if *team == projectile.team
                     || projectile.hits.contains(&target)
                     || target_transform.translation.truncate().distance(pos) > hurtbox.0
                 {
                     continue;
+                }
+                let Ok((health, _)) = victims.get(target) else { continue };
+                if health.is_dead() {
+                    continue;
+                }
+                // A mirror sends it back at whoever fired it.
+                if let Some(mirror) = reflector.filter(|r| r.active) {
+                    reflect_shot(&mut commands, &projectile, *team, mirror.color, pos, &targets, &victims, &grid);
+                    fx(&mut commands, FxKind::Spark, pos, 0.0, mirror.color);
+                    commands.entity(entity).despawn();
+                    continue 'projectiles;
+                }
+                // Negated: it stops dead against it, doing nothing.
+                if health.negating {
+                    fx(&mut commands, FxKind::Spark, pos, 0.0, projectile.color);
+                    commands.entity(entity).despawn();
+                    continue 'projectiles;
                 }
                 let Ok((mut health, knockback)) = victims.get_mut(target) else { continue };
                 let Some(dealt) = health.hurt_for(projectile.damage) else { continue };
@@ -524,6 +613,59 @@ fn move_projectiles(
             commands.entity(entity).despawn();
         }
     }
+}
+
+/// The nearest of `spots` to `pos`.
+fn nearest(pos: Vec2, spots: impl Iterator<Item = Vec2>) -> Option<Vec2> {
+    spots.min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+}
+
+/// Which way a shot reflected at `pos` heads: straight `back`, or onto the
+/// nearest of `crew` within `REFLECT_AIM` of that line, in sight and in reach.
+fn reflect_dir(grid: &RoomGrid, pos: Vec2, back: Vec2, crew: impl Iterator<Item = Vec2>) -> Vec2 {
+    let back = back.normalize_or(Vec2::X);
+    let near = crew.filter(|at| {
+        at.distance(pos) <= REFLECT_RANGE && back.angle_to(*at - pos).abs() <= REFLECT_AIM && grid.line_of_sight(pos, *at)
+    });
+    nearest(pos, near).map_or(back, |at| (at - pos).normalize_or(back))
+}
+
+/// Sends a shot that just reached a `Reflector` on `side` at `pos` back the
+/// way it came, as a fresh shot of `side`'s own: weaker, in `color`, nudged
+/// onto someone on the other side near its line (see `reflect_dir`).
+#[allow(clippy::too_many_arguments)]
+fn reflect_shot(
+    commands: &mut Commands,
+    shot: &Projectile,
+    side: Team,
+    color: Color,
+    pos: Vec2,
+    targets: &ShotTargets,
+    victims: &Query<(&mut Health, Option<&mut Knockback>)>,
+    grid: &RoomGrid,
+) {
+    let crew = targets
+        .iter()
+        .filter(|(e, team, ..)| **team != side && victims.get(*e).is_ok_and(|(h, _)| !h.is_dead()))
+        .map(|(_, _, _, t, _)| t.translation.truncate());
+    let dir = reflect_dir(grid, pos, -shot.velocity, crew);
+    spawn_projectile(
+        commands,
+        Projectile {
+            team: side,
+            owner: None,
+            velocity: dir * shot.velocity.length(),
+            remaining: REFLECT_RANGE,
+            damage: shot.damage * REFLECT_DAMAGE,
+            knockback: shot.knockback * REFLECT_DAMAGE,
+            pierce: false,
+            color,
+            hits: Vec::new(),
+            ricochet: 0.0,
+        },
+        ProjectileLook::EnemyBolt,
+        pos,
+    );
 }
 
 /// Every riot shield's curve, to test shots against.
@@ -570,22 +712,37 @@ fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
 }
 
-/// Hurts every guard within `radius` of `center`, `damage` at the middle
-/// halving toward the edge, and throws them outward. Reports the hits as
-/// `owner`'s, if a pirate set it off.
+/// What a blast or a nova orb's arc can reach: anyone with a hurtbox and
+/// health, some of them mirrors.
+type Blastable = (
+    &'static Team,
+    &'static Hurtbox,
+    &'static Transform,
+    &'static mut Health,
+    Option<&'static mut Knockback>,
+    Option<&'static Reflector>,
+);
+
+/// Hurts everyone not on `side` within `radius` of `center`, `damage` at the
+/// middle halving toward the edge, and throws them outward. The crew are safe
+/// behind a riot shield. Reports the hits as `owner`'s, if a pirate set it off.
+#[allow(clippy::too_many_arguments)]
 fn blast(
-    targets: &mut Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), impl bevy::ecs::query::QueryFilter>,
+    targets: &mut Query<Blastable, impl bevy::ecs::query::QueryFilter>,
+    shields: &[[Vec2; RIOT_POINTS]],
     center: Vec2,
     damage: f32,
     radius: f32,
     knockback: f32,
+    side: Team,
     owner: Option<u64>,
     crew_hits: &mut MessageWriter<CrewHit>,
 ) {
-    for (team, hurtbox, target_transform, mut health, target_knockback) in targets {
-        let offset = target_transform.translation.truncate() - center;
+    for (team, hurtbox, target_transform, mut health, target_knockback, _) in targets {
+        let at = target_transform.translation.truncate();
+        let offset = at - center;
         let reach = radius + hurtbox.0;
-        if *team != Team::Enemy || offset.length() > reach {
+        if *team == side || offset.length() > reach || (*team == Team::Player && shield_between(shields, center, at)) {
             continue;
         }
         let falloff = 1.0 - 0.5 * offset.length() / reach;
@@ -608,14 +765,14 @@ fn ricochet(
     look: ProjectileLook,
     struck: Entity,
     pos: Vec2,
-    targets: &Query<(Entity, &Team, &Hurtbox, &Transform), Without<Projectile>>,
+    targets: &ShotTargets,
     victims: &Query<(&mut Health, Option<&mut Knockback>)>,
     grid: &RoomGrid,
 ) {
     let mut near: Vec<(f32, Vec2)> = targets
         .iter()
         .filter(|(e, team, ..)| *e != struck && **team == Team::Enemy && victims.get(*e).is_ok_and(|(h, _)| !h.is_dead()))
-        .map(|(_, _, _, t)| t.translation.truncate())
+        .map(|(_, _, _, t, _)| t.translation.truncate())
         .filter(|at| at.distance(pos) <= RICOCHET_REACH && grid.line_of_sight(pos, *at))
         .map(|at| (at.distance(pos), at))
         .collect();
@@ -648,22 +805,62 @@ fn move_grenades(
     time: Res<Time>,
     mut noise: ResMut<Noise>,
     mut grenades: Query<(Entity, &mut Grenade, &mut Transform)>,
-    mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<Grenade>>,
+    mut targets: Query<Blastable, Without<Grenade>>,
+    riot_shields: Query<(&RiotShield, &Transform), (Without<Grenade>, Without<Hurtbox>)>,
     mut crew_hits: MessageWriter<CrewHit>,
 ) {
+    let shields = shield_outlines(&riot_shields);
     for (entity, mut grenade, mut transform) in &mut grenades {
         grenade.age += time.delta_secs();
         let t = (grenade.age / grenade.flight).min(1.0);
         let height = LOB_HEIGHT * grenade.flight * 4.0 * t * (1.0 - t);
         let pos = grenade.from.lerp(grenade.to, t) + Vec2::Y * height;
+        // It tumbles in the view (see `Spin`), not here.
         transform.translation = pos.extend(transform.translation.z);
-        transform.rotation = Quat::from_rotation_z(grenade.age * 12.0);
         if t < 1.0 {
             continue;
         }
 
         let center = grenade.to;
-        blast(&mut targets, center, grenade.damage, grenade.radius, grenade.knockback, grenade.owner, &mut crew_hits);
+        // Landing where its blast would reach a mirror, it doesn't go off: it's
+        // lobbed back at the nearest of whoever threw it, as the mirror's own.
+        let thrower = grenade.team;
+        let mirror = targets
+            .iter()
+            .find(|(team, hurtbox, t, health, _, reflector)| {
+                reflector.is_some_and(|r| r.active)
+                    && **team != thrower
+                    && !health.is_dead()
+                    && t.translation.truncate().distance(center) <= grenade.radius + hurtbox.0
+            })
+            .map(|(team, .., reflector)| (*team, reflector.map_or(grenade.color, |r| r.color)));
+        if let Some((side, color)) = mirror {
+            fx(&mut commands, FxKind::Spark, center, 0.0, color);
+            let crew = targets
+                .iter()
+                .filter(|(team, _, _, health, ..)| **team == thrower && !health.is_dead())
+                .map(|(_, _, t, ..)| t.translation.truncate());
+            let Some(to) = nearest(center, crew) else {
+                commands.entity(entity).despawn();
+                continue;
+            };
+            let speed = (grenade.from.distance(grenade.to) / grenade.flight).max(1.0);
+            *grenade = Grenade {
+                team: side,
+                owner: None,
+                from: center,
+                to,
+                age: 0.0,
+                flight: (center.distance(to) / speed).max(0.3),
+                damage: grenade.damage * REFLECT_DAMAGE,
+                knockback: grenade.knockback * REFLECT_DAMAGE,
+                color,
+                ..*grenade
+            };
+            continue;
+        }
+
+        blast(&mut targets, &shields, center, grenade.damage, grenade.radius, grenade.knockback, thrower, grenade.owner, &mut crew_hits);
         noise.0.push(center);
         fx(&mut commands, FxKind::Explosion, center, 0.0, grenade.color);
         commands.entity(entity).despawn();
@@ -677,33 +874,39 @@ fn move_novas(
     grid: Res<RoomGrid>,
     mut noise: ResMut<Noise>,
     mut orbs: Query<(Entity, &mut NovaOrb, &mut Transform)>,
-    mut targets: Query<(&Team, &Hurtbox, &Transform, &mut Health, Option<&mut Knockback>), Without<NovaOrb>>,
+    mut targets: Query<Blastable, Without<NovaOrb>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<NovaOrb>, Without<Hurtbox>)>,
     mut crew_hits: MessageWriter<CrewHit>,
 ) {
     const MAX_STEP: f32 = 3.0;
     let dt = time.delta_secs();
     let shields = shield_outlines(&riot_shields);
+    // They churn in the view (see `Spin`), not here.
     'orbs: for (entity, mut orb, mut transform) in &mut orbs {
-        transform.rotate_z(dt * 6.0);
+        let side = orb.team;
 
-        // Lashes the nearest guards in reach that it can see.
+        // Lashes the nearest of the other side in reach that it can see; the
+        // crew are safe behind a riot shield.
         orb.arc_timer -= dt;
         if orb.arc_timer <= 0.0 {
             orb.arc_timer = NOVA_ARC_GAP;
             let pos = transform.translation.truncate();
             let mut near: Vec<(f32, Vec2)> = targets
                 .iter()
-                .filter(|(team, _, t, health, _)| {
+                .filter(|(team, _, t, health, ..)| {
                     let at = t.translation.truncate();
-                    **team == Team::Enemy && !health.is_dead() && at.distance(pos) <= orb.arc_reach && grid.line_of_sight(pos, at)
+                    **team != side
+                        && !health.is_dead()
+                        && at.distance(pos) <= orb.arc_reach
+                        && grid.line_of_sight(pos, at)
+                        && (**team != Team::Player || !shield_between(&shields, pos, at))
                 })
                 .map(|(_, _, t, ..)| (t.translation.truncate().distance(pos), t.translation.truncate()))
                 .collect();
             near.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (team, _, t, mut health, _) in &mut targets {
+            for (team, _, t, mut health, ..) in &mut targets {
                 let at = t.translation.truncate();
-                if *team != Team::Enemy || !near.iter().take(NOVA_ARC_TARGETS).any(|(_, n)| *n == at) {
+                if *team == side || !near.iter().take(NOVA_ARC_TARGETS).any(|(_, n)| *n == at) {
                     continue;
                 }
                 let Some(dealt) = health.hurt_for(orb.arc_damage) else { continue };
@@ -719,14 +922,36 @@ fn move_novas(
         for _ in 0..steps as u32 {
             transform.translation += (travel / steps).extend(0.0);
             let pos = transform.translation.truncate();
-            let touching = targets
+            let touched = targets
                 .iter()
-                .any(|(team, hurtbox, t, health, _)| *team == Team::Enemy && !health.is_dead() && t.translation.truncate().distance(pos) <= hurtbox.0 + 3.0);
+                .find(|(team, hurtbox, t, health, ..)| {
+                    **team != side && !health.is_dead() && t.translation.truncate().distance(pos) <= hurtbox.0 + 3.0
+                })
+                .map(|(team, .., reflector)| (*team, reflector.filter(|r| r.active).map(|r| r.color)));
+            // A mirror sends it back at the nearest of whoever loosed it, as its own.
+            if let Some((mirror, Some(color))) = touched {
+                let crew = targets
+                    .iter()
+                    .filter(|(team, _, t, health, ..)| **team == side && !health.is_dead() && grid.line_of_sight(pos, t.translation.truncate()))
+                    .map(|(_, _, t, ..)| t.translation.truncate());
+                let back = -orb.velocity.normalize_or(Vec2::X);
+                let dir = nearest(pos, crew).map_or(back, |at| (at - pos).normalize_or(back));
+                orb.velocity = dir * orb.velocity.length();
+                orb.team = mirror;
+                orb.owner = None;
+                orb.remaining = REFLECT_RANGE;
+                orb.damage *= REFLECT_DAMAGE;
+                orb.arc_damage *= REFLECT_DAMAGE;
+                orb.knockback *= REFLECT_DAMAGE;
+                orb.color = color;
+                fx(&mut commands, FxKind::Spark, pos, 0.0, color);
+                continue 'orbs;
+            }
             orb.remaining -= travel.length() / steps;
-            if grid.is_solid_at(pos) || hits_shield(&shields, pos) || touching || orb.remaining <= 0.0 {
+            if grid.is_solid_at(pos) || hits_shield(&shields, pos) || touched.is_some() || orb.remaining <= 0.0 {
                 // Bursts just short of a wall, not inside it.
                 let center = pos - orb.velocity.normalize_or_zero() * 2.0;
-                blast(&mut targets, center, orb.damage, orb.radius, orb.knockback, orb.owner, &mut crew_hits);
+                blast(&mut targets, &shields, center, orb.damage, orb.radius, orb.knockback, side, orb.owner, &mut crew_hits);
                 noise.0.push(center);
                 fx(&mut commands, FxKind::Explosion, center, 0.0, orb.color);
                 commands.entity(entity).despawn();
@@ -785,7 +1010,42 @@ fn shake_on_local_damage(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
     use super::*;
+    use crate::GamePlugins;
+    use crate::net::{NetMode, StartSession};
+    use crate::player::Player;
+    use crate::room::NextSeed;
+
+    #[test]
+    fn untouched_health_is_not_resent() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(1.0 / 60.0)))
+            .add_plugins(GamePlugins)
+            .insert_resource(NextSeed(3))
+            .insert_resource(Rng::new(3));
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+        // Replication resends whatever was marked changed since it last ran.
+        let mut guards = app.world_mut().query_filtered::<(Entity, Ref<Health>), Without<Player>>();
+        let before: Vec<_> = guards.iter(app.world()).map(|(e, h)| (e, h.last_changed())).collect();
+        assert!(!before.is_empty(), "guards on the deck");
+        for _ in 0..30 {
+            app.update();
+        }
+        for (entity, tick) in before {
+            let health = app.world().entity(entity).get_ref::<Health>().expect("still there");
+            assert_eq!(health.last_changed(), tick, "an unhurt guard's health was marked changed");
+        }
+    }
 
     #[test]
     fn shields_block_lines_through_them() {

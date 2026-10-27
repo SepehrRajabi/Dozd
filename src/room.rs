@@ -2,7 +2,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::SystemTime;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy_replicon::prelude::*;
 
 use crate::boss::{KeeperKind, spawn_keeper};
@@ -61,7 +63,7 @@ pub struct RoomViewPlugin;
 
 impl Plugin for RoomViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_starfield).add_observer(draw_deck);
+        app.add_systems(Startup, spawn_starfield).add_systems(Update, bake_deck).add_observer(draw_deck);
     }
 }
 
@@ -478,8 +480,23 @@ const DECAL_WEIGHTS: [[u32; 10]; 3] = [
 /// Percent of plain floor tiles with a decal on them.
 const DECAL_CHANCE: u32 = 11;
 
-/// Spawns the tile sprites for the deck just built. They carry `Level`, so the
-/// next deck's `sync_deck` clears them.
+/// One image laid on the deck's picture: what a sprite of it at `centre`,
+/// tinted `tint`, would draw.
+struct Stamp {
+    image: Handle<Image>,
+    centre: Vec2,
+    tint: Color,
+}
+
+/// The deck's tiles and what's drawn over them, bottom first, waiting for
+/// their images to load so `bake_deck` can flatten them into one picture.
+#[derive(Component)]
+struct DeckStamps(Vec<Stamp>);
+
+/// Lays out the tiles for the deck just built. It never changes once built
+/// (the gate's doors are drawn from the `Breach`), so rather than a sprite per
+/// tile and overlay, `bake_deck` paints it all into one picture. It carries
+/// `Level`, so the next deck's `sync_deck` clears it.
 fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>, grid: Res<RoomGrid>, built: Res<BuiltDeck>) {
     let deck = built.0.map_or(0, |(_, deck)| deck).min(DECK_LOOKS - 1) as usize;
     let tile = |name: &str| assets.load(format!("sprites/tiles/deck_{deck}/{name}.png"));
@@ -512,9 +529,10 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
         '=' => 2,
         _ => 0,
     };
-    let overlay = |commands: &mut Commands, image: &Handle<Image>, pos: Vec2, z: f32| {
-        commands.spawn((Level, Sprite::from_image(image.clone()), Transform::from_translation(pos.extend(z))));
-    };
+    // Each layer is painted whole before the next, as sprites a layer apart
+    // would draw: tiles, then decals, lips, wall shade and lamp light.
+    let [mut tiles, mut decal_layer, mut lip_layer, mut shade_layer, mut glow_layer] = std::array::from_fn(|_| Vec::new());
+    let stamp = |image: &Handle<Image>, centre: Vec2| Stamp { image: image.clone(), centre, tint: Color::WHITE };
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
             let (c, r) = (col as isize, row as isize);
@@ -523,51 +541,50 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             let quarter = 2 * (row % 2) + col % 2;
             let image = match ch {
                 // Solid rock with no floor next to it is the hull between rooms.
-                '#' if !grid.touches_floor(col, row) => hull[quarter].clone(),
+                '#' if !grid.touches_floor(col, row) => &hull[quarter],
                 // Floor below: the wall's front face shows, and a lamp in it
                 // lights the floor.
                 '#' if open(c, r + 1) => {
                     let face = variant(col, row, 3, &FACE_WEIGHTS);
                     if let Some((_, glow)) = lit_faces.iter().find(|(lit, _)| *lit == face) {
-                        overlay(&mut commands, glow, pos - Vec2::new(0.0, TILE * 1.5), 0.06);
+                        glow_layer.push(stamp(glow, pos - Vec2::new(0.0, TILE * 1.5)));
                     }
-                    faces[face].clone()
+                    &faces[face]
                 }
                 '#' => {
                     let mask = open(c, r - 1) as usize
                         | (open(c + 1, r) as usize) << 1
                         | (open(c, r + 1) as usize) << 2
                         | (open(c - 1, r) as usize) << 3;
-                    caps[mask].clone()
+                    &caps[mask]
                 }
                 'D' => {
-                    overlay(&mut commands, &door_glow, pos - Vec2::new(0.0, TILE * 1.5), 0.06);
-                    door.clone()
+                    glow_layer.push(stamp(&door_glow, pos - Vec2::new(0.0, TILE * 1.5)));
+                    &door
                 }
-                ',' | 'G' => grates[panel(col, row, 2, &GRATE_WEIGHTS, None)][quarter].clone(),
-                '=' => hazard.clone(),
-                'v' => vent.clone(),
+                ',' | 'G' => &grates[panel(col, row, 2, &GRATE_WEIGHTS, None)][quarter],
+                '=' => &hazard,
+                'v' => &vent,
                 // A lift is one 2x2 platform; each tile shows its quarter.
                 'L' | 'u' => {
                     let same = |c: isize, r: isize| open(c, r) && grid.tiles[r as usize][c as usize] == ch;
-                    lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize].clone()
+                    &lift[2 * same(c, r - 1) as usize + same(c - 1, r) as usize]
                 }
-                _ => floors[panel(col, row, 1, &FLOOR_WEIGHTS, Some(FLOOR_ACCENT))][quarter].clone(),
+                _ => &floors[panel(col, row, 1, &FLOOR_WEIGHTS, Some(FLOOR_ACCENT))][quarter],
             };
-            let sprite = match ch {
+            tiles.push(Stamp {
                 // The shaft the crew rode in on is dimmed: it doesn't go anywhere.
-                'u' => Sprite { image, color: Color::srgb(0.45, 0.45, 0.5), ..default() },
-                _ => Sprite::from_image(image),
-            };
-            commands.spawn((Level, sprite, Transform::from_translation(pos.extend(0.0))));
+                tint: if ch == 'u' { Color::srgb(0.45, 0.45, 0.5) } else { Color::WHITE },
+                ..stamp(image, pos)
+            });
 
             if ch == '.' && hash(col, row, 4) % 100 < DECAL_CHANCE {
-                overlay(&mut commands, &decals[variant(col, row, 5, &DECAL_WEIGHTS[deck])], pos, 0.02);
+                decal_layer.push(stamp(&decals[variant(col, row, 5, &DECAL_WEIGHTS[deck])], pos));
             }
             if inset(ch) > 0 {
                 for (lip, (dc, dr)) in lips.iter().zip([(0, -1), (1, 0), (0, 1), (-1, 0)]) {
                     if open(c + dc, r + dr) && inset(grid.tiles[(r + dr) as usize][(c + dc) as usize]) != inset(ch) {
-                        overlay(&mut commands, lip, pos, 0.03);
+                        lip_layer.push(stamp(lip, pos));
                     }
                 }
             }
@@ -575,11 +592,90 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             if grid.is_floor(col, row) {
                 for (shade, (dc, dr)) in shades.iter().zip([(0, -1), (-1, 0), (1, 0)]) {
                     if !open(c + dc, r + dr) {
-                        overlay(&mut commands, shade, pos, 0.05);
+                        shade_layer.push(stamp(shade, pos));
                     }
                 }
             }
         }
+    }
+    let stamps = [tiles, decal_layer, lip_layer, shade_layer, glow_layer].into_iter().flatten().collect();
+    commands.spawn((Level, DeckStamps(stamps)));
+}
+
+/// Once every image a deck's stamps use has loaded, paints them into one
+/// picture and shows it in their place: one sprite to draw instead of
+/// thousands. Blends as the GPU blends sprites into the screen, in linear light
+/// and kept to 8-bit sRGB after each layer, so it looks the same as drawing
+/// them one by one, give or take the GPU's rounding.
+fn bake_deck(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
+    decks: Query<(Entity, &DeckStamps)>,
+) {
+    for (entity, stamps) in &decks {
+        // A missing image draws nothing, as a sprite of it would.
+        let loading = stamps.0.iter().any(|s| images.get(&s.image).is_none() && !assets.load_state(&s.image).is_failed());
+        if loading {
+            continue;
+        }
+        let mut sources: Vec<(AssetId<Image>, Option<Image>)> = Vec::new();
+        for stamp in &stamps.0 {
+            if sources.iter().all(|(id, _)| *id != stamp.image.id()) {
+                let image = images.get(&stamp.image).and_then(|i| i.convert(TextureFormat::Rgba8UnormSrgb));
+                sources.push((stamp.image.id(), image));
+            }
+        }
+        let source = |id: AssetId<Image>| sources.iter().find(|(i, _)| *i == id).and_then(|(_, image)| image.as_ref());
+
+        // The picture spans every stamp, a lamp's light past the deck's edge included.
+        let corners = stamps.0.iter().filter_map(|s| {
+            let half = source(s.image.id())?.size_f32() / 2.0;
+            Some((s.centre - half, s.centre + half))
+        });
+        let (min, max) = corners.fold((Vec2::MAX, Vec2::MIN), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+        if min.x > max.x {
+            commands.entity(entity).remove::<DeckStamps>();
+            continue;
+        }
+        let size = (max - min).as_uvec2();
+        let mut canvas = vec![0u8; (size.x * size.y * 4) as usize];
+        let to_linear: [f32; 256] = std::array::from_fn(|v| LinearRgba::from(Srgba::rgb_u8(v as u8, 0, 0)).red);
+        for stamp in &stamps.0 {
+            let Some(image) = source(stamp.image.id()) else { continue };
+            let Some(texels) = image.data.as_ref() else { continue };
+            let tint = stamp.tint.to_linear();
+            let (w, h) = (image.width(), image.height());
+            // Canvas rows run down from its top edge, as the image's do.
+            let left = (stamp.centre.x - w as f32 / 2.0 - min.x) as u32;
+            let top = (max.y - (stamp.centre.y + h as f32 / 2.0)) as u32;
+            for y in 0..h {
+                for x in 0..w {
+                    let s = ((y * w + x) * 4) as usize;
+                    let alpha = texels[s + 3] as f32 / 255.0 * tint.alpha;
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                    let d = (((top + y) * size.x + left + x) * 4) as usize;
+                    let under = &canvas[d..d + 4];
+                    let mix = |i: usize, tint: f32| to_linear[texels[s + i] as usize] * tint * alpha + to_linear[under[i] as usize] * (1.0 - alpha);
+                    let out = LinearRgba::new(mix(0, tint.red), mix(1, tint.green), mix(2, tint.blue), alpha + under[3] as f32 / 255.0 * (1.0 - alpha));
+                    canvas[d..d + 4].copy_from_slice(&Srgba::from(out).to_u8_array());
+                }
+            }
+        }
+
+        let picture = Image::new(
+            Extent3d { width: size.x, height: size.y, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            canvas,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        commands.entity(entity).remove::<DeckStamps>().insert((
+            Sprite::from_image(images.add(picture)),
+            Transform::from_translation(((min + max) / 2.0).extend(0.0)),
+        ));
     }
 }
 

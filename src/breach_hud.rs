@@ -132,8 +132,10 @@ fn draw_gates(
         let Ok(breach) = breaches.get(parent.parent()) else { continue };
         let shown = matches!(breach.state, BreachState::Sealed | BreachState::Vote { .. });
         visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
-        let bob = (t * 2.0).sin().round();
-        transform.translation.y = label_height(breach.vertical) + bob;
+        let y = label_height(breach.vertical) + (t * 2.0).sin().round();
+        if transform.translation.y != y {
+            transform.translation.y = y;
+        }
         color.set_if_neq(TextColor(breach.tier.color()));
     }
 }
