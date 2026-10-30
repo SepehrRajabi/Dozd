@@ -21,6 +21,7 @@ use crate::player::Player;
 use crate::settings::{Settings, read_config, write_config};
 use crate::vault::Vault;
 use crate::hud::{self, HudSlot};
+use crate::room;
 use crate::{GameState, PIXEL_SCALE};
 
 const GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
@@ -45,9 +46,9 @@ impl Plugin for MenuPlugin {
             .init_resource::<LeavePrompt>()
             .add_observer(run_menu_command)
             .add_systems(Startup, spawn_session_hud)
-            .add_systems(OnEnter(GameState::Menu), (spawn_backdrop, reset_camera, show_cursor))
+            .add_systems(OnEnter(GameState::Menu), (spawn_backdrop, show_cursor))
             .add_systems(OnExit(GameState::Menu), hide_cursor)
-            .add_systems(OnEnter(GameState::Lobby), (lobby_screen, show_cursor))
+            .add_systems(OnEnter(GameState::Lobby), (lobby_screen, spawn_backdrop, show_cursor))
             .add_systems(OnExit(GameState::Lobby), hide_cursor)
             .add_systems(OnEnter(GameState::Playing), unzoom)
             .add_systems(OnEnter(MenuScreen::Main), main_screen)
@@ -65,10 +66,7 @@ impl Plugin for MenuPlugin {
                     edit_fields,
                     draw_fields,
                     update_host_hint,
-                    animate_backdrop,
                     back_on_escape,
-                    dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
-                    hide_backdrop.run_if(state_changed::<MenuScreen>),
                     update_setting_values.run_if(resource_changed::<Settings>),
                 )
                     .run_if(in_state(GameState::Menu)),
@@ -80,6 +78,10 @@ impl Plugin for MenuPlugin {
                     button_actions,
                     update_status,
                     fit_menus,
+                    hold_camera,
+                    animate_backdrop,
+                    fade_backdrop,
+                    dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
                     (choice_actions, style_choices, show_ability_choices, update_slot_count).chain(),
                 )
                     .run_if(in_state(GameState::Menu).or_else(in_state(GameState::Lobby))),
@@ -1379,9 +1381,13 @@ fn zoom(zoom: f32, mut ui: ResMut<UiScale>, mut projection: Single<&mut Projecti
     }
 }
 
-fn reset_camera(mut camera: Single<&mut Transform, With<Camera2d>>) {
-    camera.translation.x = 0.0;
-    camera.translation.y = 0.0;
+/// Keeps the camera on the backdrop, away from any deck left over from a run.
+/// It checks every frame since the camera may not exist yet on the first menu frame.
+fn hold_camera(mut camera: Single<&mut Transform, With<Camera2d>>) {
+    let at = MENU_ORIGIN.extend(camera.translation.z);
+    if camera.translation != at {
+        camera.translation = at;
+    }
 }
 
 fn show_cursor(mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>) {
@@ -1392,10 +1398,27 @@ fn hide_cursor(mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>) {
     cursor.visible = false;
 }
 
-fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<LocalLoadout>) {
+/// The menus and the lobby share one backdrop, far from where decks are built,
+/// so a deck left over from the last run never shows behind them.
+const MENU_ORIGIN: Vec2 = Vec2::new(0.0, 100_000.0);
+
+/// Spawns the backdrop on the first menu or lobby screen; it stays until a run starts.
+fn spawn_backdrop(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    loadout: Res<LocalLoadout>,
+    existing: Query<(), With<Backdrop>>,
+) {
+    if !existing.is_empty() {
+        return;
+    }
+    let sky = room::starfield(MENU_ORIGIN).into_iter().map(|star| (DespawnOnEnter(GameState::Playing), star));
+    commands.spawn_batch(sky.collect::<Vec<_>>());
     let mut sprite = |path: &str, pos: Vec3, scale: f32, flip: bool, orbit: Option<(Vec2, f32)>, phase: f32| {
+        let pos = pos + MENU_ORIGIN.extend(0.0);
+        let orbit = orbit.map(|(center, radius)| (center + MENU_ORIGIN, radius));
         commands.spawn((
-            DespawnOnExit(GameState::Menu),
+            DespawnOnEnter(GameState::Playing),
             Backdrop { base: pos, phase, orbit },
             Sprite {
                 image: assets.load(path.to_string()),
@@ -1440,12 +1463,20 @@ fn spawn_backdrop(mut commands: Commands, assets: Res<AssetServer>, loadout: Res
     commands.entity(gun).insert(BackdropPirate::Gun);
 }
 
-/// The loadout, perks and enemies screens fill the window, so the backdrop would only clutter them.
-fn hide_backdrop(screen: Res<State<MenuScreen>>, mut sprites: Query<&mut Visibility, With<Backdrop>>) {
-    let full = matches!(screen.get(), MenuScreen::Loadout | MenuScreen::Perks | MenuScreen::Enemies);
-    let visibility = if full { Visibility::Hidden } else { Visibility::Inherited };
-    for mut v in &mut sprites {
-        v.set_if_neq(visibility);
+/// The loadout, perks, enemies and lobby screens fill the window, so there the
+/// backdrop fades back to keep the cards in front readable.
+fn fade_backdrop(
+    state: Res<State<GameState>>,
+    screen: Option<Res<State<MenuScreen>>>,
+    mut sprites: Query<&mut Sprite, With<Backdrop>>,
+) {
+    let full = *state.get() == GameState::Lobby
+        || screen.is_some_and(|s| matches!(s.get(), MenuScreen::Loadout | MenuScreen::Perks | MenuScreen::Enemies));
+    let tint = Color::WHITE.with_alpha(if full { 0.3 } else { 1.0 });
+    for mut sprite in &mut sprites {
+        if sprite.color != tint {
+            sprite.color = tint;
+        }
     }
 }
 
@@ -1620,8 +1651,6 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
                 row_gap: Val::Px(12.0),
                 ..default()
             },
-            // Hides the last run's frozen deck.
-            BackgroundColor(Color::srgb(0.02, 0.02, 0.045)),
         ))
         .with_children(|parent| {
             parent.spawn(label("CREW LOBBY", 28.0, GOLD));

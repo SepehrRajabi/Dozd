@@ -741,6 +741,11 @@ fn populate(commands: &mut Commands, grid: &RoomGrid, seed: u32, deck: u8) {
 }
 
 fn spawn_starfield(mut commands: Commands) {
+    commands.spawn_batch(starfield(Vec2::ZERO));
+}
+
+/// The same 400 stars every time, centred on `center`.
+pub fn starfield(center: Vec2) -> Vec<(Sprite, Transform)> {
     // Small xorshift so the sky is identical every run without pulling in `rand`.
     let mut seed: u32 = 0x9E37_79B9;
     let mut next = move || {
@@ -750,16 +755,18 @@ fn spawn_starfield(mut commands: Commands) {
         seed as f32 / u32::MAX as f32
     };
 
-    for _ in 0..400 {
-        let pos = Vec2::new(next() * 1200.0 - 600.0, next() * 800.0 - 400.0);
-        let brightness = 0.3 + next() * 0.7;
-        let size = if next() > 0.9 { 2.0 } else { 1.0 };
-        commands.spawn((
-            Sprite::from_color(
-                Color::srgb(brightness * 0.8, brightness * 0.85, brightness),
-                Vec2::splat(size),
-            ),
-            Transform::from_translation(pos.extend(-10.0)),
-        ));
-    }
+    (0..400)
+        .map(|_| {
+            let pos = center + Vec2::new(next() * 1200.0 - 600.0, next() * 800.0 - 400.0);
+            let brightness = 0.3 + next() * 0.7;
+            let size = if next() > 0.9 { 2.0 } else { 1.0 };
+            (
+                Sprite::from_color(
+                    Color::srgb(brightness * 0.8, brightness * 0.85, brightness),
+                    Vec2::splat(size),
+                ),
+                Transform::from_translation(pos.extend(-10.0)),
+            )
+        })
+        .collect()
 }

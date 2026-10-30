@@ -75,7 +75,13 @@ impl Plugin for PlayerViewPlugin {
                 Update,
                 (
                     gather_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
-                    (animate_players, dash_trails, hide_other_decks, follow_camera)
+                    (
+                        animate_players,
+                        dash_trails,
+                        hide_other_decks,
+                        // The menus and lobby hold the camera on their backdrop.
+                        follow_camera.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Over))),
+                    )
                         .chain()
                         .after(move_players),
                 ),
