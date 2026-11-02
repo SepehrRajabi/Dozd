@@ -12,6 +12,11 @@ Each deck down is harder than the last: more rooms, more guards in each, and
 nastier ones, and once the alarm is up, reinforcements come faster, in bigger
 waves, and with more of the heavy guards.
 
+Every deck is laid out fresh from the run's seed. Its rooms come in many
+kinds: plain, L-shaped or cross-shaped rooms, long galleries and great halls,
+some kept bare and others with pillars, a bulkhead down the middle, staggered
+rows of cargo to hide behind or a grid of columns.
+
 Every deck's main room holds a vault, and the deeper it is, the richer:
 
 | Deck | Vault | Bars | Each | Total |
@@ -36,12 +41,17 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   sweep wider and novas come in threes.
 - **Vault Stalker:** a hulking stalker. Every 2-3 s it crouches and lays out
   three possible lunge routes (four enraged), each through up to three pirates
-  or feinting into open floor first. Only when it goes does it pick one, at
-  random, and lunge along it, hitting hard and throwing pirates aside. Now and
+  or feinting into open floor first. Each route shows in its own colour as a
+  corridor exactly as wide as the lunge hits, with a fuse burning along it
+  that reaches the far end the moment it goes. About half a second before it
+  goes (a third enraged) it picks one at random: that route turns white-hot,
+  its stops numbered, and the rest fade. Then it lunges along it, hitting hard
+  and throwing pirates aside. Now and
   then it rampages instead: it rears up, then dashes wall to wall across the
   room four times (six enraged), bracing at the wall between dashes with the
   next lane showing. A dash does massive damage. It stands spent for a moment
-  after either attack. Step off every route it shows, and out of the lane.
+  after either attack. Step off every route it shows, or at least the white
+  one, and out of the lane.
 
 - **Vault Brute:** a beefy, armoured brute with plenty of health.
   It only fights up close: it plods after you, raises its fists over a spot
@@ -122,13 +132,15 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | ![Main menu](docs/screenshots/menu.png) | ![Loadout](docs/screenshots/loadout.png) |
 | The main menu | Picking a class, abilities and guns: here the Hacker with Blackout |
 | ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
-| The crew lobby: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
+| The crew lobby, with the host's room code: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
 | Two pirates pulling bars out of deck 2's gold vault in lockdown, with guards closing in | The last pirate out takes the crew's pool, plus a bonus for the crewmate who left early |
 | ![Breach vote](docs/screenshots/breach.png) | ![Vault Keeper](docs/screenshots/boss_keeper.png) |
 | A crewmate calls the crew into the sealed vault: everyone has to press Y | The Vault Keeper sweeping a laser past the crew |
-| ![Vault Stalker](docs/screenshots/boss_stalker.png) | ![Vault Brute](docs/screenshots/boss_brute.png) |
-| The Vault Stalker winding up: three ways it might lunge, and only it knows which | The Vault Brute roaring guards in, one more appearing at the glowing spot |
+| ![Vault Stalker](docs/screenshots/boss_stalker.png) | ![Vault Stalker picking its route](docs/screenshots/boss_stalker_pick.png) |
+| The Vault Stalker winding up: three ways it might lunge, each as wide as it hits, a fuse burning down each to when it goes | Just before it goes, the route it picked turns white-hot, its stops numbered, and the rest fade |
+| ![Vault Brute](docs/screenshots/boss_brute.png) | ![Vault Prism](docs/screenshots/boss_prism.png) |
+| The Vault Brute roaring guards in, one more appearing at the glowing spot | The Vault Prism blinking across its vault, about to turn from exposed to reflecting |
 | ![Enemies](docs/screenshots/enemies.png) | |
 | The station's guards and vault bosses, under **EXTRAS** in the main menu | |
 

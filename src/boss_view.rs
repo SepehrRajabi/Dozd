@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::boss::{
     BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, PRISM_ARC_RANGE,
-    PRISM_COLOR, PrismLook, PrismPhase, SLAMS, StalkerLook, StalkerState, slam_wind_up,
+    PRISM_COLOR, PrismLook, PrismPhase, SLAMS, LUNGE_SWEEP, StalkerLook, StalkerState, slam_wind_up, stalker_wind_up,
 };
 use crate::combat::{Fade, Health, Shake};
 use crate::hud::{self, HudSlot, Meter};
@@ -32,10 +32,20 @@ const CHEVRON_GAP: f32 = 9.0;
 const CHEVRONS: usize = 240;
 /// How many marked pirates its routes can show reticles on at once.
 const RETICLES: usize = 12;
-/// Roughly how long a wind-up lasts, for its candidate routes to brighten
-/// over, and how long the route it takes flashes as it goes.
-const WIND_UP_LOOK: f32 = 0.85;
+/// How long the route it takes flashes as it settles on it, and again as it
+/// goes, and the white-hot it burns from then on.
 const CHOSEN_FLASH: f32 = 0.25;
+const CHOSEN_COLOR: Color = Color::srgb(1.0, 0.97, 0.9);
+/// Each route the stalker threatens gets its own hostile hue, so routes that
+/// cross can be told apart; none is favoured until it settles on one.
+const ROUTE_COLORS: [Color; 4] = [
+    Color::srgb(1.0, 0.2, 0.4),
+    Color::srgb(1.0, 0.85, 0.2),
+    Color::srgb(0.75, 0.4, 1.0),
+    MARK_COLOR,
+];
+/// How many legs, across all its routes, can show a danger corridor at once.
+const ROUTE_STRIPS: usize = 16;
 /// How wide a rampage lane's danger strip is, how far apart its chevrons sit
 /// and how many there can be, and how long a warning takes to reach full heat.
 const LANE_WIDTH: f32 = 36.0;
@@ -138,6 +148,7 @@ impl Plugin for BossViewPlugin {
                         draw_hands,
                         draw_beams,
                         draw_marks,
+                        draw_routes,
                         draw_lane,
                         draw_brute,
                         draw_prism,
@@ -215,6 +226,26 @@ struct BeamImpact;
 /// children sit in world space.
 #[derive(Component)]
 struct MarksLook(Entity);
+
+/// This frame's danger corridors, one per leg still ahead, for `draw_routes`.
+#[derive(Component, Default)]
+struct RoutePlan(Vec<StripPlan>);
+
+/// The `index`th danger corridor: one leg of a route, as wide as the lunge
+/// reaches, so a pirate can see how far to step off it. Laid along the leg,
+/// so its `StripPart` children sit in leg space.
+#[derive(Component)]
+struct RouteStrip(usize);
+
+/// A corridor's faint floor, the fuse filling it as the wind-up runs out, the
+/// bright line where the fuse has burnt to, or one of its two edges (`-1` or `1`).
+#[derive(Component, Clone, Copy, PartialEq)]
+enum StripPart {
+    Floor,
+    Fuse,
+    Head,
+    Edge(f32),
+}
 
 /// How long a guardian has been doing what it's doing, as far as a look can
 /// tell: reset whenever `key` changes.
@@ -894,8 +925,23 @@ fn draw_beams(
 
 fn dress_marks(add: On<Add, StalkerLook>, mut commands: Commands, assets: Res<AssetServer>) {
     commands
-        .spawn((Level, MarksLook(add.entity), StateClock::<StalkerState>::default(), Transform::from_xyz(0.0, 0.0, 13.0), Visibility::Hidden))
+        .spawn((
+            Level,
+            MarksLook(add.entity),
+            StateClock::<bool>::default(),
+            RoutePlan::default(),
+            StateClock::<StalkerState>::default(),
+            Transform::from_xyz(0.0, 0.0, 13.0),
+            Visibility::Hidden,
+        ))
         .with_children(|parent| {
+            for i in 0..ROUTE_STRIPS {
+                parent.spawn((RouteStrip(i), Transform::default(), Visibility::Hidden)).with_children(|strip| {
+                    for (part, z) in [(StripPart::Floor, -0.3), (StripPart::Fuse, -0.2), (StripPart::Head, -0.15), (StripPart::Edge(-1.0), -0.1), (StripPart::Edge(1.0), -0.1)] {
+                        strip.spawn((part, Sprite::from_color(MARK_COLOR, Vec2::ONE), Transform::from_xyz(0.0, 0.0, z)));
+                    }
+                });
+            }
             for i in 0..CHEVRONS {
                 parent.spawn((MarkChevron { index: i, color: MARK_COLOR }, Transform::default(), Visibility::Hidden)).with_children(
                     |chevron| {
@@ -943,38 +989,93 @@ struct PlannedMark {
     color: Color,
 }
 
-/// Where a stalker's chevrons and reticles go this frame.
+/// One leg's danger corridor: from `from` to `to`, its floor reaching `lead`
+/// back past `from` to cover the turn, its fuse filled `fuse` pixels from
+/// `from`. `floor`, `fill`, `head` and `edge` are its parts' opacities; `top`
+/// lays it over the others.
+#[derive(Clone, Copy)]
+struct StripPlan {
+    from: Vec2,
+    to: Vec2,
+    lead: f32,
+    fuse: f32,
+    color: Color,
+    floor: f32,
+    fill: f32,
+    head: f32,
+    edge: f32,
+    top: bool,
+}
+
+/// Where a stalker's corridors, chevrons and reticles go this frame.
 #[derive(Default)]
 struct MarksPlan {
+    strips: Vec<StripPlan>,
     spots: Vec<(Vec2, Vec2, Color)>,
     marks: Vec<PlannedMark>,
 }
 
-/// Lays out the chevrons along every route the stalker shows, from `from`,
-/// and a reticle on each point still ahead of it. Winding up, the candidate
-/// routes all look alike, dim and flickering out of step, quickening and
-/// brightening as the wind-up runs out, their reticles small and unnumbered;
-/// lunging, the one it took flashes white the moment it goes, then blinks as
-/// before with its points numbered in the order it'll reach them.
-fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, t: f32) -> MarksPlan {
+/// Lays out every route the stalker shows, from `from`: a corridor down each
+/// leg as wide as the lunge reaches, chevrons marching along its middle, and
+/// a reticle on each point still ahead of it. Winding up, each route has its
+/// own hue and they're drawn alike, flickering out of step, quickening and
+/// brightening as the wind-up (`wind_up` seconds) runs out, while a fuse
+/// fills each corridor from the stalker outward, reaching the far end the
+/// moment it goes; their reticles are small and unnumbered. Once it settles
+/// on a route (`since_chosen` seconds ago), that one flashes and turns
+/// white-hot, its points numbered in the order it'll reach them, and the
+/// rest fade out; it stays so as it lunges.
+fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, since_chosen: f32, t: f32, wind_up: f32) -> MarksPlan {
     let mut plan = MarksPlan::default();
     let choosing = stalker.state == StalkerState::WindUp;
     let reached = match stalker.state {
         StalkerState::Lunge { hit } => hit as usize,
         _ => 0,
     };
-    let heat = (since / WIND_UP_LOOK).clamp(0.0, 1.0);
-    for (r, route) in stalker.routes.iter().enumerate() {
-        let color: Color = if choosing {
-            let flicker = 0.5 + 0.5 * (t * (8.0 + 22.0 * heat) + r as f32 * 2.1).sin();
-            MARK_COLOR.with_alpha((0.2 + 0.55 * heat) * (0.55 + 0.45 * flicker))
+    let heat = (since / wind_up.max(0.01)).clamp(0.0, 1.0);
+    let settled = stalker.chosen.map(usize::from);
+    // The route it settled on goes first, so it claims any reticle it shares.
+    let order = settled.into_iter().chain((0..stalker.routes.len()).filter(|&r| Some(r) != settled));
+    for r in order {
+        let Some(route) = stalker.routes.get(r) else { continue };
+        let picked = !choosing || settled == Some(r);
+        let passed_over = !picked && settled.is_some();
+        let hue = Srgba::from(ROUTE_COLORS[r % ROUTE_COLORS.len()]);
+        let (color, floor, fill, head, edge): (Color, f32, f32, f32, f32) = if picked {
+            // A flash as it settles on the route, and again as it goes.
+            let flash = (1.0 - if choosing { since_chosen } else { since } / CHOSEN_FLASH).max(0.0);
+            let blink = (0.6 + 0.4 * (t * 18.0).sin()).max(flash);
+            let head = if choosing { 1.0 } else { 0.0 };
+            (CHOSEN_COLOR.with_alpha(blink), 0.08 + 0.06 * flash, 0.22 + 0.1 * blink, head, blink)
+        } else if passed_over {
+            (hue.with_alpha(0.2).into(), 0.02, 0.0, 0.0, 0.15)
         } else {
-            let flash = (1.0 - since / CHOSEN_FLASH).max(0.0);
-            let blink = 0.55 + 0.45 * (t * 14.0).sin();
-            Srgba::from(MARK_COLOR).mix(&Srgba::WHITE, flash).with_alpha(blink.max(flash)).into()
+            let flicker = 0.5 + 0.5 * (t * (8.0 + 22.0 * heat) + r as f32 * 2.1).sin();
+            let glow = 0.75 + 0.25 * flicker;
+            (hue.with_alpha((0.45 + 0.45 * heat) * glow).into(), 0.04 + 0.03 * heat, 0.1 + 0.08 * heat, 0.9, (0.35 + 0.5 * heat) * glow)
         };
         // Walk the route from the body, chevrons marching along it.
         let points: Vec<Vec2> = std::iter::once(from).chain(route.iter().skip(reached).copied()).collect();
+        // Winding up, the fuse burns out along the whole route as the wind-up
+        // runs down; once it goes, the whole route is lit.
+        let total: f32 = points.windows(2).map(|leg| leg[0].distance(leg[1])).sum();
+        let mut lit = if choosing { heat * total } else { total };
+        for (n, leg) in points.windows(2).enumerate() {
+            let length = leg[0].distance(leg[1]);
+            if length < 1.0 {
+                continue;
+            }
+            // Past the first, each leg's floor reaches back over the turn.
+            let lead = if n == 0 { 0.0 } else { LUNGE_SWEEP };
+            let fuse = lit.clamp(0.0, length);
+            lit -= length;
+            // Only the leg the fuse is burning along shows its head.
+            let head = if fuse > 0.0 && fuse < length { head } else { 0.0 };
+            plan.strips.push(StripPlan { from: leg[0], to: leg[1], lead, fuse, color, floor, fill, head, edge, top: picked });
+        }
+        if passed_over {
+            continue;
+        }
         let mut along = (t * 24.0) % CHEVRON_GAP;
         for leg in points.windows(2) {
             let length = leg[0].distance(leg[1]);
@@ -988,7 +1089,7 @@ fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, t: f32) -> MarksPla
         // Routes through the same point share its reticle.
         for (n, &mark) in route.iter().enumerate().skip(reached) {
             if !plan.marks.iter().any(|m| m.at.distance(mark) < 2.0) {
-                let label = if choosing { String::new() } else { (n + 1).to_string() };
+                let label = if picked { (n + 1).to_string() } else { String::new() };
                 plan.marks.push(PlannedMark { at: mark, label, first: n, color });
             }
         }
@@ -998,15 +1099,19 @@ fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, t: f32) -> MarksPla
 
 /// While the stalker winds up, lays a trail of marching chevrons along every
 /// route it might lunge, and a small throbbing reticle where each turns, none
-/// favoured, so nobody knows which it'll take. Once it lunges, only the route
-/// it took is left, its points numbered in the order it'll reach them.
+/// favoured, until moments before it goes it settles on one and shows it.
+/// Once it lunges, only the route it took is left, its points numbered in
+/// the order it'll reach them.
 #[allow(clippy::type_complexity)]
 fn draw_marks(
     mut commands: Commands,
     time: Res<Time>,
     seen: Res<BossSeen>,
-    stalkers: Query<(&StalkerLook, &Health, &Transform), (With<Keeper>, Without<MarksLook>)>,
-    mut looks: Query<(Entity, &MarksLook, &mut StateClock<StalkerState>, &mut Visibility), (Without<MarkChevron>, Without<MarkReticle>)>,
+    stalkers: Query<(&Keeper, &StalkerLook, &Health, &Transform), Without<MarksLook>>,
+    mut looks: Query<
+        (Entity, &MarksLook, &mut StateClock<StalkerState>, &mut StateClock<bool>, &mut RoutePlan, &mut Visibility),
+        (Without<MarkChevron>, Without<MarkReticle>),
+    >,
     mut chevrons: Query<(&ChildOf, &mut MarkChevron, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkReticle>, Without<MarkRing>)>,
     mut reticles: Query<(&ChildOf, &mut MarkReticle, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkChevron>, Without<MarkRing>)>,
     mut rings: Query<(&ChildOf, &mut Transform, &mut Sprite), (With<MarkRing>, Without<Keeper>)>,
@@ -1015,8 +1120,8 @@ fn draw_marks(
 ) {
     let t = time.elapsed_secs();
     let mut plans = Vec::new();
-    for (entity, look, mut clock, mut visibility) in &mut looks {
-        let Ok((stalker, health, body)) = stalkers.get(look.0) else {
+    for (entity, look, mut clock, mut settled, mut route_plan, mut visibility) in &mut looks {
+        let Ok((keeper, stalker, health, body)) = stalkers.get(look.0) else {
             commands.entity(entity).despawn();
             continue;
         };
@@ -1029,8 +1134,14 @@ fn draw_marks(
         let marking = matches!(stalker.state, StalkerState::WindUp | StalkerState::Lunge { .. });
         let shown = seen.0 && marking && !health.is_dead() && stalker.routes.iter().any(|route| !route.is_empty());
         visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        let since_chosen = settled.tick(stalker.chosen.is_some(), time.delta_secs());
         if shown {
-            plans.push((entity, plan_marks(stalker, body.translation.truncate(), since, t)));
+            let wind_up = stalker_wind_up(keeper.enraged);
+            let plan = plan_marks(stalker, body.translation.truncate(), since, since_chosen, t, wind_up);
+            route_plan.0.clone_from(&plan.strips);
+            plans.push((entity, plan));
+        } else if !route_plan.0.is_empty() {
+            route_plan.0.clear();
         }
     }
     let plan = |look: Entity| plans.iter().find(|(entity, _)| *entity == look).map(|(_, plan)| plan);
@@ -1080,6 +1191,44 @@ fn draw_marks(
             text.0.clone_from(&reticle.label);
         }
         color.set_if_neq(TextColor(reticle.color));
+    }
+}
+
+/// Lays each leg of the stalker's routes as a corridor as wide as its lunge
+/// reaches: a faint floor with bright edges, and a fuse filling it from the
+/// stalker outward as the wind-up runs out, a bright line at its head.
+#[allow(clippy::type_complexity)]
+fn draw_routes(
+    looks: Query<&RoutePlan>,
+    mut strips: Query<(&ChildOf, &RouteStrip, &mut Transform, &mut Visibility), Without<StripPart>>,
+    mut parts: Query<(&ChildOf, &StripPart, &mut Sprite, &mut Transform), Without<RouteStrip>>,
+) {
+    let plan_of = |parent: &ChildOf, index: usize| looks.get(parent.parent()).ok().and_then(|plan| plan.0.get(index)).copied();
+    for (parent, strip, mut transform, mut visibility) in &mut strips {
+        let Some(leg) = plan_of(parent, strip.0) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let dir = (leg.to - leg.from).normalize_or(Vec2::X);
+        transform.translation = leg.from.extend(if leg.top { -0.4 } else { -0.5 });
+        transform.rotation = Quat::from_rotation_z(dir.to_angle());
+    }
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Ok((strip_parent, strip, ..)) = strips.get(parent.parent()) else { continue };
+        let Some(leg) = plan_of(strip_parent, strip.0) else { continue };
+        let length = leg.from.distance(leg.to);
+        // In leg space: x runs from the leg's start (0) to its end.
+        let (from, to, y, width, alpha) = match *part {
+            StripPart::Floor => (-leg.lead, length, 0.0, LUNGE_SWEEP * 2.0, leg.floor),
+            StripPart::Fuse => (0.0, leg.fuse, 0.0, LUNGE_SWEEP * 2.0, if leg.fuse > 0.5 { leg.fill } else { 0.0 }),
+            StripPart::Head => (leg.fuse - 2.0, leg.fuse, 0.0, LUNGE_SWEEP * 2.0, leg.head),
+            StripPart::Edge(side) => (0.0, length, side * LUNGE_SWEEP, 1.0, leg.edge),
+        };
+        sprite.custom_size = Some(Vec2::new((to - from).max(0.0), width));
+        sprite.color = leg.color.with_alpha(alpha);
+        transform.translation.x = (from + to) / 2.0;
+        transform.translation.y = y;
     }
 }
 

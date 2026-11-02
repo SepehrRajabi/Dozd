@@ -125,6 +125,18 @@ fn guard_table(deck: u8) -> [(char, u32); 5] {
     ]
 }
 
+/// A room's outline, cut before the corridors are dug so they still reach it.
+/// Every outline keeps the middle open, where the arrival, lift and pad go.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shape {
+    /// The full rectangle.
+    Plain,
+    /// One corner walled off, for an L.
+    Notched,
+    /// All four corners walled off, for a plus.
+    Cross,
+}
+
 /// Every deck's vault room: an arena to fight the keeper in around the vault.
 /// Even sides, so the 2x2 vault sits dead centre.
 const VAULT_ROOM: (usize, usize) = (18, 12);
@@ -150,8 +162,10 @@ fn try_generate(seed: u32, deck: u8, decks: u8, attempt: u32) -> Option<Layout> 
 
     // The vault room goes in first, so it always gets its space.
     let rooms = place_rooms(&mut rng, 7 + deck as usize, Some(VAULT_ROOM));
+    let mut shapes = vec![Shape::Plain];
     for room in &rooms[1..] {
         fill(&mut tiles, room.x, room.y, room.w, room.h, '.');
+        shapes.push(cut_shape(&mut rng, &mut tiles, room));
     }
     let goal = 0;
     let room = rooms[goal];
@@ -186,7 +200,7 @@ fn try_generate(seed: u32, deck: u8, decks: u8, attempt: u32) -> Option<Layout> 
 
     for (i, room) in rooms.iter().enumerate() {
         if !special(i) {
-            decorate(&mut rng, &mut tiles, room);
+            decorate(&mut rng, &mut tiles, room, shapes[i]);
         }
     }
 
@@ -331,7 +345,14 @@ fn place_rooms(rng: &mut Gen, want: usize, first: Option<(usize, usize)>) -> Vec
         }
         let (w, h) = match first {
             Some(size) if rooms.is_empty() => size,
-            _ => (rng.range(7, 13), rng.range(6, 10)),
+            _ => match rng.range(0, 9) {
+                // A long gallery, one way or the other.
+                0 => (rng.range(15, 19), rng.range(5, 6)),
+                1 => (rng.range(5, 6), rng.range(12, 15)),
+                // A great hall.
+                2 => (rng.range(14, 16), rng.range(11, 12)),
+                _ => (rng.range(7, 13), rng.range(6, 10)),
+            },
         };
         let room = Rect {
             x: rng.range(2, COLS - w - 3),
@@ -417,29 +438,97 @@ fn carve(tiles: &mut [Vec<char>], from: (usize, usize), to: (usize, usize)) {
     }
 }
 
-/// Grates and pillars. Pillars sit two tiles in from the walls, so they never cut
-/// a room in half.
-fn decorate(rng: &mut Gen, tiles: &mut [Vec<char>], room: &Rect) {
-    match rng.range(0, 3) {
-        0 if room.w >= 10 && room.h >= 9 => {
-            for (x, y) in [
-                (room.x + 2, room.y + 2),
-                (room.x + room.w - 4, room.y + 2),
-                (room.x + 2, room.y + room.h - 4),
-                (room.x + room.w - 4, room.y + room.h - 4),
-            ] {
-                fill(tiles, x, y, 2, 2, '#');
+/// Gives a room its outline: most stay plain; a big enough one may lose a
+/// corner (an L) or all four (a plus). The corners cut are a third of the
+/// room each way, so the middle, where the arrival, lift and pad go, stays open.
+fn cut_shape(rng: &mut Gen, tiles: &mut [Vec<char>], room: &Rect) -> Shape {
+    if room.w < 9 || room.h < 8 {
+        return Shape::Plain;
+    }
+    let (cw, ch) = (room.w / 3, room.h / 3);
+    let corners = [
+        (room.x, room.y),
+        (room.x + room.w - cw, room.y),
+        (room.x, room.y + room.h - ch),
+        (room.x + room.w - cw, room.y + room.h - ch),
+    ];
+    match rng.range(0, 5) {
+        0 => {
+            let (x, y) = corners[rng.range(0, 3)];
+            fill(tiles, x, y, cw, ch, '#');
+            Shape::Notched
+        }
+        1 if room.w >= 10 && room.h >= 9 => {
+            for (x, y) in corners {
+                fill(tiles, x, y, cw, ch, '#');
+            }
+            Shape::Cross
+        }
+        _ => Shape::Plain,
+    }
+}
+
+/// Lays out a room's insides: grates, pillars, a bulkhead across it, rows of
+/// cargo or a hall of columns. Whatever goes in stands at least a tile clear
+/// of the walls and of everything else, so the floor never gets cut in two.
+/// Walls only go up in plain rooms, and only on bare floor.
+fn decorate(rng: &mut Gen, tiles: &mut [Vec<char>], room: &Rect, shape: Shape) {
+    let plain = shape == Shape::Plain;
+    let Rect { x, y, w, h } = *room;
+    match rng.range(0, 6) {
+        // Four pillars.
+        0 if plain && w >= 10 && h >= 9 => {
+            for (px, py) in [(x + 2, y + 2), (x + w - 4, y + 2), (x + 2, y + h - 4), (x + w - 4, y + h - 4)] {
+                fill(tiles, px, py, 2, 2, '#');
             }
         }
+        // A band of grating across the middle.
         1 => {
             let (_, cy) = room.center();
-            fill(tiles, room.x + 2, cy - 1, room.w - 4, 3, ',');
+            paint(tiles, x + 2, cy - 1, w.saturating_sub(4), 3, '.', ',');
         }
+        // Grating round the edge.
         2 => {
-            fill(tiles, room.x, room.y, room.w, room.h, ',');
-            fill(tiles, room.x + 1, room.y + 1, room.w - 2, room.h - 2, '.');
+            paint(tiles, x, y, w, h, '.', ',');
+            paint(tiles, x + 1, y + 1, w - 2, h - 2, ',', '.');
+        }
+        // A bulkhead down the middle the long way, with a way round each end.
+        3 if plain && w >= 9 && h >= 8 => {
+            if w >= h {
+                paint(tiles, x + w / 2, y + 2, 1, h - 4, '.', '#');
+            } else {
+                paint(tiles, x + 2, y + h / 2, w - 4, 1, '.', '#');
+            }
+        }
+        // Cargo stacked in short rows, staggered, for cover.
+        4 if plain && w >= 9 && h >= 7 => {
+            for (i, row) in (y + 2..y + h - 2).step_by(3).enumerate() {
+                let stagger = if i % 2 == 0 { 0 } else { 2 };
+                for col in (x + 2 + stagger..x + w - 4).step_by(5) {
+                    paint(tiles, col, row, 3, 1, '.', '#');
+                }
+            }
+        }
+        // Columns in a grid down a great hall.
+        5 if plain && w >= 14 && h >= 11 => {
+            for py in (y + 2..y + h - 3).step_by(4) {
+                for px in (x + 3..x + w - 4).step_by(4) {
+                    paint(tiles, px, py, 2, 2, '.', '#');
+                }
+            }
         }
         _ => {}
+    }
+}
+
+/// Turns every `from` tile in the `w` x `h` block at (`x`, `y`) to `to`.
+fn paint(tiles: &mut [Vec<char>], x: usize, y: usize, w: usize, h: usize, from: char, to: char) {
+    for row in &mut tiles[y..y + h] {
+        for tile in &mut row[x..x + w] {
+            if *tile == from {
+                *tile = to;
+            }
+        }
     }
 }
 
@@ -615,6 +704,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn room_layouts_keep_the_floor_whole_and_the_middle_open() {
+        let mut shapes = Vec::new();
+        for seed in 1..400 {
+            let mut rng = Gen::new(seed, 0, 0);
+            for (w, h) in [(7, 6), (9, 8), (10, 9), (13, 10), (18, 5), (5, 14), (16, 12)] {
+                let room = Rect { x: 3, y: 3, w, h };
+                let mut tiles = vec![vec!['#'; COLS]; ROWS];
+                fill(&mut tiles, room.x, room.y, w, h, '.');
+                let shape = cut_shape(&mut rng, &mut tiles, &room);
+                shapes.push(shape);
+                // Room for the pad, the widest thing set in a room's middle.
+                let (cx, cy) = room.center();
+                for (y, row) in tiles.iter().enumerate().take(cy + 2).skip(cy - 1) {
+                    for (x, &tile) in row.iter().enumerate().take(cx + 2).skip(cx - 2) {
+                        assert_eq!(tile, '.', "seed {seed} {w}x{h} {shape:?}: middle walled at ({x},{y})");
+                    }
+                }
+                decorate(&mut rng, &mut tiles, &room, shape);
+                let dist = walk_distances(&tiles, (cx - 2, cy - 1));
+                for y in room.y..room.y + h {
+                    for x in room.x..room.x + w {
+                        assert!(
+                            !is_open(tiles[y][x]) || dist[y][x] != u32::MAX,
+                            "seed {seed} {w}x{h} {shape:?}: ({x},{y}) cut off"
+                        );
+                    }
+                }
+            }
+        }
+        for shape in [Shape::Plain, Shape::Notched, Shape::Cross] {
+            assert!(shapes.contains(&shape), "{shape:?} never comes up");
         }
     }
 

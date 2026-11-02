@@ -115,6 +115,10 @@ const PROWL_JITTER: f32 = 0.6;
 /// Seconds crouched with its routes showing before it goes.
 const WIND_UP: f32 = 0.95;
 const ENRAGED_WIND_UP: f32 = 0.75;
+/// How long before it goes it settles on a route and shows which, so the
+/// crew has a moment to react.
+const REVEAL: f32 = 0.45;
+const ENRAGED_REVEAL: f32 = 0.35;
 /// How many routes it threatens while winding up; it takes one at random.
 const ROUTES: usize = 3;
 const ENRAGED_ROUTES: usize = 4;
@@ -140,6 +144,9 @@ const LEG_TIME: f32 = 0.6;
 const LUNGE_STEP: f32 = 3.0;
 /// Pirates this close to its body's edge as it lunges or dashes by are hit.
 const LUNGE_REACH: f32 = 4.0;
+/// How far either side of its path a lunge reaches: a pirate whose hurtbox
+/// stays outside this is missed.
+pub const LUNGE_SWEEP: f32 = KEEPER_HALF + LUNGE_REACH;
 /// A lunge's damage to each pirate it goes through (once each), and how hard it throws them.
 const LUNGE_HIT: f32 = 48.0;
 const LUNGE_KNOCKBACK: f32 = 200.0;
@@ -382,7 +389,7 @@ impl KeeperKind {
     pub fn details(self) -> &'static str {
         match self {
             Self::Hands => "Guards a vault. Two floating hands sweep lasers and hurl nova orbs; badly hurt, both attack at once.",
-            Self::Stalker => "Guards a vault. Shows several ways it might lunge, then takes one at random: get off them all. Sometimes rampages wall to wall instead. Riot shields stop it.",
+            Self::Stalker => "Guards a vault. Shows several ways it might lunge; just before it goes, the one it picked turns white: get off it. Sometimes rampages wall to wall instead. Riot shields stop it.",
             Self::Brute => "Guards a vault. A beefy brute that slams whoever it reaches, and keeps calling in guards to fight for it.",
             Self::Prism => "Guards a vault. Shifts between negating all damage and reflecting every shot back; hit it while it's exposed. Blinks anywhere in a moment and lashes the crew with arcs.",
         }
@@ -486,7 +493,8 @@ pub enum StalkerState {
     /// Circling, waiting out its cooldown.
     Prowl,
     /// Crouched, winding up: `StalkerLook::routes` shows every way it might
-    /// lunge; nobody knows which until it goes.
+    /// lunge; nobody knows which until, moments before it goes, it settles on
+    /// one (`StalkerLook::chosen`).
     WindUp,
     /// Lunging along the one route it picked (`routes[0]`), `hit` of its legs done.
     Lunge { hit: u8 },
@@ -509,6 +517,8 @@ pub struct StalkerLook {
     /// it would pass through in order, starting after its body. While it
     /// lunges, only the route it picked. Empty otherwise.
     pub routes: Vec<Vec<Vec2>>,
+    /// Late in a wind-up, which of `routes` it has settled on. `None` otherwise.
+    pub chosen: Option<u8>,
     /// While it rears up or rampages, the current (or next) dash's lane,
     /// from wall to wall. `None` otherwise.
     pub lane: Option<[Vec2; 2]>,
@@ -532,6 +542,16 @@ pub enum BruteState {
 
 /// How far from `BruteLook::at` a Vault Brute's slam reaches.
 pub const BRUTE_SLAM_RADIUS: f32 = 32.0;
+
+/// Seconds a vault stalker crouches with its routes showing before it lunges.
+pub fn stalker_wind_up(enraged: bool) -> f32 {
+    if enraged { ENRAGED_WIND_UP } else { WIND_UP }
+}
+
+/// Seconds before a vault stalker lunges that it shows which route it'll take.
+fn stalker_reveal(enraged: bool) -> f32 {
+    if enraged { ENRAGED_REVEAL } else { REVEAL }
+}
 
 /// Seconds a Vault Brute's fists stay raised before its `blow`th slam.
 pub fn slam_wind_up(blow: u8, enraged: bool) -> f32 {
@@ -750,7 +770,7 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
                 hits: Vec::new(),
                 rampaged: false,
             },
-            StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), lane: None },
+            StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), chosen: None, lane: None },
         ));
         return;
     }
@@ -1564,7 +1584,7 @@ fn drive_stalker(
         knockback.0 = Vec2::ZERO;
     }
     if !keeper.awake {
-        look.set_if_neq(StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), lane: None });
+        look.set_if_neq(StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), chosen: None, lane: None });
         return;
     }
     let start = body.translation.truncate();
@@ -1599,6 +1619,7 @@ fn drive_stalker(
 
     let mut state = look.state;
     let mut routes = look.routes.clone();
+    let mut chosen = look.chosen;
     let mut lane = look.lane;
     brain.timer += dt;
     match state {
@@ -1630,11 +1651,15 @@ fn drive_stalker(
             }
         }
         StalkerState::WindUp => {
+            let wind_up = stalker_wind_up(enraged);
             if routes.is_empty() {
                 state = StalkerState::Prowl;
-            } else if brain.timer >= if enraged { ENRAGED_WIND_UP } else { WIND_UP } {
-                // Only now does anyone find out which way it's going.
-                let pick = roll(&mut rng, routes.len());
+            } else if chosen.is_none() && brain.timer >= wind_up - stalker_reveal(enraged) {
+                // Only now does anyone find out which way it's going, with a moment to get clear.
+                chosen = Some(roll(&mut rng, routes.len()) as u8);
+            }
+            if !routes.is_empty() && brain.timer >= wind_up {
+                let pick = chosen.map_or(0, usize::from).min(routes.len() - 1);
                 routes = vec![routes.swap_remove(pick)];
                 state = StalkerState::Lunge { hit: 0 };
                 brain.timer = 0.0;
@@ -1724,6 +1749,9 @@ fn drive_stalker(
     if !matches!(state, StalkerState::WindUp | StalkerState::Lunge { .. }) {
         routes.clear();
     }
+    if state != StalkerState::WindUp {
+        chosen = None;
+    }
     if !matches!(state, StalkerState::Rear | StalkerState::Rampage { .. }) {
         lane = None;
     }
@@ -1732,7 +1760,7 @@ fn drive_stalker(
         body.translation.x = pos.x;
         body.translation.y = pos.y;
     }
-    look.set_if_neq(StalkerLook { state, routes, lane });
+    look.set_if_neq(StalkerLook { state, routes, chosen, lane });
 }
 
 /// Wakes, moves and fights the vault brute: it plods after the nearest pirate
@@ -2592,6 +2620,15 @@ mod tests {
         /// `phase` and keeping it, never blinking nor arcing; no guards about.
         /// Returns the app, the prism and the pirate.
         fn prism_in(phase: PrismPhase) -> (App, Entity, Entity) {
+            let (mut app, prism, pirate) = keeper_in(KeeperKind::Prism);
+            hold(&mut app, prism, phase);
+            app.update();
+            (app, prism, pirate)
+        }
+
+        /// A solo host whose first vault holds an awake guardian of `kind`; no
+        /// guards about. Returns the app, the guardian and the pirate.
+        fn keeper_in(kind: KeeperKind) -> (App, Entity, Entity) {
             let mut app = App::new();
             app.add_plugins((MinimalPlugins, StatesPlugin))
                 .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(DT)))
@@ -2610,18 +2647,16 @@ mod tests {
                 app.world_mut().despawn(e);
             }
             let at = app.world().resource::<RoomGrid>().gate.keeper;
-            spawn_keeper(&mut app.world_mut().commands(), at, 1, KeeperKind::Prism);
+            spawn_keeper(&mut app.world_mut().commands(), at, 1, kind);
             app.world_mut().flush();
-            let mut prisms = app.world_mut().query_filtered::<Entity, With<PrismBrain>>();
-            let prism = prisms.single(app.world()).unwrap();
+            let mut keepers = app.world_mut().query_filtered::<Entity, With<Keeper>>();
+            let guardian = keepers.single(app.world()).unwrap();
             let mut pirates = app.world_mut().query_filtered::<Entity, With<Player>>();
             let pirate = pirates.single(app.world()).unwrap();
-            let mut keeper = *app.world().get::<Keeper>(prism).unwrap();
-            keeper.wake(&mut app.world_mut().get_mut::<Health>(prism).unwrap(), 1);
-            *app.world_mut().get_mut::<Keeper>(prism).unwrap() = keeper;
-            hold(&mut app, prism, phase);
-            app.update();
-            (app, prism, pirate)
+            let mut keeper = *app.world().get::<Keeper>(guardian).unwrap();
+            keeper.wake(&mut app.world_mut().get_mut::<Health>(guardian).unwrap(), 1);
+            *app.world_mut().get_mut::<Keeper>(guardian).unwrap() = keeper;
+            (app, guardian, pirate)
         }
 
         /// Puts the prism in `phase` for good, blinks and arcs held off.
@@ -2799,6 +2834,44 @@ mod tests {
                 }
                 assert!(!app.world().get::<PrismLook>(prism).unwrap().charging);
             }
+        }
+
+        #[test]
+        fn the_stalker_shows_its_route_in_time_then_takes_it() {
+            let (mut app, stalker, pirate) = keeper_in(KeeperKind::Stalker);
+            let (spot, _) = beside(&app, stalker, 60.0);
+            place(&mut app, pirate, spot);
+            app.world_mut().get_mut::<Health>(pirate).unwrap().negating = true;
+            {
+                let mut brain = app.world_mut().get_mut::<StalkerBrain>(stalker).unwrap();
+                brain.cooldown = 0.0;
+                // Just rampaged, so it lunges next.
+                brain.rampaged = true;
+            }
+            let look = |app: &App| app.world().get::<StalkerLook>(stalker).unwrap().clone();
+            let mut wound = 0.0;
+            let mut settled = None;
+            for _ in 0..120 {
+                app.update();
+                let now = look(&app);
+                match now.state {
+                    StalkerState::WindUp => {
+                        wound += DT;
+                        if let (None, Some(pick)) = (&settled, now.chosen) {
+                            settled = Some((wound, now.routes[pick as usize].clone()));
+                        }
+                    }
+                    StalkerState::Lunge { .. } => {
+                        let (when, route) = settled.expect("it showed its route before going");
+                        assert!(wound - when >= REVEAL - 2.0 * DT, "shown {:.2} s before it went", wound - when);
+                        assert_eq!(now.routes, vec![route], "it takes the route it showed");
+                        assert_eq!(now.chosen, None);
+                        return;
+                    }
+                    _ => assert!(wound == 0.0, "nothing else between its wind-up and its lunge"),
+                }
+            }
+            panic!("it never lunged");
         }
 
         #[test]
