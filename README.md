@@ -25,8 +25,8 @@ Every deck's main room holds a vault, and the deeper it is, the richer:
 | 2 | Gold | 32 | 310 cr | 9,920 cr |
 | 3 | Platinum | 40 | 560 cr | 22,400 cr |
 
-Each vault room is sealed off from the rest of the deck behind a gate, and a
-boss waits inside. Step up to the gate and you call the crew
+Each vault room is a big armoured strongroom sealed off from the rest of the
+deck behind a gate, and a boss waits inside. Step up to the gate and you call the crew
 in: every living crewmate on the deck has to press Y to join you (N turns it
 down, and the call lapses after 20 s). Once all have said yes, the whole crew
 is let in together and the gate locks behind you until the boss is down. You
@@ -39,18 +39,19 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   gathers a nova orb in its palm and hurls it, arcing at whoever it passes and
   bursting on impact. Enraged, both hands attack at once and faster, lasers
   sweep wider and novas come in threes.
-- **Vault Stalker:** a hulking stalker. Every 2-3 s it crouches and lays out
-  three possible lunge routes (four enraged), each through up to three pirates
-  or feinting into open floor first. Each route shows in its own colour as a
-  corridor exactly as wide as the lunge hits, with a fuse burning along it
-  that reaches the far end the moment it goes. About half a second before it
-  goes (a third enraged) it picks one at random: that route turns white-hot,
-  its stops numbered, and the rest fade. Then it lunges along it, hitting hard
-  and throwing pirates aside. Now and
+- **Vault Stalker:** a hulking stalker. Every 2-3 s it crouches and fans out
+  its possible lunges evenly all around it, like the spokes of a wheel: three
+  to five of them (four to seven enraged), one always aimed at a pirate. Each
+  spoke shows as a corridor exactly as wide as the lunge hits, with a fuse
+  burning along it that reaches the far end the moment it goes. About half a
+  second before it goes (a third enraged) it picks one at random: that spoke
+  turns white-hot and the rest fade. Then it lunges along it, hitting hard and
+  throwing pirates aside, and half the time (three in four enraged) it
+  crouches and fans out again from where it landed for a second lunge. Now and
   then it rampages instead: it rears up, then dashes wall to wall across the
   room four times (six enraged), bracing at the wall between dashes with the
   next lane showing. A dash does massive damage. It stands spent for a moment
-  after either attack. Step off every route it shows, or at least the white
+  after either attack. Stand between the spokes, or at least off the white
   one, and out of the lane.
 
 - **Vault Brute:** a beefy, armoured brute with plenty of health.
@@ -58,7 +59,12 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   just in front of it, then slams it, hitting everyone in the circle hard.
   Every 12 s (9 s enraged, and once as it enrages) it roars and calls in
   guards to fight for it, a mix of every kind, all enraged as if by a Herald's war cry, more the bigger the crew and
-  more again enraged; their spots glow while it roars. Summoned guards drop
+  more again enraged; their spots glow while it roars. It keeps calling them
+  in whether or not you've dealt with the last lot, so don't let them pile up.
+  Each time it's worn down past three quarters, half and a quarter of its
+  health, it hardens for 4 s: a steel shell clamps over it, nothing hurts it,
+  and it slowly heals while its guards fight on. Plates round the shell count
+  down the time left. Summoned guards drop
   ammo but never credits, and they all fall with the Brute, except any a Hacker turned: those fight on, still enraged.
 - **Vault Prism:** a floating crystal with the most health of all, which
   shifts between phases. Exposed, it can be hurt by anything. Under its amber
@@ -134,15 +140,15 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | ![Crew lobby](docs/screenshots/lobby.png) | ![Perks](docs/screenshots/perks.png) |
 | The crew lobby, with the host's room code: one of each class, picked by whoever took it | The perks lying around each deck, under **EXTRAS** |
 | ![A raid](docs/screenshots/raid.png) | ![Results](docs/screenshots/results.png) |
-| Two pirates pulling bars out of deck 2's gold vault in lockdown, with guards closing in | The last pirate out takes the crew's pool, plus a bonus for the crewmate who left early |
+| With its guardian down, the Gunner pulls bars out of the silver vault in its strongroom, in lockdown, with guards closing in | The crew made it out together: the pool is split between everyone on the pad |
 | ![Breach vote](docs/screenshots/breach.png) | ![Vault Keeper](docs/screenshots/boss_keeper.png) |
-| A crewmate calls the crew into the sealed vault: everyone has to press Y | The Vault Keeper sweeping a laser past the crew |
+| A crewmate calls the crew into the sealed vault: everyone has to press Y | The Vault Keeper sweeping a laser across the crew |
 | ![Vault Stalker](docs/screenshots/boss_stalker.png) | ![Vault Stalker picking its route](docs/screenshots/boss_stalker_pick.png) |
-| The Vault Stalker winding up: three ways it might lunge, each as wide as it hits, a fuse burning down each to when it goes | Just before it goes, the route it picked turns white-hot, its stops numbered, and the rest fade |
-| ![Vault Brute](docs/screenshots/boss_brute.png) | ![Vault Prism](docs/screenshots/boss_prism.png) |
-| The Vault Brute roaring guards in, one more appearing at the glowing spot | The Vault Prism blinking across its vault, about to turn from exposed to reflecting |
-| ![Enemies](docs/screenshots/enemies.png) | |
-| The station's guards and vault bosses, under **EXTRAS** in the main menu | |
+| The Vault Stalker winding up: its lunges fanned out evenly around it, one through the crew, each as wide as it hits, a fuse burning down each to when it goes | Just before it goes, the lunge it picked turns white-hot and the rest fade |
+| ![Vault Brute](docs/screenshots/boss_brute.png) | ![Vault Brute hardened](docs/screenshots/boss_brute_harden.png) |
+| The Vault Brute roaring guards in at the glowing spots | Worn down, the Vault Brute hardens: immune and healing, its plates counting down the time left |
+| ![Vault Prism](docs/screenshots/boss_prism.png) | ![Enemies](docs/screenshots/enemies.png) |
+| The Vault Prism behind its mirror shards, lashing the crew with arcs | The station's guards and vault bosses, under **EXTRAS** in the main menu |
 
 ## Run
 

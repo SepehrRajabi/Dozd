@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::GameState;
 use crate::challenge::Rewards;
 use crate::challenge_hud::reward_chips;
-use crate::class::{Boons, LocalLoadout, Loadouts, PirateClass, effects};
+use crate::abilities::Passive;
+use crate::class::{Ability, Boons, LocalLoadout, Loadouts, PirateClass, ability_status, effects, passive_tag};
 use crate::combat::Health;
-use crate::hud::{self, HudSlot, Meter};
+use crate::hud::{self, HudSlot, Meter, PirateCard, PirateHeader};
 use crate::mission::MissionStatus;
 use crate::net::{ChooseLoadout, LocalId, LocalPlayer, NetMode, authority};
 use crate::player::{PirateStatus, Player, slot_color};
@@ -24,8 +25,8 @@ use crate::player::{PirateStatus, Player, slot_color};
 const LINK_INTERVAL: f32 = 1.0;
 /// Seconds a pirate who dropped out stays on the panel, marked as gone.
 const GONE_TIME: f32 = 6.0;
-const ROW_WIDTH: f32 = 230.0;
-const BAR_WIDTH: f32 = 130.0;
+const ROW_WIDTH: f32 = 250.0;
+const BAR_WIDTH: f32 = 110.0;
 const SHIELD_COLOR: Color = Color::srgb(0.45, 0.7, 1.0);
 const HULL_COLOR: Color = Color::srgb(0.4, 0.85, 0.45);
 const HULL_LOW: Color = Color::srgb(1.0, 0.35, 0.3);
@@ -47,8 +48,8 @@ pub struct CrewViewPlugin;
 impl Plugin for CrewViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PickedClass>()
-            .add_systems(Startup, (spawn_class_picker, spawn_local_effects))
-            .add_systems(Update, (update_crew_panel, update_local_effects, update_class_picker));
+            .add_systems(Startup, (spawn_class_picker, spawn_local_card, spawn_local_effects))
+            .add_systems(Update, (update_crew_panel, update_local_card, update_local_effects, update_class_picker));
     }
 }
 
@@ -171,6 +172,10 @@ struct CrewRow {
     shield: Entity,
     hull: Entity,
     credits: Entity,
+    /// Their ability, how it stands, and their passive.
+    ability: Entity,
+    ready: Entity,
+    passive: Entity,
     effects: Entity,
 }
 
@@ -179,8 +184,13 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
     let status = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
     let link = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
     let shield = commands.spawn(hud::meter(BAR_WIDTH, 4.0, SHIELD_COLOR)).id();
-    let hull = commands.spawn(hud::meter(BAR_WIDTH, 6.0, HULL_COLOR)).id();
-    let credits = commands.spawn(hud::text("", 12.0, hud::GOLD)).id();
+    let hull = commands.spawn(hud::meter_ticked(Val::Px(BAR_WIDTH), 7.0, HULL_COLOR, 4)).id();
+    // One line each: a big haul or long name never wraps the row taller.
+    let line = || TextLayout::no_wrap();
+    let credits = commands.spawn((hud::text("", 12.0, hud::GOLD), line(), Node { flex_shrink: 0.0, ..default() })).id();
+    let ability = commands.spawn((hud::text("", 11.0, hud::TEXT), line())).id();
+    let ready = commands.spawn((hud::text("", 11.0, hud::DIM), line())).id();
+    let passive = commands.spawn((hud::text("", 11.0, hud::LABEL), line())).id();
     let effects = commands.spawn(hud::chip_row()).id();
 
     let spacer = || Node { flex_grow: 1.0, ..default() };
@@ -188,7 +198,7 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
         .spawn(Node { column_gap: Val::Px(6.0), align_items: AlignItems::Center, ..default() })
         .with_children(|line| {
             line.spawn(hud::text(format!("P{}", player.slot + 1), 12.0, slot_color(player.slot)));
-            line.spawn(hud::text(class.name(), 12.0, class.color()));
+            line.spawn(hud::text(class.name(), 13.0, class.color()));
             line.spawn(spacer());
         })
         .add_children(&[status, link])
@@ -197,41 +207,60 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
         .spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), ..default() })
         .add_children(&[shield, hull])
         .id();
-    let bottom = commands
+    let middle = commands
         .spawn(Node { column_gap: Val::Px(8.0), align_items: AlignItems::Center, ..default() })
         .add_children(&[bars])
         .with_child(spacer())
         .add_children(&[credits])
         .id();
+    let kit = commands
+        .spawn(Node { column_gap: Val::Px(5.0), align_items: AlignItems::Center, ..default() })
+        .add_children(&[ability, ready])
+        .with_child(spacer())
+        .add_children(&[passive])
+        .id();
     let body = commands
         .spawn(Node {
             flex_direction: FlexDirection::Column,
             flex_grow: 1.0,
-            row_gap: Val::Px(3.0),
+            min_width: Val::Px(0.0),
+            overflow: Overflow::clip_x(),
+            row_gap: Val::Px(4.0),
             ..default()
         })
-        .add_children(&[top, bottom, effects])
+        .add_children(&[top, middle, kit, effects])
         .id();
 
     commands
         .spawn((
-            hud::panel_accent(
+            hud::panel_class(
                 Node {
                     width: Val::Px(ROW_WIDTH),
                     column_gap: Val::Px(8.0),
-                    align_items: AlignItems::Center,
-                    padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
+                    align_items: AlignItems::FlexStart,
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
                     ..default()
                 },
                 class.color(),
             ),
-            children![(
-                ImageNode::new(assets.load(class.sprite())),
-                Node { width: Val::Px(24.0), height: Val::Px(24.0), ..default() },
-            )],
+            hud::wash(class.color()),
+            children![hud::portrait(assets.load(class.sprite()), class.color(), 24.0)],
         ))
         .add_children(&[body])
-        .insert(CrewRow { owner: player.owner, slot: player.slot, gone: None, status, link, shield, hull, credits, effects })
+        .insert(CrewRow {
+            owner: player.owner,
+            slot: player.slot,
+            gone: None,
+            status,
+            link,
+            shield,
+            hull,
+            credits,
+            ability,
+            ready,
+            passive,
+            effects,
+        })
         .id()
 }
 
@@ -243,7 +272,7 @@ fn update_crew_panel(
     local: Res<LocalId>,
     slots: Query<(Entity, &HudSlot)>,
     mission: Option<Single<&MissionStatus>>,
-    players: Query<(&Player, &Health, Option<&Link>, &Boons, Option<&Rewards>)>,
+    players: Query<(&Player, &Health, Option<&Link>, &Boons, Option<&Rewards>, &Ability)>,
     mut rows: Query<(Entity, &mut CrewRow)>,
     mut chips: hud::ChipParts,
     mut meters: Query<&mut Meter>,
@@ -273,7 +302,7 @@ fn update_crew_panel(
     for (entity, mut row) in &mut rows {
         let player = players.iter().find(|(p, ..)| p.owner == row.owner);
         let texts = &mut chips.2;
-        let Some((player, health, link, boons, rewards)) = player else {
+        let Some((player, health, link, boons, rewards, ability)) = player else {
             // The whole run is gone (back to the menu or a new run): no ghosts.
             if !anyone || !networked {
                 commands.entity(entity).despawn();
@@ -328,12 +357,168 @@ fn update_crew_panel(
             meter.frac = frac;
             meter.color = if frac < 0.35 { HULL_LOW } else { HULL_COLOR };
         }
-        set_text(&mut chips.2, row.credits, &format!("{} cr", player.credits), hud::GOLD);
-        hud::show_chips(&mut chips, row.effects, &with_rewards(rewards, effects(player.passive, health, boons)));
+        set_text(&mut chips.2, row.credits, &hud::credits(player.credits), hud::GOLD);
+
+        // What they can bring to bear: their ability and whether it's ready,
+        // and their passive, lit while it's reaching anyone.
+        let texts = &mut chips.2;
+        let (name, state) = match player.active {
+            Some(active) => match ability_status(active, ability, boons) {
+                Some((state, ready)) => {
+                    let color = active.stats().map_or(hud::TEXT, |s| s.color);
+                    ((active.name(), if ready { color } else { hud::DIM }), (state, if ready { Color::WHITE } else { hud::DIM }))
+                }
+                None => ((active.name(), hud::DIM), (String::new(), hud::DIM)),
+            },
+            None => (("", hud::DIM), (String::new(), hud::DIM)),
+        };
+        set_text(texts, row.ability, name.0, name.1);
+        set_text(texts, row.ready, &state.0, state.1);
+        let reaching = passive_tag(player.passive, boons).is_some() && reaches_crew(player.passive);
+        set_text(texts, row.passive, player.passive.name(), if reaching { player.class.color() } else { hud::LABEL });
+        hud::show_chips(&mut chips, row.effects, &with_rewards(rewards, effects(health, boons)));
     }
 }
 
-/// This machine's pirate's effects, under the ability in the top-left panel.
+/// Whether a passive works through the crew, so its tag says how many it reaches.
+fn reaches_crew(passive: Passive) -> bool {
+    !matches!(passive, Passive::Armor | Passive::Ricochet)
+}
+
+/// The parts of this machine's pirate's card that `update_local_card` keeps
+/// in step: who they are in its header, and their passive under the ability.
+#[derive(Resource)]
+struct LocalCard {
+    frame: Entity,
+    portrait: Entity,
+    class: Entity,
+    slot: Entity,
+    role: Entity,
+    pill: Entity,
+    passive: Entity,
+    tag: Entity,
+    details: Entity,
+}
+
+fn spawn_local_card(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
+    let portrait = commands.spawn((ImageNode::default(), Node { width: Val::Px(30.0), height: Val::Px(30.0), ..default() })).id();
+    let frame = commands
+        .spawn((
+            Node {
+                width: Val::Px(36.0),
+                height: Val::Px(36.0),
+                padding: UiRect::all(Val::Px(2.0)),
+                border: UiRect { bottom: Val::Px(2.0), ..UiRect::all(Val::Px(1.0)) },
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(hud::EDGE),
+        ))
+        .add_children(&[portrait])
+        .id();
+    let class = commands.spawn(hud::text("", 17.0, hud::TEXT)).id();
+    let slot = commands.spawn((hud::text("", 10.0, hud::TEXT), TextLayout::no_wrap())).id();
+    let role = commands.spawn((hud::text("", 10.0, hud::DIM), TextLayout::no_wrap())).id();
+    // One line each, cut off at the haul rather than wrapped under it.
+    let who = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            min_width: Val::Px(0.0),
+            flex_shrink: 1.0,
+            overflow: Overflow::clip_x(),
+            ..default()
+        })
+        .add_children(&[class])
+        .with_children(|who| {
+            who.spawn(Node { column_gap: Val::Px(6.0), ..default() }).add_children(&[slot, role]);
+        })
+        .id();
+    commands
+        .entity(hud::slot(&slots, HudSlot::Pirate))
+        .insert(Node { column_gap: Val::Px(8.0), align_items: AlignItems::Center, flex_grow: 1.0, min_width: Val::Px(0.0), ..default() })
+        .add_children(&[frame, who]);
+
+    let pill = commands
+        .spawn((
+            Node {
+                padding: UiRect::axes(Val::Px(4.0), Val::Px(0.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BorderColor::all(hud::EDGE),
+            children![hud::text("PASSIVE", 9.0, hud::LABEL)],
+        ))
+        .id();
+    let passive = commands.spawn(hud::text("", 13.0, hud::TEXT)).id();
+    let tag = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
+    let details = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
+    commands.entity(hud::slot(&slots, HudSlot::Passive)).with_children(|slot| {
+        slot.spawn(Node { column_gap: Val::Px(8.0), align_items: AlignItems::Center, ..default() })
+            .add_children(&[pill, passive])
+            .with_child(Node { flex_grow: 1.0, ..default() })
+            .add_children(&[tag]);
+    }).add_children(&[details]);
+    commands.insert_resource(LocalCard { frame, portrait, class, slot, role, pill, passive, tag, details });
+}
+
+/// Fits the card to this machine's pirate: their portrait, class and slot,
+/// backed and washed in their class's colour, and how their passive is doing.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_local_card(
+    assets: Res<AssetServer>,
+    card: Res<LocalCard>,
+    player: Option<Single<(&Player, &Boons), With<LocalPlayer>>>,
+    mut shown: Local<Option<(PirateClass, Passive, u8)>>,
+    panel: Single<Entity, With<PirateCard>>,
+    mut header: Single<&mut BackgroundGradient, With<PirateHeader>>,
+    mut borders: Query<&mut BorderColor>,
+    mut backgrounds: Query<&mut BackgroundColor>,
+    mut images: Query<&mut ImageNode>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
+) {
+    let Some(player) = player else { return };
+    let (player, boons) = *player;
+    let (class, passive) = (player.class, player.passive);
+    let tint = class.color();
+
+    if *shown != Some((class, passive, player.slot)) {
+        *shown = Some((class, passive, player.slot));
+        if let Ok(mut border) = borders.get_mut(*panel) {
+            border.set_if_neq(BorderColor { top: tint, ..BorderColor::all(hud::EDGE) });
+        }
+        if let Ok(mut background) = backgrounds.get_mut(*panel) {
+            background.set_if_neq(BackgroundColor(hud::card_back(tint)));
+        }
+        header.0 = hud::wash(tint).0;
+        if let Ok(mut border) = borders.get_mut(card.frame) {
+            border.set_if_neq(BorderColor::all(tint.with_alpha(0.7)));
+        }
+        if let Ok(mut background) = backgrounds.get_mut(card.frame) {
+            background.set_if_neq(BackgroundColor(tint.with_alpha(0.14)));
+        }
+        if let Ok(mut image) = images.get_mut(card.portrait) {
+            image.image = assets.load(class.sprite());
+        }
+        if let Ok(mut border) = borders.get_mut(card.pill) {
+            border.set_if_neq(BorderColor::all(tint.with_alpha(0.5)));
+        }
+        set_text(&mut texts, card.class, class.name(), tint);
+        set_text(&mut texts, card.slot, &format!("P{}", player.slot + 1), slot_color(player.slot));
+        set_text(&mut texts, card.role, class.perk(), hud::DIM);
+        set_text(&mut texts, card.passive, passive.name(), tint);
+        set_text(&mut texts, card.details, passive.details(), hud::DIM);
+    }
+    // Lit in their colour while it's reaching anyone.
+    let (tag, color) = match passive_tag(passive, boons) {
+        Some(tag) => (tag, if reaches_crew(passive) { tint } else { hud::TEXT }),
+        None => (String::new(), hud::DIM),
+    };
+    set_text(&mut texts, card.tag, &tag, color);
+}
+
+/// This machine's pirate's effects, under their passive in the top-left card.
 #[derive(Component)]
 struct LocalEffects;
 
@@ -346,7 +531,7 @@ fn update_local_effects(
     row: Single<Entity, With<LocalEffects>>,
     mut chips: hud::ChipParts,
 ) {
-    let list = player.map_or_else(Vec::new, |p| with_rewards(p.3, effects(p.0.passive, p.1, p.2)));
+    let list = player.map_or_else(Vec::new, |p| with_rewards(p.3, effects(p.1, p.2)));
     hud::show_chips(&mut chips, *row, &list);
 }
 

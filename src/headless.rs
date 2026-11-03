@@ -645,7 +645,8 @@ fn drive_bots(
                 danger: brute
                     .filter(|l| matches!(l.state, BruteState::WindUp { .. }))
                     .map(|l| (l.at, BRUTE_SLAM_RADIUS + SLAM_CLEAR)),
-                guarded: false,
+                // Hardened, it shrugs off every shot: they go at its guards.
+                guarded: brute.is_some_and(|l| l.state == BruteState::Harden),
             }),
             // Where it is (or is blinking to), the reach of an arc it's
             // gathering, and whether shooting it now would do nothing or come
@@ -788,8 +789,9 @@ fn drive_bots(
                     }
                 }
                 dodging |= dist < kite.too_close;
-                let guard = nearest.filter(|g| g.distance(pos) <= GUARD_THREAT);
-                // A guarded prism isn't shot at all; its guards only well clear of it.
+                // While it's guarded (a hardened brute), any guard in reach will do.
+                let guard = nearest.filter(|g| kite.guarded || g.distance(pos) <= GUARD_THREAT);
+                // A guarded prism or hardened brute isn't shot at all; its guards only well clear of it.
                 let guard = guard.filter(|g| !kite.guarded || g.distance(b) >= PRISM_SHADOW);
                 let fire = guard.is_some() || !kite.guarded;
                 let aim = guard.unwrap_or(b);

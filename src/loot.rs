@@ -184,18 +184,13 @@ fn pick_up_loot(
 }
 
 fn spawn_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
-    commands.entity(hud::slot(&slots, HudSlot::Haul)).with_child((
-        Node {
-            column_gap: Val::Px(8.0),
-            align_items: AlignItems::Baseline,
-            ..default()
-        },
-        children![
-            hud::text("HAUL", 12.0, hud::LABEL),
-            (HaulText, hud::text("", 22.0, hud::GOLD)),
-            (ItemsText, hud::text("", 13.0, hud::DIM)),
-        ],
-    ));
+    // Stacked at the right of the card's header: what you're carrying out.
+    commands.entity(hud::slot(&slots, HudSlot::Haul)).with_children(|haul| {
+        haul.spawn(hud::text("HAUL", 10.0, hud::LABEL));
+        // Never wrapped: a big haul squeezes the name beside it instead.
+        haul.spawn((HaulText, hud::text("", 16.0, hud::GOLD), TextLayout::no_wrap()));
+        haul.spawn((ItemsText, hud::text("", 11.0, hud::DIM), TextLayout::no_wrap()));
+    });
 
     commands.entity(hud::slot(&slots, HudSlot::Prompt)).with_child((
         PromptPanel,
@@ -221,7 +216,7 @@ fn update_hud(
 ) {
     let Some(player) = player else { return };
     let (player, transform) = *player;
-    haul_text.set_if_neq(Text(format!("{} cr", player.credits)));
+    haul_text.set_if_neq(Text(hud::credits(player.credits)));
     let items = if player.items == 1 { "1 item".into() } else { format!("{} items", player.items) };
     items_text.set_if_neq(Text(items));
 

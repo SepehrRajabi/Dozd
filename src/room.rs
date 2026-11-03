@@ -480,6 +480,22 @@ const DECAL_WEIGHTS: [[u32; 10]; 3] = [
 /// Percent of plain floor tiles with a decal on them.
 const DECAL_CHANCE: u32 = 11;
 
+// The vault room is fitted out as a strongroom (`sprites/tiles/deck_N/vault_*`):
+// armour plate inside a band of grating, a seal round the vault, conduits out
+// to the walls. Keep these in step with tools/gen_assets.py.
+/// Tiles of grating left round the strongroom's armour plate.
+const STRONGROOM_BAND: f32 = 2.0;
+/// Armour plates: plain, barred across, barred down, and lit (the corners').
+const STRONGROOM_PLATES: usize = 4;
+const LIT_PLATE: usize = 3;
+/// Strongroom wall faces: armour, a light strip, a grille, a pilaster.
+const STRONGROOM_FACES: usize = 4;
+const STRIP_FACE: usize = 1;
+const GRILLE_FACE: usize = 2;
+const PILASTER_FACE: usize = 3;
+/// How far from the vault's centre the seal's outer ring runs.
+const SEAL_RING: f32 = 88.0;
+
 /// One image laid on the deck's picture: what a sprite of it at `centre`,
 /// tinted `tint`, would draw.
 struct Stamp {
@@ -517,21 +533,38 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
     let shades = [shared("shade_n"), shared("shade_w"), shared("shade_e")];
     let lips = ["n", "e", "s", "w"].map(|side| shared(&format!("lip_{side}")));
     let decals = DECALS.map(|name| shared(&format!("decal_{name}")));
+    let plates = panels("vault_plate", STRONGROOM_PLATES);
+    let vault_faces: Vec<Handle<Image>> = (0..STRONGROOM_FACES).map(|i| tile(&format!("vault_face_{i}"))).collect();
+    let vault_spill = tile("spill_vault");
+    let trims = ["n", "e", "w"].map(|side| tile(&format!("vault_trim_{side}")));
+
+    // The strongroom: the vault room's floor, its armour plate (the field)
+    // inside the band of grating, and the field's top-left tile.
+    let room = grid.vault_room;
+    let field = room.inflate(-STRONGROOM_BAND * TILE);
+    let corner_tile = |rect: Rect| grid.tile_of(Vec2::new(rect.min.x, rect.max.y) + Vec2::new(TILE, -TILE) / 2.0).unwrap_or_default();
+    let (room_col, room_width) = (corner_tile(room).0, (room.width() / TILE).round() as usize);
+    let field_corner = corner_tile(field);
+    let field_panels = ((field.width() / (2.0 * TILE)).round() as usize, (field.height() / (2.0 * TILE)).round() as usize);
+    let in_room = |col: usize, row: usize| room.contains(grid.tile_center(col, row));
+    let in_field = |col: usize, row: usize| field.contains(grid.tile_center(col, row));
 
     // Off the edge of the deck counts as solid; the gate, open or shut, as floor
     // (its doors are drawn from the `Breach`).
     let open = |col: isize, row: isize| {
         col >= 0 && row >= 0 && (col as usize) < grid.cols() && (row as usize) < grid.rows() && grid.is_floor(col as usize, row as usize)
     };
-    // Grating and the escape pad's paint are set into the plate floor around them.
-    let inset = |ch: char| match ch {
+    // Grating and the escape pad's paint are set into the plate floor around
+    // them, as the strongroom's band of grating is round its armour.
+    let inset = |col: usize, row: usize| match grid.tiles[row][col] {
+        _ if in_field(col, row) => 0,
         ',' | 'G' => 1,
         '=' => 2,
         _ => 0,
     };
     // Each layer is painted whole before the next, as sprites a layer apart
-    // would draw: tiles, then decals, lips, wall shade and lamp light.
-    let [mut tiles, mut decal_layer, mut lip_layer, mut shade_layer, mut glow_layer] = std::array::from_fn(|_| Vec::new());
+    // would draw: tiles, then decals, lips, fittings, wall shade and lamp light.
+    let [mut tiles, mut decal_layer, mut lip_layer, mut fittings, mut shade_layer, mut glow_layer] = std::array::from_fn(|_| Vec::new());
     let stamp = |image: &Handle<Image>, centre: Vec2| Stamp { image: image.clone(), centre, tint: Color::WHITE };
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
@@ -542,6 +575,14 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             let image = match ch {
                 // Solid rock with no floor next to it is the hull between rooms.
                 '#' if !grid.touches_floor(col, row) => &hull[quarter],
+                // The strongroom's walls are armoured, and fitted out to a plan.
+                '#' if open(c, r + 1) && in_room(col, row + 1) => {
+                    let face = strongroom_face(col - room_col, room_width);
+                    if face == STRIP_FACE {
+                        glow_layer.push(stamp(&vault_spill, pos - Vec2::new(0.0, TILE * 1.5)));
+                    }
+                    &vault_faces[face]
+                }
                 // Floor below: the wall's front face shows, and a lamp in it
                 // lights the floor.
                 '#' if open(c, r + 1) => {
@@ -556,11 +597,23 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
                         | (open(c + 1, r) as usize) << 1
                         | (open(c, r + 1) as usize) << 2
                         | (open(c - 1, r) as usize) << 3;
+                    // Running lights along the strongroom's side and far walls.
+                    let trim = match mask {
+                        1 if in_room(col, row - 1) => Some(&trims[0]),
+                        2 if in_room(col + 1, row) => Some(&trims[1]),
+                        8 if in_room(col - 1, row) => Some(&trims[2]),
+                        _ => None,
+                    };
+                    decal_layer.extend(trim.map(|trim| stamp(trim, pos)));
                     &caps[mask]
                 }
                 'D' => {
                     glow_layer.push(stamp(&door_glow, pos - Vec2::new(0.0, TILE * 1.5)));
                     &door
+                }
+                ',' | 'V' if in_field(col, row) => {
+                    let (fc, fr) = (col - field_corner.0, row - field_corner.1);
+                    &plates[strongroom_plate(fc / 2, fr / 2, field_panels)][2 * (fr % 2) + fc % 2]
                 }
                 ',' | 'G' => &grates[panel(col, row, 2, &GRATE_WEIGHTS, None)][quarter],
                 '=' => &hazard,
@@ -581,9 +634,9 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             if ch == '.' && hash(col, row, 4) % 100 < DECAL_CHANCE {
                 decal_layer.push(stamp(&decals[variant(col, row, 5, &DECAL_WEIGHTS[deck])], pos));
             }
-            if inset(ch) > 0 {
+            if inset(col, row) > 0 {
                 for (lip, (dc, dr)) in lips.iter().zip([(0, -1), (1, 0), (0, 1), (-1, 0)]) {
-                    if open(c + dc, r + dr) && inset(grid.tiles[(r + dr) as usize][(c + dc) as usize]) != inset(ch) {
+                    if open(c + dc, r + dr) && inset((c + dc) as usize, (r + dr) as usize) != inset(col, row) {
                         lip_layer.push(stamp(lip, pos));
                     }
                 }
@@ -598,8 +651,105 @@ fn draw_deck(_: On<DeckBuilt>, mut commands: Commands, assets: Res<AssetServer>,
             }
         }
     }
-    let stamps = [tiles, decal_layer, lip_layer, shade_layer, glow_layer].into_iter().flatten().collect();
+    dress_strongroom(&grid, &tile, &mut decal_layer, &mut fittings, &mut glow_layer);
+    let stamps = [tiles, decal_layer, lip_layer, fittings, shade_layer, glow_layer].into_iter().flatten().collect();
     commands.spawn((Level, DeckStamps(stamps)));
+}
+
+/// What sets the vault room apart as a strongroom, over its plate and walls: a
+/// seal set into the floor round the vault, power conduits running from its
+/// dais out to every wall but the gate's, paint inside the gate, the vault's
+/// name stencilled beside it, and lit beacons in the corners.
+fn dress_strongroom(
+    grid: &RoomGrid,
+    tile: &impl Fn(&str) -> Handle<Image>,
+    floor: &mut Vec<Stamp>,
+    fittings: &mut Vec<Stamp>,
+    glow: &mut Vec<Stamp>,
+) {
+    let at = |name: &str, centre: Vec2| Stamp { image: tile(name), centre, tint: Color::WHITE };
+    let room = grid.vault_room;
+    let vault = grid.vault.unwrap_or(room.center());
+    // Into the room through the gate.
+    let inward = (grid.gate.inside - grid.gate.centre).normalize_or_zero();
+    // From the vault to the wall `dir` points at.
+    let reach = |dir: Vec2| ((if dir.x + dir.y > 0.0 { room.max } else { room.min }) - vault).dot(dir);
+
+    floor.push(at("vault_seal", vault));
+    glow.push(at("vault_glow", vault));
+
+    for dir in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y] {
+        if dir.dot(-inward) > 0.5 {
+            continue;
+        }
+        // Lengths a tile long from the dais's edge to a coupling at the wall,
+        // with a node where it crosses the seal and where it leaves the plate.
+        let reach = reach(dir);
+        let lengths = ((reach / TILE) as usize).saturating_sub(1);
+        let nearest = |along: f32| ((along - TILE * 1.5) / TILE).round() as usize;
+        let nodes = [nearest(SEAL_RING), nearest(reach - (STRONGROOM_BAND + 0.5) * TILE)];
+        let length = if dir.x != 0.0 { "conduit_h" } else { "conduit_v" };
+        for i in 0..lengths {
+            let centre = vault + dir * TILE * (1.5 + i as f32);
+            if i + 1 == lengths {
+                fittings.push(at("conduit_end", centre));
+                glow.push(at("conduit_glow", centre));
+                continue;
+            }
+            fittings.push(at(length, centre));
+            if nodes.contains(&i) {
+                fittings.push(at("conduit_node", centre));
+                glow.push(at("conduit_glow", centre));
+            }
+        }
+    }
+
+    // Paint across the grating inside the gate, and the vault's name and
+    // number on the plate to either side of the way in.
+    fittings.push(at("vault_threshold", grid.gate.centre + inward * TILE * 1.5));
+    let outward = -inward;
+    let (along, aside) = if grid.gate.vertical {
+        (reach(outward) - (STRONGROOM_BAND + 1.5) * TILE, Vec2::new(0.0, 40.0))
+    } else {
+        (reach(outward) - (STRONGROOM_BAND + 1.0) * TILE + 2.0, Vec2::new(-72.0, 0.0))
+    };
+    fittings.push(at("vault_stencil", vault + outward * along + aside));
+    fittings.push(at("vault_number", vault + outward * along - aside));
+
+    for corner in [room.min, room.max, Vec2::new(room.min.x, room.max.y), Vec2::new(room.max.x, room.min.y)] {
+        let centre = corner + (room.center() - corner).signum() * TILE;
+        fittings.push(at("vault_beacon", centre));
+        glow.push(at("vault_beacon_glow", centre));
+    }
+}
+
+/// Which wall face shows `i` tiles along the strongroom's `len`-tile wall,
+/// mirrored about its middle so the wall reads as built to a plan: grilles
+/// over the conduit, then light strips and pilasters between armour.
+fn strongroom_face(i: usize, len: usize) -> usize {
+    let from_end = i.min(len - 1 - i);
+    match from_end % 4 {
+        _ if 2 * (from_end + 1) == len => GRILLE_FACE,
+        1 => STRIP_FACE,
+        3 => PILASTER_FACE,
+        _ => 0,
+    }
+}
+
+/// Which armour plate covers the strongroom's plate `(col, row)`, of
+/// `(across, down)`: lit ones in the corners, then plain ones checkered with
+/// ones barred across or down, whichever way points nearer the vault.
+fn strongroom_plate(col: usize, row: usize, (across, down): (usize, usize)) -> usize {
+    let edge = |i: usize, len: usize| i == 0 || i + 1 == len;
+    if edge(col, across) && edge(row, down) {
+        LIT_PLATE
+    } else if (col + row).is_multiple_of(2) {
+        0
+    } else if (2 * col + 1).abs_diff(across) * down >= (2 * row + 1).abs_diff(down) * across {
+        1
+    } else {
+        2
+    }
 }
 
 /// Once every image a deck's stamps use has loaded, paints them into one

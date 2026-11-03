@@ -15,9 +15,12 @@ pub const DIM: Color = Color::srgba(0.85, 0.9, 1.0, 0.5);
 pub const GOLD: Color = Color::srgb(1.0, 0.84, 0.3);
 /// A meter that's recharging rather than ready.
 pub const SPENT: Color = Color::srgb(0.4, 0.45, 0.55);
-/// Widths of a stat row's label and meter, so the rows line up.
-pub const ROW_LABEL: f32 = 40.0;
-pub const ROW_METER: f32 = 150.0;
+/// Widths of a stat row's label, meter and readout, so the rows line up
+/// across the pirate card (`CARD_WIDTH` wide, inside its padding).
+pub const ROW_LABEL: f32 = 48.0;
+pub const ROW_METER: f32 = 164.0;
+pub const ROW_VALUE: f32 = 50.0;
+pub const CARD_WIDTH: f32 = 300.0;
 const TRACK: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
 const MARGIN: f32 = 16.0;
 /// Seconds of play before the controls hint bows out.
@@ -38,11 +41,14 @@ impl Plugin for HudPlugin {
 /// Where a piece of the HUD goes. Each module fills its slot at startup.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HudSlot {
-    /// Top left, in one panel: haul, then shield, hull and dash, then the class
-    /// ability, then what the crew's passives are doing for you.
+    /// Top left, in one card: who you are beside your haul, then shield,
+    /// hull and dash, then your ability on Q, your passive, and what the
+    /// crew's passives are doing for you.
+    Pirate,
     Haul,
     Vitals,
     Ability,
+    Passive,
     Effects,
     /// Top left, under that panel: the challenges in play.
     Challenges,
@@ -89,6 +95,22 @@ pub fn panel_accent(node: Node, accent: Color) -> (Node, BackgroundColor, Border
     )
 }
 
+/// A pirate card's backdrop: their class's colour, darkened right down and
+/// kept translucent, so the card reads as theirs and its text stays legible.
+pub fn card_back(class_color: Color) -> Color {
+    let c = class_color.to_srgba();
+    let navy = PANEL.to_srgba();
+    let mix = |class: f32, base: f32| base * 0.45 + class * 0.15;
+    Color::srgba(mix(c.red, navy.red), mix(c.green, navy.green), mix(c.blue, navy.blue), 0.86)
+}
+
+/// A pirate's card: a panel backed in their class's dark shade, its top
+/// edge in the class colour itself.
+pub fn panel_class(node: Node, class_color: Color) -> (Node, BackgroundColor, BorderColor) {
+    let (node, _, border) = panel_accent(node, class_color);
+    (node, BackgroundColor(card_back(class_color)), border)
+}
+
 /// Credits with thousands separators, e.g. `1,240 cr`.
 pub fn credits(amount: u32) -> String {
     let digits = amount.to_string();
@@ -104,6 +126,60 @@ pub fn credits(amount: u32) -> String {
 
 pub fn text(content: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
     (Text::new(content), TextFont::from_font_size(size), TextColor(color))
+}
+
+/// The local pirate's card in the top-left corner, backed in a dark shade of
+/// their class's colour with its top edge in the colour itself.
+#[derive(Component)]
+pub struct PirateCard;
+
+/// The card's header strip, washed in their class's colour.
+#[derive(Component)]
+pub struct PirateHeader;
+
+/// A hairline between a card's sections.
+pub fn divider() -> impl Bundle {
+    (
+        Node {
+            height: Val::Px(1.0),
+            width: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(EDGE),
+    )
+}
+
+/// A pirate's sprite in a frame tinted `color`, `size` pixels across.
+pub fn portrait(image: Handle<Image>, color: Color, size: f32) -> impl Bundle {
+    (
+        Node {
+            width: Val::Px(size + 6.0),
+            height: Val::Px(size + 6.0),
+            padding: UiRect::all(Val::Px(2.0)),
+            border: UiRect { bottom: Val::Px(2.0), ..UiRect::all(Val::Px(1.0)) },
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(color.with_alpha(0.14)),
+        BorderColor::all(color.with_alpha(0.7)),
+        children![(
+            ImageNode::new(image),
+            Node {
+                width: Val::Px(size),
+                height: Val::Px(size),
+                ..default()
+            },
+        )],
+    )
+}
+
+/// A left-to-right wash of `color`, fading out by the middle: kept faint, as
+/// it lies over a card already backed in that colour (`card_back`).
+pub fn wash(color: Color) -> BackgroundGradient {
+    BackgroundGradient::from(LinearGradient::new(LinearGradient::TO_RIGHT, vec![
+        ColorStop::percent(color.with_alpha(0.1), 0.0),
+        ColorStop::percent(color.with_alpha(0.0), 70.0),
+    ]))
 }
 
 /// A keyboard key, drawn as a little cap.
@@ -221,6 +297,12 @@ struct MeterFill;
 struct MeterTrail;
 
 pub fn meter(width: f32, height: f32, color: Color) -> impl Bundle {
+    meter_ticked(Val::Px(width), height, color, 0)
+}
+
+/// A meter split by `ticks` - 1 notches into equal parts, so amounts read at
+/// a glance (no notches for 0 or 1).
+pub fn meter_ticked(width: Val, height: f32, color: Color, ticks: u32) -> impl Bundle {
     let part = || Node {
         position_type: PositionType::Absolute,
         top: Val::Px(0.0),
@@ -229,20 +311,49 @@ pub fn meter(width: f32, height: f32, color: Color) -> impl Bundle {
         width: Val::Percent(100.0),
         ..default()
     };
+    let notches: Vec<_> = (1..ticks.max(1))
+        .map(|i| {
+            (
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Percent(100.0 * i as f32 / ticks as f32),
+                    width: Val::Px(1.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            )
+        })
+        .collect();
     (
         Meter { frac: 1.0, color, trail: 1.0 },
         Node {
-            width: Val::Px(width),
+            width,
             height: Val::Px(height),
             border: UiRect::all(Val::Px(1.0)),
+            flex_shrink: 0.0,
             ..default()
         },
         BackgroundColor(TRACK),
         BorderColor::all(EDGE),
-        children![
-            (MeterTrail, part(), BackgroundColor(Color::NONE)),
-            (MeterFill, part(), BackgroundColor(color)),
-        ],
+        Children::spawn((
+            Spawn((MeterTrail, part(), BackgroundColor(Color::NONE))),
+            Spawn((MeterFill, part(), BackgroundColor(color))),
+            // A sheen along the top of the fill.
+            Spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(35.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
+            )),
+            SpawnIter(notches.into_iter()),
+        )),
     )
 }
 
@@ -338,16 +449,41 @@ fn spawn_layout(mut commands: Commands) {
     };
 
     commands.spawn((Hud, corner(true, true, AlignItems::FlexStart), children![(
+        PirateCard,
         panel(Node {
+            width: Val::Px(CARD_WIDTH),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(8.0),
             padding: UiRect::all(Val::Px(10.0)),
             ..default()
         }),
         children![
-            slot(HudSlot::Haul),
+            (
+                PirateHeader,
+                Node {
+                    column_gap: Val::Px(8.0),
+                    align_items: AlignItems::Center,
+                    // Out to the card's edges, so the wash fills the strip.
+                    margin: UiRect { left: Val::Px(-10.0), right: Val::Px(-10.0), top: Val::Px(-10.0), ..default() },
+                    padding: UiRect { left: Val::Px(10.0), right: Val::Px(10.0), top: Val::Px(10.0), bottom: Val::Px(2.0) },
+                    ..default()
+                },
+                BackgroundGradient::default(),
+                children![
+                    (HudSlot::Pirate, Node { flex_grow: 1.0, min_width: Val::Px(0.0), ..default() }),
+                    (HudSlot::Haul, Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::FlexEnd,
+                        flex_shrink: 0.0,
+                        ..default()
+                    }),
+                ],
+            ),
+            divider(),
             slot(HudSlot::Vitals),
+            divider(),
             slot(HudSlot::Ability),
+            slot(HudSlot::Passive),
             slot(HudSlot::Effects),
         ],
     ), slot(HudSlot::Challenges)]));

@@ -215,8 +215,6 @@ pub enum PirateClass {
 
 /// A class ability's timings and look.
 pub struct AbilityStats {
-    /// Short name for the HUD.
-    pub label: &'static str,
     pub cooldown: f32,
     /// Seconds the effect lasts.
     pub life: f32,
@@ -287,45 +285,38 @@ impl Active {
         Some(match self {
             Self::SpareGun => return None,
             Self::Laser => AbilityStats {
-                label: "LASER",
                 cooldown: LASER_COOLDOWN,
                 life: LASER_LIFE,
                 color: LASER_COLOR,
             },
             Self::Sentry => AbilityStats {
-                label: "SNTRY",
                 cooldown: SENTRY_COOLDOWN,
                 life: SENTRY_LIFE,
                 color: SENTRY_COLOR,
             },
             Self::RiotShield => AbilityStats {
-                label: "SHIELD",
                 // Unused: the shield runs on `Ability::charge` instead.
                 cooldown: RIOT_RECHARGE,
                 life: RIOT_LIFE,
                 color: RIOT_COLOR,
             },
             Self::Hack => AbilityStats {
-                label: "HACK",
                 cooldown: HACK_COOLDOWN,
                 // A hacked guard stays the crew's for good: nothing to time.
                 life: 0.0,
                 color: HACK_COLOR,
             },
             Self::Blackout => AbilityStats {
-                label: "BLKOUT",
                 cooldown: BLACKOUT_COOLDOWN,
                 life: BLACKOUT_LIFE,
                 color: BLACKOUT_COLOR,
             },
             Self::Ward => AbilityStats {
-                label: "WARD",
                 cooldown: WARD_COOLDOWN,
                 life: WARD_LIFE,
                 color: MEDIC_COLOR,
             },
             Self::LeechMine => AbilityStats {
-                label: "MINE",
                 cooldown: MINE_COOLDOWN,
                 // A mine waits for a guard however long it takes: nothing to time.
                 life: 0.0,
@@ -534,7 +525,7 @@ impl Boons {
 }
 
 /// The effects on a pirate, as short HUD labels in their colours.
-pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String, Color)> {
+pub fn effects(health: &Health, boons: &Boons) -> Vec<(String, Color)> {
     let mut effects = Vec::new();
     if health.warded > 0.0 && !health.is_dead() {
         effects.push((format!("WARDED {:.0}s", health.warded.ceil()), MEDIC_COLOR));
@@ -557,18 +548,34 @@ pub fn effects(passive: Passive, health: &Health, boons: &Boons) -> Vec<(String,
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
     }
-    match passive {
-        Passive::Armor => effects.push((format!("ARMOR +{:.0}%", ARMOR_BONUS * 100.0), RIOT_COLOR)),
-        Passive::Ricochet => effects.push((format!("RICOCHET {:.0}%", RICOCHET_CHANCE * 100.0), GUNNER_COLOR)),
-        _ => {}
-    }
-    if boons.jamming > 0 {
-        effects.push((format!("JAMMING {}", boons.jamming), HACK_COLOR));
-    }
-    if boons.aura > 0 {
-        effects.push((format!("AURA {}", boons.aura), passive.class().color()));
-    }
     effects
+}
+
+/// How a crewmate's ability stands, as a short HUD tag, and whether it's
+/// ready to use; `None` for one with nothing on Q.
+pub fn ability_status(active: Active, ability: &Ability, boons: &Boons) -> Option<(String, bool)> {
+    active.stats()?;
+    Some(if ability.active > 0.0 {
+        (format!("ACTIVE {:.0}s", ability.active.ceil()), false)
+    } else if active == Active::RiotShield {
+        if ability.charge < RIOT_MIN_CHARGE { ("CHARGING".into(), false) } else { ("READY".into(), true) }
+    } else if ability.cooldown > 0.0 {
+        (format!("{:.0}s", (ability.cooldown / boons.cooldown_rate()).ceil()), false)
+    } else {
+        ("READY".into(), true)
+    })
+}
+
+/// How a pirate's own passive is doing, as a short HUD tag: its strength, or
+/// how many crewmates or guards it's reaching right now (`None` if nobody).
+pub fn passive_tag(passive: Passive, boons: &Boons) -> Option<String> {
+    match passive {
+        Passive::Armor => Some(format!("+{:.0}% SHIELD", ARMOR_BONUS * 100.0)),
+        Passive::Ricochet => Some(format!("{:.0}% BOUNCE", RICOCHET_CHANCE * 100.0)),
+        Passive::Jamming => (boons.jamming > 0).then(|| format!("JAMMING {}", boons.jamming)),
+        _ if boons.aura == 1 => Some("REACHING 1 CREW".into()),
+        _ => (boons.aura > 1).then(|| format!("REACHING {} CREW", boons.aura)),
+    }
 }
 
 /// A pirate's class ability, ready when `cooldown` reaches zero.
@@ -724,6 +731,13 @@ struct AbilityFill;
 
 #[derive(Component)]
 struct AbilityText;
+
+/// The ability's key cap, lit in its colour while it's ready.
+#[derive(Component)]
+struct AbilityKey;
+
+#[derive(Component)]
+struct AbilityKeyText;
 
 fn can_act(player: &Player, health: &Health) -> bool {
     player.status == PirateStatus::Active && !health.is_dead()
@@ -1594,26 +1608,46 @@ fn heal_motes(
 }
 
 fn spawn_ability_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
-    // Under the shield, hull and dash bars.
+    // Under the shield, hull and dash bars: the key, the ability's name and
+    // how it stands, over a bar of its charge.
     commands.entity(hud::slot(&slots, HudSlot::Ability)).with_child((
         AbilityPanel,
         Node {
-            column_gap: Val::Px(8.0),
-            align_items: AlignItems::Center,
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
             display: Display::None,
             ..default()
         },
         children![
-            (AbilityLabel, hud::text("", 12.0, hud::LABEL), Node {
-                width: Val::Px(hud::ROW_LABEL),
-                ..default()
-            }),
-            (AbilityFill, hud::meter(hud::ROW_METER, 10.0, SENTRY_COLOR)),
-            (AbilityText, hud::text("", 12.0, Color::WHITE)),
+            (
+                Node {
+                    column_gap: Val::Px(8.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                children![
+                    (
+                        AbilityKey,
+                        Node {
+                            padding: UiRect::axes(Val::Px(6.0), Val::Px(1.0)),
+                            border: UiRect { bottom: Val::Px(2.0), ..UiRect::all(Val::Px(1.0)) },
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
+                        BorderColor::all(hud::EDGE),
+                        children![(AbilityKeyText, hud::text("Q", 13.0, hud::TEXT))],
+                    ),
+                    (AbilityLabel, hud::text("", 14.0, hud::TEXT)),
+                    Node { flex_grow: 1.0, ..default() },
+                    (AbilityText, hud::text("", 12.0, Color::WHITE)),
+                ],
+            ),
+            (AbilityFill, hud::meter_ticked(Val::Percent(100.0), 8.0, SENTRY_COLOR, 0)),
         ],
     ));
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_ability_hud(
     local: Res<LocalId>,
     hack_aiming: Res<HackAiming>,
@@ -1621,54 +1655,86 @@ fn update_ability_hud(
     sentries: Query<(&Sentry, &Transform), Without<LocalPlayer>>,
     riot_shields: Query<&RiotShield>,
     mut panel: Single<&mut Node, (With<AbilityPanel>, Without<AbilityFill>)>,
-    mut name: Single<&mut Text, (With<AbilityLabel>, Without<AbilityText>)>,
-    mut fill: Single<&mut Meter, With<AbilityFill>>,
-    mut text: Single<(&mut Text, &mut TextColor), With<AbilityText>>,
+    mut name: Single<(&mut Text, &mut TextColor), (With<AbilityLabel>, Without<AbilityText>, Without<AbilityKeyText>)>,
+    mut fill: Single<(&mut Meter, &mut Node), (With<AbilityFill>, Without<AbilityPanel>)>,
+    mut text: Single<(&mut Text, &mut TextColor), (With<AbilityText>, Without<AbilityKeyText>)>,
+    mut key: Single<&mut BorderColor, With<AbilityKey>>,
+    mut key_text: Single<(&mut Text, &mut TextColor), With<AbilityKeyText>>,
 ) {
-    let stats = player.as_ref().and_then(|p| p.0.active).and_then(Active::stats);
-    let display = if stats.is_some() { Display::Flex } else { Display::None };
+    let active = player.as_ref().and_then(|p| p.0.active);
+    let display = if active.is_some() { Display::Flex } else { Display::None };
     if panel.display != display {
         panel.display = display;
     }
-    let (Some(player), Some(stats)) = (player, stats) else { return };
+    let (Some(player), Some(active)) = (player, active) else { return };
     let (player, ability, boons, transform) = *player;
-    if name.0 != stats.label {
-        name.0 = stats.label.into();
+    let (name_text, name_color) = &mut *name;
+    if name_text.0 != active.name() {
+        name_text.0 = active.name().into();
+    }
+    let (text, text_color) = &mut *text;
+    let (fill, fill_node) = &mut *fill;
+    let dim = Color::srgba(1.0, 1.0, 1.0, 0.6);
+
+    // A spare gun is carried, not used: nothing on Q, nothing to charge.
+    let Some(stats) = active.stats() else {
+        name_color.set_if_neq(TextColor(player.class.color()));
+        let content = "4TH GUN SLOT";
+        if text.0 != content {
+            text.0 = content.into();
+        }
+        text_color.set_if_neq(TextColor(hud::DIM));
+        if fill_node.display != Display::None {
+            fill_node.display = Display::None;
+        }
+        key.set_if_neq(BorderColor::all(hud::EDGE));
+        let (key_text, key_color) = &mut *key_text;
+        if key_text.0 != "-" {
+            key_text.0 = "-".into();
+        }
+        key_color.set_if_neq(TextColor(hud::DIM));
+        return;
+    };
+    if fill_node.display != Display::Flex {
+        fill_node.display = Display::Flex;
+    }
+    name_color.set_if_neq(TextColor(stats.color));
+    let (key_text, key_color) = &mut *key_text;
+    if key_text.0 != "Q" {
+        key_text.0 = "Q".into();
     }
 
     // A sentry can be destroyed early, so ask it rather than the timer.
     let sentry = sentries.iter().find(|(s, _)| s.owner == local.0);
-    let active = match player.active {
+    let running = match player.active {
         Some(Active::Sentry) => sentry.map(|(s, _)| s.left),
         _ => (ability.active > 0.0).then_some(ability.active),
     };
     let in_reach = sentry.is_some_and(|(_, t)| {
         t.translation.truncate().distance(transform.translation.truncate()) <= SENTRY_PICKUP
     });
-    let (text, text_color) = &mut *text;
-    let dim = Color::srgba(1.0, 1.0, 1.0, 0.6);
-    let (frac, color, label, label_color) = if player.active == Some(Active::RiotShield) {
+    let (frac, color, label, label_color, ready) = if player.active == Some(Active::RiotShield) {
         // The bar is the shield's charge.
         let frac = ability.charge / RIOT_LIFE;
         if riot_shields.iter().any(|s| s.owner == local.0) {
-            (frac, stats.color, format!("UP {:.0}s", ability.charge.ceil()), stats.color)
+            (frac, stats.color, format!("UP {:.0}s", ability.charge.ceil()), stats.color, false)
         } else if ability.charge < RIOT_MIN_CHARGE {
-            (frac, hud::SPENT, "CHARGING".into(), dim)
+            (frac, hud::SPENT, "CHARGING".into(), dim, false)
         } else {
-            (frac, stats.color, "READY  [Q]".into(), Color::WHITE)
+            (frac, stats.color, "READY".into(), Color::WHITE, true)
         }
-    } else if let Some(left) = active {
+    } else if let Some(left) = running {
         let label = if in_reach { "PICK UP  [Q]".into() } else { format!("ACTIVE {:.0}s", left.ceil()) };
-        (left / stats.life, stats.color, label, stats.color)
+        (left / stats.life, stats.color, label, stats.color, in_reach)
     } else if hack_aiming.0 {
-        (1.0, stats.color, "CLICK TO HACK".into(), stats.color)
+        (1.0, stats.color, "CLICK TO HACK".into(), stats.color, true)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
         // Overclocked, the cooldown drains faster than the clock: show real seconds.
         let left = ability.cooldown / boons.cooldown_rate();
-        (ready, hud::SPENT, format!("{:.0}s", left.ceil()), dim)
+        (ready, hud::SPENT, format!("{:.0}s", left.ceil()), dim, false)
     } else {
-        (1.0, stats.color, "READY  [Q]".into(), Color::WHITE)
+        (1.0, stats.color, "READY".into(), Color::WHITE, true)
     };
     fill.frac = frac;
     fill.color = color;
@@ -1676,6 +1742,9 @@ fn update_ability_hud(
         text.0 = label;
     }
     text_color.set_if_neq(TextColor(label_color));
+    // The key lights up while pressing it does something.
+    key.set_if_neq(BorderColor::all(if ready { stats.color } else { hud::EDGE }));
+    key_color.set_if_neq(TextColor(if ready { Color::WHITE } else { hud::DIM }));
 }
 
 #[cfg(test)]

@@ -310,6 +310,9 @@ struct ShieldValue;
 struct DashBar;
 
 #[derive(Component)]
+struct DashValue;
+
+#[derive(Component)]
 struct DeckText;
 
 /// One step of the alarm meter, filling as the alarm passes through its level.
@@ -691,8 +694,14 @@ const SHIELD_COLOR: Color = Color::srgb(0.4, 0.72, 1.0);
 const HULL_COLOR: Color = Color::srgb(0.35, 0.9, 0.45);
 const DASH_COLOR: Color = Color::srgb(0.75, 0.92, 1.0);
 
-/// A labelled meter with a number after it.
-fn stat_row(panel: &mut ChildSpawnerCommands, label: &str, color: Color, bar: impl Component, value: impl Bundle) {
+/// A labelled meter, notched into `ticks` parts, with a readout after it.
+fn stat_row(
+    panel: &mut ChildSpawnerCommands,
+    (label, color): (&str, Color),
+    (height, ticks): (f32, u32),
+    bar: impl Component,
+    value: impl Component,
+) {
     panel
         .spawn(Node {
             column_gap: Val::Px(8.0),
@@ -700,20 +709,23 @@ fn stat_row(panel: &mut ChildSpawnerCommands, label: &str, color: Color, bar: im
             ..default()
         })
         .with_children(|row| {
-            row.spawn((hud::text(label, 12.0, hud::LABEL), Node {
+            row.spawn((hud::text(label, 11.0, hud::LABEL), Node {
                 width: Val::Px(hud::ROW_LABEL),
                 ..default()
             }));
-            row.spawn((bar, hud::meter(hud::ROW_METER, 10.0, color)));
-            row.spawn(value);
+            row.spawn((bar, hud::meter_ticked(Val::Px(hud::ROW_METER), height, color, ticks)));
+            row.spawn((value, hud::text("", 12.0, hud::TEXT), TextLayout::justify(Justify::Right), Node {
+                width: Val::Px(hud::ROW_VALUE),
+                ..default()
+            }));
         });
 }
 
 fn spawn_mission_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     commands.entity(hud::slot(&slots, HudSlot::Vitals)).with_children(|panel| {
-        stat_row(panel, "SHLD", SHIELD_COLOR, ShieldBar, (ShieldValue, hud::text("", 12.0, hud::TEXT)));
-        stat_row(panel, "HULL", HULL_COLOR, HullBar, (HullValue, hud::text("", 12.0, hud::TEXT)));
-        stat_row(panel, "DASH", DASH_COLOR, DashBar, ());
+        stat_row(panel, ("SHIELD", SHIELD_COLOR), (10.0, 4), ShieldBar, ShieldValue);
+        stat_row(panel, ("HULL", HULL_COLOR), (12.0, 4), HullBar, HullValue);
+        stat_row(panel, ("DASH", DASH_COLOR), (6.0, 0), DashBar, DashValue);
     });
 
     // Deck, alarm meter and what security is up to.
@@ -804,8 +816,9 @@ fn update_player_bars(
     mut hull: Single<&mut Meter, With<HullBar>>,
     mut shield: Single<&mut Meter, (With<ShieldBar>, Without<HullBar>)>,
     mut dash_bar: Single<&mut Meter, (With<DashBar>, Without<HullBar>, Without<ShieldBar>)>,
-    mut hull_value: Single<&mut Text, (With<HullValue>, Without<ShieldValue>)>,
-    mut shield_value: Single<&mut Text, With<ShieldValue>>,
+    mut hull_value: Single<(&mut Text, &mut TextColor), (With<HullValue>, Without<ShieldValue>, Without<DashValue>)>,
+    mut shield_value: Single<(&mut Text, &mut TextColor), (With<ShieldValue>, Without<DashValue>)>,
+    mut dash_value: Single<(&mut Text, &mut TextColor), With<DashValue>>,
 ) {
     let Some(player) = player else { return };
     let (health, dash) = *player;
@@ -820,12 +833,21 @@ fn update_player_bars(
         Color::srgb(1.0, 0.3, 0.3)
     };
     shield.frac = (health.shield / health.max_shield).clamp(0.0, 1.0);
-    hull_value.set_if_neq(Text(format!("{:.0}", health.current.max(0.0).ceil())));
-    shield_value.set_if_neq(Text(format!("{:.0}", health.shield.max(0.0).ceil())));
+    let out_of = |now: f32, max: f32| format!("{:.0}/{:.0}", now.max(0.0).ceil(), max.ceil());
+    hull_value.0.set_if_neq(Text(out_of(health.current, health.max)));
+    hull_value.1.set_if_neq(TextColor(if frac > 0.25 { hud::TEXT } else { hull.color }));
+    shield_value.0.set_if_neq(Text(out_of(health.shield, health.max_shield)));
+    shield_value.1.set_if_neq(TextColor(if health.shield > 0.0 { hud::TEXT } else { hud::DIM }));
 
     let ready = 1.0 - (dash.cooldown / DASH_COOLDOWN).clamp(0.0, 1.0);
     dash_bar.frac = ready;
     dash_bar.color = if ready >= 1.0 { DASH_COLOR } else { hud::SPENT };
+    // The bar shows it charging; overclocked, the cooldown isn't real seconds anyway.
+    let (content, tint) = if ready >= 1.0 { ("READY", DASH_COLOR) } else { ("", hud::DIM) };
+    if dash_value.0.0 != content {
+        dash_value.0.0 = content.into();
+    }
+    dash_value.1.set_if_neq(TextColor(tint));
 }
 
 fn update_alarm_hud(

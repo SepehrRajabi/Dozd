@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::boss::{
-    BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, PRISM_ARC_RANGE,
+    self, BRUTE_SLAM_RADIUS, BruteLook, BruteState, HandAction, HandSide, Keeper, KeeperBeam, KeeperHand, KeeperKind, PRISM_ARC_RANGE,
     PRISM_COLOR, PrismLook, PrismPhase, SLAMS, LUNGE_SWEEP, StalkerLook, StalkerState, slam_wind_up, stalker_wind_up,
 };
 use crate::combat::{Fade, Health, Shake};
@@ -16,13 +16,15 @@ use crate::hud::{self, HudSlot, Meter};
 use crate::ring_view::{AuraRing, RING_AT};
 use crate::room::RoomGrid;
 use crate::vault::VaultTier;
-use crate::{Level, PIXEL_SCALE, Rng};
+use crate::{Level, Rng};
 
 /// The keeper's beams: a hostile violet, well clear of the Gunner's red laser.
 const BEAM_COLOR: Color = Color::srgb(0.85, 0.3, 1.0);
 const ENRAGED_COLOR: Color = Color::srgb(1.0, 0.3, 0.3);
 const HIT_COLOR: Color = Color::srgb(1.0, 0.3, 0.3);
-/// The stalker's marks and its wind-up blink: a hot, hostile orange.
+/// The stalker's marks and its wind-up blink: a hot, hostile orange. Every
+/// spoke it might lunge down shares it, so its fan reads as one even star
+/// with none favoured, until it settles on one (`CHOSEN_COLOR`).
 const MARK_COLOR: Color = Color::srgb(1.0, 0.4, 0.15);
 /// Spent after a lunge, like a guard stalker recovering: dull and bluish.
 const RECOVER_COLOR: Color = Color::srgb(0.6, 0.6, 0.75);
@@ -30,22 +32,18 @@ const RECOVER_COLOR: Color = Color::srgb(0.6, 0.6, 0.75);
 /// there can be across all of them.
 const CHEVRON_GAP: f32 = 9.0;
 const CHEVRONS: usize = 240;
-/// How many marked pirates its routes can show reticles on at once.
+/// How many spoke ends can show reticles at once.
 const RETICLES: usize = 12;
 /// How long the route it takes flashes as it settles on it, and again as it
 /// goes, and the white-hot it burns from then on.
 const CHOSEN_FLASH: f32 = 0.25;
 const CHOSEN_COLOR: Color = Color::srgb(1.0, 0.97, 0.9);
-/// Each route the stalker threatens gets its own hostile hue, so routes that
-/// cross can be told apart; none is favoured until it settles on one.
-const ROUTE_COLORS: [Color; 4] = [
-    Color::srgb(1.0, 0.2, 0.4),
-    Color::srgb(1.0, 0.85, 0.2),
-    Color::srgb(0.75, 0.4, 1.0),
-    MARK_COLOR,
-];
 /// How many legs, across all its routes, can show a danger corridor at once.
 const ROUTE_STRIPS: usize = 16;
+/// The ring round the stalker tying its fan of spokes together, just clear
+/// of its body, where they start: how far out it starts, and how far it has
+/// drawn in by the end of the wind-up.
+const HUB_RADIUS: (f32, f32) = (30.0, 23.0);
 /// How wide a rampage lane's danger strip is, how far apart its chevrons sit
 /// and how many there can be, and how long a warning takes to reach full heat.
 const LANE_WIDTH: f32 = 36.0;
@@ -98,6 +96,23 @@ const SLAM_HOLD: f32 = 0.22;
 const ROAR_HOLD: f32 = 0.2;
 /// What its eyes and furnace burn: a hot orange, at rest.
 const BRUTE_GLOW: Color = Color::srgb(1.0, 0.5, 0.18);
+/// The brute hardened: cold steel armour, and the green of it knitting back together.
+const ARMOUR_COLOR: Color = Color::srgb(0.62, 0.78, 1.0);
+const HEAL_COLOR: Color = Color::srgb(0.45, 1.0, 0.55);
+/// The armour plates set round a hardened brute's shell like a clock face,
+/// one going dark at a time as its hardening runs out; the ellipse they sit
+/// on, round its body.
+const PLATES: usize = 12;
+const PLATE_ORBIT: Vec2 = Vec2::new(36.0, 33.0);
+/// Where its shell and plates centre, and where its heal motes start rising.
+const SHELL_Y: f32 = BRUTE_LIFT - 2.0;
+const MOTE_Y: f32 = -12.0;
+/// Green motes rising off a hardened brute as it heals.
+const MOTES: usize = 6;
+/// Seconds the shell takes to clamp shut round it.
+const HARDEN_SHUT: f32 = 0.2;
+/// The last part of its hardening, as a fraction, over which what's left flickers.
+const HARDEN_WARN: f32 = 0.25;
 const DUST_COLOR: Color = Color::srgba(0.75, 0.7, 0.65, 0.8);
 /// The prism's aegis, while nothing hurts it: a warm amber, so "immune" reads
 /// well apart from its cold crystal.
@@ -145,6 +160,7 @@ impl Plugin for BossViewPlugin {
                         hide_boss,
                         draw_keeper,
                         animate_brute,
+                        draw_harden,
                         draw_hands,
                         draw_beams,
                         draw_marks,
@@ -192,6 +208,22 @@ struct BruteSprite {
 #[derive(Component)]
 struct BruteGlow;
 
+/// The brute's hardened shell round its body, a child of it, shown only while
+/// it's `BruteState::Harden`.
+#[derive(Component, Default)]
+struct HardenRig {
+    clock: StateClock<BruteState>,
+}
+
+/// The honeycomb shell over the hardened brute, the `0`th, `1`st... armour
+/// plate round its feet counting its hardening down, or a heal mote rising.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum HardenPart {
+    Shell,
+    Plate(usize),
+    Mote(usize),
+}
+
 /// A hand's sprite, a child so it can turn to its aim and kick back.
 #[derive(Component)]
 struct HandSprite;
@@ -221,9 +253,9 @@ enum BeamPart {
 #[derive(Component)]
 struct BeamImpact;
 
-/// Draws a stalker's `StalkerLook` routes: the ways it might lunge (or the
-/// one it took) and a numbered reticle on each pirate they pass through. Its
-/// children sit in world space.
+/// Draws a stalker's `StalkerLook` routes: the spokes it might lunge down (or
+/// the one it took), a reticle at each one's end, and the ring at their hub.
+/// Its children sit in world space.
 #[derive(Component)]
 struct MarksLook(Entity);
 
@@ -285,23 +317,23 @@ struct MarkChevron {
 #[derive(Component)]
 struct MarkStroke;
 
-/// The `index`th reticle, on a pirate a route passes through; `label` is where
-/// it falls in each such route, `first` the earliest.
+/// The `index`th reticle, at the end of the `spoke`th route; bigger on the
+/// one it has `chosen`.
 #[derive(Component)]
 struct MarkReticle {
     index: usize,
-    first: usize,
+    spoke: usize,
     color: Color,
-    label: String,
+    chosen: bool,
 }
 
-/// A reticle's ring, a child so it can spin and throb under its number.
+/// A reticle's ring, a child so it can spin and throb.
 #[derive(Component)]
 struct MarkRing;
 
-/// A reticle's number.
+/// The ring round the winding-up stalker, at the hub of its spokes.
 #[derive(Component)]
-struct MarkNumber;
+struct MarkHub;
 
 /// Draws a stalker's rampage lane, from wall to wall; laid along it, so its
 /// children sit in lane space.
@@ -452,6 +484,15 @@ fn dress_brute_body(
                 Transform::from_xyz(0.0, BRUTE_LIFT, 0.0),
             ))
             .with_child((BruteGlow, atlas("sprites/boss/brute_glow.png"), Transform::from_xyz(0.0, 0.0, 0.1)));
+        parent.spawn((HardenRig::default(), Transform::default(), Visibility::Hidden)).with_children(|rig| {
+            rig.spawn((HardenPart::Shell, Sprite::from_image(assets.load("sprites/boss/prism_aegis.png"))));
+            for i in 0..PLATES {
+                rig.spawn((HardenPart::Plate(i), Sprite::from_color(Color::WHITE, Vec2::new(7.0, 3.0))));
+            }
+            for i in 0..MOTES {
+                rig.spawn((HardenPart::Mote(i), Sprite::from_color(Color::WHITE, Vec2::splat(2.0))));
+            }
+        });
     });
 }
 
@@ -477,8 +518,10 @@ fn dress_prism(add: On<Add, PrismLook>, mut commands: Commands, assets: Res<Asse
             }
         });
     });
+    // Not `Level`: on a client the boss can arrive before its deck is built,
+    // and building it clears `Level` entities. It goes when its boss does.
     commands
-        .spawn((Level, PrismMarks(add.entity), StateClock::<bool>::default(), Transform::default(), Visibility::Hidden))
+        .spawn((PrismMarks(add.entity), StateClock::<bool>::default(), Transform::default(), Visibility::Hidden))
         .with_children(|parent| {
             let ring = assets.load("sprites/fx/shock_ring.png");
             for (part, z) in [(WarpPart::Ring { delay: 0.0 }, 0.0), (WarpPart::Ring { delay: 0.35 }, 0.1)] {
@@ -511,8 +554,10 @@ fn dress_hand(add: On<Add, KeeperHand>, mut commands: Commands, assets: Res<Asse
 }
 
 fn dress_beam(add: On<Add, KeeperBeam>, mut commands: Commands, assets: Res<AssetServer>) {
+    // Not `Level`: on a client the boss can arrive before its deck is built,
+    // and building it clears `Level` entities. It goes when its boss does.
     commands
-        .spawn((Level, BeamLook(add.entity), Transform::default(), Visibility::Hidden))
+        .spawn((BeamLook(add.entity), Transform::default(), Visibility::Hidden))
         .with_children(|parent| {
             for (part, z) in [(BeamPart::Warning, 0.0), (BeamPart::Glow, 0.1), (BeamPart::Core, 0.2)] {
                 parent.spawn((part, Sprite::from_color(BEAM_COLOR, Vec2::ONE), Transform::from_xyz(0.0, 0.0, z)));
@@ -652,7 +697,9 @@ fn draw_keeper(
 /// trembling and flashing; the slam folds it over its fists, leaning into the
 /// blow, and it stays slumped over its knuckles, heaving and dull, while spent.
 /// Roaring it throws its head back, then bellows, arms flung wide, chest
-/// blazing amber. Its eyes and furnace burn orange, red once enraged.
+/// blazing amber. Hardened it hunkers down over its knuckles, cold steel, its
+/// eyes and furnace pulsing green as it heals (see `draw_harden`). Its eyes
+/// and furnace burn orange, red once enraged.
 #[allow(clippy::type_complexity)]
 fn animate_brute(
     mut commands: Commands,
@@ -692,6 +739,13 @@ fn animate_brute(
                 BruteState::Plod if speed > STANDING => {
                     anim.stride += dt * WALK_RATE * (speed / 32.0).clamp(0.6, 1.6);
                     (WALK[anim.stride as usize % WALK.len()], mood, fury, 0.9)
+                }
+                BruteState::Harden => {
+                    // Braced low over its knuckles, gone to cold steel, a slow
+                    // green pulse in its eyes and furnace as it mends.
+                    let pulse = 0.5 + 0.5 * (t * 3.0).sin();
+                    let steel = tint.mix(&Srgba::from(ARMOUR_COLOR), 0.55).mix(&Srgba::WHITE, 0.1 * pulse);
+                    (SPENT[0], steel, HEAL_COLOR, 0.5 + 0.5 * pulse)
                 }
                 BruteState::Plod => {
                     let breath = (t * 2.4).sin();
@@ -763,7 +817,12 @@ fn animate_brute(
             atlas.index = frame;
         }
         sprite.flip_x = anim.facing < 0.0;
-        sprite.color = if health.flash > 0.0 { HIT_COLOR } else { color.into() };
+        sprite.color = match (health.flash > 0.0, brute.state) {
+            // Hits glance off its armour: a glint, not a wound.
+            (true, BruteState::Harden) => color.mix(&Srgba::WHITE, 0.6).into(),
+            (true, _) => HIT_COLOR,
+            (false, _) => color.into(),
+        };
         transform.translation.x = offset.x.round();
         transform.translation.y = (BRUTE_LIFT + offset.y).round();
         let glow = Srgba::from(glow);
@@ -776,6 +835,94 @@ fn animate_brute(
         }
         sprite.flip_x = flip;
         sprite.color = color.into();
+    }
+}
+
+/// How a hardened brute's shell looks this frame.
+struct HardenPlan {
+    /// How much of its hardening is left, `1..=0`.
+    left: f32,
+    /// How far its shell has clamped shut, `0..=1`.
+    shut: f32,
+    /// A hit just glanced off it.
+    flare: bool,
+}
+
+/// While the brute is hardened: a steel honeycomb shell clamps shut over it,
+/// shimmering, and flares white when a hit glances off; a ring of armour
+/// plates round it goes dark one by one, like a clock, as its hardening runs out,
+/// what's left flickering at the end; and green motes rise off it as it heals.
+#[allow(clippy::type_complexity)]
+fn draw_harden(
+    time: Res<Time>,
+    brutes: Query<(&Keeper, &Health, &BruteLook)>,
+    mut rigs: Query<(Entity, &ChildOf, &mut HardenRig, &mut Visibility)>,
+    mut parts: Query<(&ChildOf, &HardenPart, &mut Sprite, &mut Transform)>,
+) {
+    use std::f32::consts::{PI, TAU};
+    let t = time.elapsed_secs();
+    let mut plans = Vec::new();
+    for (entity, parent, mut rig, mut visibility) in &mut rigs {
+        let Ok((keeper, health, brute)) = brutes.get(parent.parent()) else { continue };
+        let since = rig.clock.tick(brute.state, time.delta_secs());
+        let shown = brute.state == BruteState::Harden && keeper.awake && !health.is_dead();
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        if shown {
+            let left = (1.0 - since / boss::brute_harden_time(keeper.enraged).max(0.1)).clamp(0.0, 1.0);
+            let shut = (since / HARDEN_SHUT).min(1.0);
+            plans.push((entity, HardenPlan { left, shut, flare: health.flash > 0.0 }));
+        }
+    }
+    let warn_blink = (t * 16.0).sin() > 0.0;
+    let armour = Srgba::from(ARMOUR_COLOR);
+    for (parent, part, mut sprite, mut transform) in &mut parts {
+        let Some((_, plan)) = plans.iter().find(|(entity, _)| *entity == parent.parent()) else { continue };
+        let ending = plan.left < HARDEN_WARN;
+        match *part {
+            HardenPart::Shell => {
+                let shimmer = 0.5 + 0.5 * (t * 4.0).sin();
+                let color = if plan.flare {
+                    armour.mix(&Srgba::WHITE, 0.85).with_alpha(0.6)
+                } else if ending && !warn_blink {
+                    armour.with_alpha(0.08)
+                } else {
+                    armour.mix(&Srgba::WHITE, 0.2 * shimmer).with_alpha(0.16 + 0.1 * shimmer)
+                };
+                // Clamps shut from wide, then breathes.
+                let swell = 1.0 + 0.4 * (1.0 - plan.shut) + 0.02 * (t * 2.0).sin();
+                transform.translation = Vec3::new(0.0, SHELL_Y, 0.4);
+                transform.scale = Vec3::new(1.2 * swell, swell, 1.0);
+                sprite.color = color.into();
+            }
+            HardenPart::Plate(i) => {
+                // Clockwise from the top, so the ring empties like a clock.
+                let angle = PI / 2.0 - i as f32 * TAU / PLATES as f32;
+                let at = PLATE_ORBIT * Vec2::from_angle(angle) * (1.0 + 0.5 * (1.0 - plan.shut));
+                let tangent = Vec2::new(-PLATE_ORBIT.x * angle.sin(), PLATE_ORBIT.y * angle.cos());
+                transform.translation = Vec3::new(at.x.round(), (SHELL_Y + at.y).round(), 0.42);
+                transform.rotation = Quat::from_rotation_z(tangent.to_angle());
+                // How much of this plate is left: whole, going, or gone.
+                let lit = (plan.left * PLATES as f32 - (PLATES - 1 - i) as f32).clamp(0.0, 1.0);
+                let wave = 0.5 + 0.5 * (t * 6.0 - i as f32 * 0.8).sin();
+                let color = if lit <= 0.0 {
+                    dim(armour, 0.6).with_alpha(0.18)
+                } else if plan.flare {
+                    Srgba::WHITE
+                } else if ending && !warn_blink {
+                    armour.with_alpha(0.35)
+                } else {
+                    armour.mix(&Srgba::WHITE, 0.25 + 0.35 * wave).with_alpha(0.2 + 0.8 * lit)
+                };
+                sprite.color = color.into();
+            }
+            HardenPart::Mote(i) => {
+                let rise = (t * 0.7 + i as f32 / MOTES as f32).fract();
+                let x = ((i * 7) % MOTES) as f32 * 5.0 - 12.5 + 2.0 * (t * 2.0 + i as f32).sin();
+                transform.translation = Vec3::new(x.round(), (MOTE_Y + 36.0 * rise).round(), 0.45);
+                let glow = Srgba::from(HEAL_COLOR).mix(&Srgba::WHITE, 0.3);
+                sprite.color = glow.with_alpha(0.9 * (PI * rise).sin()).into();
+            }
+        }
     }
 }
 
@@ -924,9 +1071,10 @@ fn draw_beams(
 }
 
 fn dress_marks(add: On<Add, StalkerLook>, mut commands: Commands, assets: Res<AssetServer>) {
+    // Not `Level`: on a client the boss can arrive before its deck is built,
+    // and building it clears `Level` entities. It goes when its boss does.
     commands
         .spawn((
-            Level,
             MarksLook(add.entity),
             StateClock::<bool>::default(),
             RoutePlan::default(),
@@ -960,44 +1108,39 @@ fn dress_marks(add: On<Add, StalkerLook>, mut commands: Commands, assets: Res<As
             for n in 0..RETICLES {
                 parent
                     .spawn((
-                        MarkReticle { index: n, first: 0, color: MARK_COLOR, label: String::new() },
+                        MarkReticle { index: n, spoke: 0, color: MARK_COLOR, chosen: false },
                         Transform::from_xyz(0.0, 0.0, 0.5),
                         Visibility::Hidden,
                     ))
-                    .with_children(|reticle| {
-                        reticle.spawn((
-                            MarkRing,
-                            Sprite { image: assets.load("sprites/ui/crosshair.png"), color: MARK_COLOR, ..default() },
-                        ));
-                        reticle.spawn((
-                            MarkNumber,
-                            Text2d::new(""),
-                            TextFont::from_font_size(6.0 * PIXEL_SCALE),
-                            TextColor(MARK_COLOR),
-                            Transform::from_xyz(0.0, 10.0, 0.1).with_scale(Vec3::splat(1.0 / PIXEL_SCALE)),
-                        ));
-                    });
+                    .with_child((
+                        MarkRing,
+                        Sprite { image: assets.load("sprites/ui/crosshair.png"), color: MARK_COLOR, ..default() },
+                    ));
             }
+            parent.spawn((
+                MarkHub,
+                Sprite::from_image(assets.load("sprites/fx/shock_ring.png")),
+                Transform::from_xyz(0.0, 0.0, -0.05),
+                Visibility::Hidden,
+            ));
         });
 }
 
-/// A point some route turns at (or ends on), and its number, if it has one.
+/// The end of the `spoke`th route, and whether it's the one it has chosen.
 struct PlannedMark {
     at: Vec2,
-    label: String,
-    first: usize,
+    spoke: usize,
+    chosen: bool,
     color: Color,
 }
 
-/// One leg's danger corridor: from `from` to `to`, its floor reaching `lead`
-/// back past `from` to cover the turn, its fuse filled `fuse` pixels from
-/// `from`. `floor`, `fill`, `head` and `edge` are its parts' opacities; `top`
-/// lays it over the others.
+/// One leg's danger corridor: from `from` to `to`, its fuse filled `fuse`
+/// pixels from `from`. `floor`, `fill`, `head` and `edge` are its parts'
+/// opacities; `top` lays it over the others.
 #[derive(Clone, Copy)]
 struct StripPlan {
     from: Vec2,
     to: Vec2,
-    lead: f32,
     fuse: f32,
     color: Color,
     floor: f32,
@@ -1007,24 +1150,26 @@ struct StripPlan {
     top: bool,
 }
 
-/// Where a stalker's corridors, chevrons and reticles go this frame.
+/// Where a stalker's corridors, chevrons, reticles and hub ring go this frame.
 #[derive(Default)]
 struct MarksPlan {
     strips: Vec<StripPlan>,
     spots: Vec<(Vec2, Vec2, Color)>,
     marks: Vec<PlannedMark>,
+    /// The hub ring round its body while it winds up: where, how big, and its colour.
+    hub: Option<(Vec2, f32, Color)>,
 }
 
-/// Lays out every route the stalker shows, from `from`: a corridor down each
-/// leg as wide as the lunge reaches, chevrons marching along its middle, and
-/// a reticle on each point still ahead of it. Winding up, each route has its
-/// own hue and they're drawn alike, flickering out of step, quickening and
-/// brightening as the wind-up (`wind_up` seconds) runs out, while a fuse
-/// fills each corridor from the stalker outward, reaching the far end the
-/// moment it goes; their reticles are small and unnumbered. Once it settles
-/// on a route (`since_chosen` seconds ago), that one flashes and turns
-/// white-hot, its points numbered in the order it'll reach them, and the
-/// rest fade out; it stays so as it lunges.
+/// Lays out every route the stalker shows, from `from`: its spokes, each a
+/// straight corridor as wide as the lunge reaches, chevrons marching along its
+/// middle and a reticle at its end. Winding up, they're drawn alike in one
+/// hostile colour, an even star round it: a light chases round the fan,
+/// quickening as the wind-up (`wind_up` seconds) runs out, while a fuse fills
+/// every corridor at once from the stalker outward, reaching the ends the
+/// moment it goes, and a ring round its body, where the spokes start, draws in. Once it settles on a route
+/// (`since_chosen` seconds ago), that one flashes and turns white-hot, its
+/// reticle bigger, the hub with it, and the rest fade out; it stays so as it
+/// lunges. Routes of more than one leg are walked leg by leg.
 fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, since_chosen: f32, t: f32, wind_up: f32) -> MarksPlan {
     let mut plan = MarksPlan::default();
     let choosing = stalker.state == StalkerState::WindUp;
@@ -1034,44 +1179,60 @@ fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, since_chosen: f32, 
     };
     let heat = (since / wind_up.max(0.01)).clamp(0.0, 1.0);
     let settled = stalker.chosen.map(usize::from);
-    // The route it settled on goes first, so it claims any reticle it shares.
+    let spokes = stalker.routes.len().max(1) as f32;
+    // The chase light's way round the fan, in turns: quicker as it heats up.
+    let chase = since * (1.2 + 1.8 * heat);
+    let danger = Srgba::from(MARK_COLOR);
+    // A flash as it settles on the route, and again as it goes.
+    let flash = (1.0 - if choosing { since_chosen } else { since } / CHOSEN_FLASH).max(0.0);
+    let blink = (0.6 + 0.4 * (t * 18.0).sin()).max(flash);
+    let hub = HUB_RADIUS.0 + (HUB_RADIUS.1 - HUB_RADIUS.0) * heat;
+    if choosing {
+        let color = if settled.is_some() {
+            CHOSEN_COLOR.with_alpha(0.6 + 0.4 * blink)
+        } else {
+            danger.mix(&Srgba::WHITE, 0.2 * heat).with_alpha(0.6 + 0.4 * heat).into()
+        };
+        plan.hub = Some((from, hub, color));
+    }
+    // The route it settled on goes first, so it's drawn over the rest.
     let order = settled.into_iter().chain((0..stalker.routes.len()).filter(|&r| Some(r) != settled));
     for r in order {
         let Some(route) = stalker.routes.get(r) else { continue };
         let picked = !choosing || settled == Some(r);
         let passed_over = !picked && settled.is_some();
-        let hue = Srgba::from(ROUTE_COLORS[r % ROUTE_COLORS.len()]);
         let (color, floor, fill, head, edge): (Color, f32, f32, f32, f32) = if picked {
-            // A flash as it settles on the route, and again as it goes.
-            let flash = (1.0 - if choosing { since_chosen } else { since } / CHOSEN_FLASH).max(0.0);
-            let blink = (0.6 + 0.4 * (t * 18.0).sin()).max(flash);
             let head = if choosing { 1.0 } else { 0.0 };
             (CHOSEN_COLOR.with_alpha(blink), 0.08 + 0.06 * flash, 0.22 + 0.1 * blink, head, blink)
         } else if passed_over {
-            (hue.with_alpha(0.2).into(), 0.02, 0.0, 0.0, 0.15)
+            (danger.with_alpha(0.2).into(), 0.02, 0.0, 0.0, 0.15)
         } else {
-            let flicker = 0.5 + 0.5 * (t * (8.0 + 22.0 * heat) + r as f32 * 2.1).sin();
-            let glow = 0.75 + 0.25 * flicker;
-            (hue.with_alpha((0.45 + 0.45 * heat) * glow).into(), 0.04 + 0.03 * heat, 0.1 + 0.08 * heat, 0.9, (0.35 + 0.5 * heat) * glow)
+            // How close the chase light is to this spoke: 1 on it, trailing off behind.
+            let lag = (chase - r as f32 / spokes).rem_euclid(1.0);
+            let glow = 0.7 + 0.3 * (1.0 - lag).powi(3);
+            let color = danger.mix(&Srgba::WHITE, 0.25 * (1.0 - lag).powi(6));
+            (color.with_alpha((0.45 + 0.45 * heat) * glow).into(), 0.04 + 0.03 * heat, 0.1 + 0.08 * heat, 0.9, (0.35 + 0.5 * heat) * glow)
         };
-        // Walk the route from the body, chevrons marching along it.
-        let points: Vec<Vec2> = std::iter::once(from).chain(route.iter().skip(reached).copied()).collect();
+        let mut points: Vec<Vec2> = std::iter::once(from).chain(route.iter().skip(reached).copied()).collect();
+        // Winding up, each spoke starts at the hub ring, leaving its body clear.
+        if choosing && let Some(&next) = points.get(1) {
+            let gap = hub.min(from.distance(next) - 1.0).max(0.0);
+            points[0] = from + (next - from).normalize_or_zero() * gap;
+        }
         // Winding up, the fuse burns out along the whole route as the wind-up
         // runs down; once it goes, the whole route is lit.
         let total: f32 = points.windows(2).map(|leg| leg[0].distance(leg[1])).sum();
         let mut lit = if choosing { heat * total } else { total };
-        for (n, leg) in points.windows(2).enumerate() {
+        for leg in points.windows(2) {
             let length = leg[0].distance(leg[1]);
             if length < 1.0 {
                 continue;
             }
-            // Past the first, each leg's floor reaches back over the turn.
-            let lead = if n == 0 { 0.0 } else { LUNGE_SWEEP };
             let fuse = lit.clamp(0.0, length);
             lit -= length;
             // Only the leg the fuse is burning along shows its head.
             let head = if fuse > 0.0 && fuse < length { head } else { 0.0 };
-            plan.strips.push(StripPlan { from: leg[0], to: leg[1], lead, fuse, color, floor, fill, head, edge, top: picked });
+            plan.strips.push(StripPlan { from: leg[0], to: leg[1], fuse, color, floor, fill, head, edge, top: picked });
         }
         if passed_over {
             continue;
@@ -1086,22 +1247,18 @@ fn plan_marks(stalker: &StalkerLook, from: Vec2, since: f32, since_chosen: f32, 
             }
             along -= length;
         }
-        // Routes through the same point share its reticle.
-        for (n, &mark) in route.iter().enumerate().skip(reached) {
-            if !plan.marks.iter().any(|m| m.at.distance(mark) < 2.0) {
-                let label = if picked { (n + 1).to_string() } else { String::new() };
-                plan.marks.push(PlannedMark { at: mark, label, first: n, color });
-            }
+        if let Some(&end) = route.last().filter(|_| route.len() > reached) {
+            plan.marks.push(PlannedMark { at: end, spoke: r, chosen: picked, color });
         }
     }
     plan
 }
 
 /// While the stalker winds up, lays a trail of marching chevrons along every
-/// route it might lunge, and a small throbbing reticle where each turns, none
-/// favoured, until moments before it goes it settles on one and shows it.
-/// Once it lunges, only the route it took is left, its points numbered in
-/// the order it'll reach them.
+/// spoke it might lunge down, a small throbbing reticle where each ends and a
+/// ring round its body, none favoured, until moments before it goes it
+/// settles on one and shows it (see `plan_marks`). Once it lunges, only the
+/// route it took is left.
 #[allow(clippy::type_complexity)]
 fn draw_marks(
     mut commands: Commands,
@@ -1114,9 +1271,12 @@ fn draw_marks(
     >,
     mut chevrons: Query<(&ChildOf, &mut MarkChevron, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkReticle>, Without<MarkRing>)>,
     mut reticles: Query<(&ChildOf, &mut MarkReticle, &mut Transform, &mut Visibility), (Without<Keeper>, Without<MarkChevron>, Without<MarkRing>)>,
-    mut rings: Query<(&ChildOf, &mut Transform, &mut Sprite), (With<MarkRing>, Without<Keeper>)>,
-    mut numbers: Query<(&ChildOf, &mut Text2d, &mut TextColor), With<MarkNumber>>,
-    mut strokes: Query<(&ChildOf, &mut Sprite), (With<MarkStroke>, Without<MarkRing>)>,
+    mut rings: Query<(&ChildOf, &mut Transform, &mut Sprite), (With<MarkRing>, Without<Keeper>, Without<MarkHub>)>,
+    mut hubs: Query<
+        (&ChildOf, &mut Transform, &mut Sprite, &mut Visibility),
+        (With<MarkHub>, Without<Keeper>, Without<MarksLook>, Without<MarkChevron>, Without<MarkReticle>, Without<MarkRing>),
+    >,
+    mut strokes: Query<(&ChildOf, &mut Sprite), (With<MarkStroke>, Without<MarkRing>, Without<MarkHub>)>,
 ) {
     let t = time.elapsed_secs();
     let mut plans = Vec::new();
@@ -1170,27 +1330,29 @@ fn draw_marks(
         };
         visibility.set_if_neq(Visibility::Inherited);
         transform.translation = mark.at.extend(0.5);
-        if reticle.label != mark.label {
-            reticle.label.clone_from(&mark.label);
-        }
-        reticle.first = mark.first;
+        reticle.spoke = mark.spoke;
+        reticle.chosen = mark.chosen;
         reticle.color = mark.color;
     }
     for (parent, mut transform, mut sprite) in &mut rings {
         let Ok((_, reticle, ..)) = reticles.get(parent.parent()) else { continue };
-        let beat = (t * 10.0 - reticle.first as f32 * 1.2).sin();
+        let beat = (t * 10.0 - reticle.spoke as f32 * 1.2).sin();
         transform.rotation = Quat::from_rotation_z(t * 2.5);
-        // Candidates' reticles (unnumbered) sit smaller than the chosen route's.
-        let size = if reticle.label.is_empty() { 1.0 } else { 1.4 };
+        // Candidates' reticles sit smaller than the chosen route's.
+        let size = if reticle.chosen { 1.4 } else { 1.0 };
         transform.scale = Vec3::splat(size + 0.25 * beat);
         sprite.color = reticle.color;
     }
-    for (parent, mut text, mut color) in &mut numbers {
-        let Ok((_, reticle, ..)) = reticles.get(parent.parent()) else { continue };
-        if text.0 != reticle.label {
-            text.0.clone_from(&reticle.label);
-        }
-        color.set_if_neq(TextColor(reticle.color));
+    for (parent, mut transform, mut sprite, mut visibility) in &mut hubs {
+        let Some(&(at, radius, color)) = plan(parent.parent()).and_then(|plan| plan.hub.as_ref()) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        transform.translation = at.extend(-0.05);
+        transform.rotation = Quat::from_rotation_z(-t * 1.5);
+        transform.scale = Vec3::splat(2.0 * radius / RING_SIZE);
+        sprite.color = color;
     }
 }
 
@@ -1220,7 +1382,7 @@ fn draw_routes(
         let length = leg.from.distance(leg.to);
         // In leg space: x runs from the leg's start (0) to its end.
         let (from, to, y, width, alpha) = match *part {
-            StripPart::Floor => (-leg.lead, length, 0.0, LUNGE_SWEEP * 2.0, leg.floor),
+            StripPart::Floor => (0.0, length, 0.0, LUNGE_SWEEP * 2.0, leg.floor),
             StripPart::Fuse => (0.0, leg.fuse, 0.0, LUNGE_SWEEP * 2.0, if leg.fuse > 0.5 { leg.fill } else { 0.0 }),
             StripPart::Head => (leg.fuse - 2.0, leg.fuse, 0.0, LUNGE_SWEEP * 2.0, leg.head),
             StripPart::Edge(side) => (0.0, length, side * LUNGE_SWEEP, 1.0, leg.edge),
@@ -1233,8 +1395,10 @@ fn draw_routes(
 }
 
 fn dress_lane(add: On<Add, StalkerLook>, mut commands: Commands) {
+    // Not `Level`: on a client the boss can arrive before its deck is built,
+    // and building it clears `Level` entities. It goes when its boss does.
     commands
-        .spawn((Level, LaneLook(add.entity), StateClock::<StalkerState>::default(), Transform::from_xyz(0.0, 0.0, 12.5), Visibility::Hidden))
+        .spawn((LaneLook(add.entity), StateClock::<StalkerState>::default(), Transform::from_xyz(0.0, 0.0, 12.5), Visibility::Hidden))
         .with_children(|parent| {
             for (part, z) in [(LanePart::Strip, 0.0), (LanePart::Edge(-1.0), 0.1), (LanePart::Edge(1.0), 0.1)] {
                 parent.spawn((part, Sprite::from_color(MARK_COLOR, Vec2::ONE), Transform::from_xyz(0.0, 0.0, z)));
@@ -1346,9 +1510,10 @@ fn draw_lane(
 fn dress_brute(add: On<Add, BruteLook>, mut commands: Commands, assets: Res<AssetServer>) {
     let disc = assets.load("sprites/fx/explosion.png");
     let ring = assets.load("sprites/fx/shock_ring.png");
+    // Not `Level`: on a client the boss can arrive before its deck is built,
+    // and building it clears `Level` entities. It goes when its boss does.
     commands
         .spawn((
-            Level,
             BruteMarks(add.entity),
             StateClock::<BruteState>::default(),
             Transform::from_xyz(0.0, 0.0, 12.5),
@@ -1819,7 +1984,8 @@ struct BossRage;
 #[derive(Component)]
 struct BossMeter;
 
-/// Under the prism's meter, how it's guarding itself: shown only for the prism.
+/// Under the meter, how it's guarding itself: shown for the prism, and for
+/// the brute while it's hardened.
 #[derive(Component)]
 struct BossPhaseRow;
 
@@ -1893,7 +2059,7 @@ fn spawn_boss_bar(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 fn update_boss_bar(
     time: Res<Time>,
     seen: Res<BossSeen>,
-    keepers: Query<(&Keeper, &Health, Option<&PrismLook>)>,
+    keepers: Query<(&Keeper, &Health, Option<&PrismLook>, Option<&BruteLook>)>,
     mut bar: Single<(&mut Node, &mut BorderColor), With<BossBar>>,
     mut phase_row: Single<&mut Node, (With<BossPhaseRow>, Without<BossBar>)>,
     mut phases: Query<(&BossPhase, &mut Text, &mut TextColor), (Without<BossName>, Without<BossTier>, Without<BossRage>)>,
@@ -1902,13 +2068,14 @@ fn update_boss_bar(
     mut rage: Single<&mut TextColor, (With<BossRage>, Without<BossName>, Without<BossTier>)>,
     mut meter: Single<&mut Meter, With<BossMeter>>,
 ) {
-    let fighting = keepers.iter().find(|(k, h, _)| seen.0 && k.awake && !h.is_dead());
+    let fighting = keepers.iter().find(|(k, h, ..)| seen.0 && k.awake && !h.is_dead());
     let (node, border) = &mut *bar;
     let display = if fighting.is_some() { Display::Flex } else { Display::None };
     if node.display != display {
         node.display = display;
     }
-    let Some((keeper, health, prism)) = fighting else { return };
+    let Some((keeper, health, prism, brute)) = fighting else { return };
+    let hardened = brute.is_some_and(|brute| brute.state == BruteState::Harden);
 
     let color = keeper.tier.color();
     let accent = if keeper.enraged { ENRAGED_COLOR } else { color };
@@ -1934,12 +2101,27 @@ fn update_boss_bar(
     };
     rage.set_if_neq(TextColor(rage_color));
     meter.frac = (health.current / health.max.max(1.0)).clamp(0.0, 1.0);
-    meter.color = accent;
+    meter.color = if hardened { ARMOUR_COLOR } else { accent };
 
     // The prism's phase; exposed it throbs, and a coming shift blinks after an arrow.
-    let display = if prism.is_some() { Display::Flex } else { Display::None };
+    let display = if prism.is_some() || hardened { Display::Flex } else { Display::None };
     if phase_row.display != display {
         phase_row.display = display;
+    }
+    if hardened {
+        let mend = 0.65 + 0.35 * (time.elapsed_secs() * 3.0).sin();
+        for (part, mut text, mut tint) in &mut phases {
+            let (label, color) = match part {
+                BossPhase::Now => ("HARDENED", ARMOUR_COLOR),
+                BossPhase::Arrow => ("+", HEAL_COLOR.with_alpha(mend)),
+                BossPhase::Next => ("HEALING", HEAL_COLOR.with_alpha(mend)),
+            };
+            if text.0 != label {
+                text.0 = label.into();
+            }
+            tint.set_if_neq(TextColor(color));
+        }
+        return;
     }
     let Some(prism) = prism else { return };
     let throb = 0.65 + 0.35 * (time.elapsed_secs() * 7.0).sin();

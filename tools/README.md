@@ -79,7 +79,8 @@ appears at the tier(s) the rotation gives it for that seed.
 
 How the bots fight each kind matters for reading these numbers. They circle
 the hands and the stalker close, dodging lasers. They kite the Vault Brute
-just out of its reach, stepping out of a raised slam. They kite the Vault
+just out of its reach, stepping out of a raised slam, and hold fire on it
+while it's hardened (immune), shooting its guards instead. They kite the Vault
 Prism just outside its arcs (`PRISM_ARC_RANGE` + 25 px), backing further off
 while it gathers an arc and spreading out from each other. They hold fire on
 it whenever it negates or reflects, and also through the warning before it

@@ -2,11 +2,13 @@
 //! (see `breach.rs`), one of four kinds taking turns down the decks. The vault
 //! keeper fights with two floating hands, each sweeping lasers and hurling
 //! nova orbs; badly hurt, it enrages and both hands attack together. The
-//! vault stalker crouches showing several routes it might lunge along (one
-//! through up to three pirates in a row), then takes one at random; now and
-//! then it rampages instead, dashing wall to wall across the room again and
-//! again. The vault brute plods after the crew and slams whoever it reaches,
-//! and keeps roaring for guards to do its fighting for it. The vault prism,
+//! vault stalker crouches showing straight lunges fanned evenly all round it
+//! like the roots of unity (one aimed at a pirate), takes one at random, and
+//! may go again from where it lands; now and then it rampages instead,
+//! dashing wall to wall across the room again and again. The vault brute
+//! plods after the crew and slams whoever it reaches, keeps roaring for
+//! guards to do its fighting for it, and as it's worn down hunkers behind its
+//! armour for a few seconds, immune and slowly healing. The vault prism,
 //! the beefiest, shifts phases: exposed, then an aegis negating every sort of
 //! damage, exposed again, then a mirror sending the crew's shots, grenades and
 //! orbs back at them; enraged, it goes in and out of both at once. It blinks
@@ -119,24 +121,21 @@ const ENRAGED_WIND_UP: f32 = 0.75;
 /// crew has a moment to react.
 const REVEAL: f32 = 0.45;
 const ENRAGED_REVEAL: f32 = 0.35;
-/// How many routes it threatens while winding up; it takes one at random.
-const ROUTES: usize = 3;
-const ENRAGED_ROUTES: usize = 4;
-/// Every route's first leg heads at least this far from every other's, so
-/// each reads as its own direction.
-const ROUTE_SPLIT: f32 = 30.0 * std::f32::consts::PI / 180.0;
-/// The most pirates the through-the-crew route goes through, and the most legs any route has.
-const MAX_MARKS: usize = 3;
-const MAX_LEGS: usize = 3;
-/// A swerving leg is aimed this far off a pirate, and runs `OVERSHOOT` past them.
-const SWERVE_MIN: f32 = 25.0 * std::f32::consts::PI / 180.0;
-const SWERVE_MAX: f32 = 50.0 * std::f32::consts::PI / 180.0;
-const OVERSHOOT: f32 = 28.0;
-/// How far a feint into open floor runs before it turns on someone.
-const FEINT_MIN: f32 = 48.0;
-const FEINT_MAX: f32 = 100.0;
-/// A first leg shorter than this doesn't read as a direction.
+/// How many straight lunges it threatens while winding up, a fresh random
+/// count each time, fanned out evenly all round it like the roots of unity
+/// (see `plan_spokes`); it takes one at random.
+const SPOKES: (usize, usize) = (3, 5);
+const ENRAGED_SPOKES: (usize, usize) = (4, 7);
+/// The farthest a lunge reaches from its body (the vault room is 384 by 256).
+const SPOKE_REACH: f32 = 165.0;
+/// A lunge cut shorter than this by a wall doesn't read as a direction, and
+/// isn't offered.
 const MIN_LEG: f32 = 20.0;
+/// The most lunges in one go: after a lunge it may wind up straight away
+/// for another from where it landed (`CHAIN_CHANCE`), up to this many.
+const MAX_LUNGES: u8 = 2;
+const CHAIN_CHANCE: f32 = 0.5;
+const ENRAGED_CHAIN_CHANCE: f32 = 0.75;
 /// How fast it lunges, the longest it spends on any one leg, and the steps it
 /// takes so it can't skip past a pirate or a shield.
 const LUNGE_SPEED: f32 = 420.0;
@@ -205,6 +204,14 @@ const SLAM_HIT: f32 = 55.0;
 const SLAM_KNOCKBACK: f32 = 300.0;
 const SLAM_BEAT: f32 = 0.25;
 const SLAM_RECOVER: f32 = 1.0;
+/// Seconds it stays hardened, immune to all harm and healing.
+const HARDEN_TIME: f32 = 4.0;
+const ENRAGED_HARDEN_TIME: f32 = 4.0;
+/// It hardens as its health first drops below each of these shares of its
+/// max, once each a fight (as soon as it's plodding again).
+const HARDEN_AT: [f32; 3] = [0.75, 0.5, 0.25];
+/// Share of its max health it heals each second while hardened.
+const HARDEN_HEAL: f32 = 0.015;
 /// Seconds after waking before its first roar, then between roars.
 const FIRST_SUMMON: f32 = 2.0;
 const SUMMON_GAP: f32 = 12.0;
@@ -212,16 +219,18 @@ const ENRAGED_SUMMON_GAP: f32 = 9.0;
 /// Seconds it stands roaring, its guards' spots showing, before they appear.
 const ROAR: f32 = 1.2;
 /// Guards each roar calls in: `BASE_SUMMONS`, plus one for each pirate it can
-/// see up to a crew of `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged. At
-/// most `CAP_PER_PIRATE` per pirate are alive at once, never fewer
-/// than `MIN_CAP` nor more than `MAX_SUMMONS`: at the cap a roar calls fewer,
-/// or none.
-const BASE_SUMMONS: usize = 1;
+/// see up to a crew of `SUMMON_CREW`, plus `ENRAGED_SUMMONS` more enraged, but
+/// at most `CAP_PER_PIRATE` per pirate in one roar, never fewer than `MIN_CAP`
+/// nor more than `MAX_SUMMONS`. It keeps roaring them in whether or not the
+/// crew has dealt with the last lot; only past `MAX_ALIVE` of its guards up at
+/// once, a ceiling to keep the game running smoothly, does a roar call fewer.
+const BASE_SUMMONS: usize = 2;
 const SUMMON_CREW: usize = 3;
-const ENRAGED_SUMMONS: usize = 2;
-const CAP_PER_PIRATE: usize = 3;
-const MIN_CAP: usize = 3;
-const MAX_SUMMONS: usize = 10;
+const ENRAGED_SUMMONS: usize = 4;
+const CAP_PER_PIRATE: usize = 4;
+const MIN_CAP: usize = 4;
+const MAX_SUMMONS: usize = 15;
+const MAX_ALIVE: usize = 40;
 /// Guards appear this far in from the room's walls, at least `SUMMON_CLEAR`
 /// from every pirate (half that if the crew leaves no such room), and
 /// `SUMMON_SPREAD` from each other.
@@ -343,12 +352,13 @@ pub enum HandAction {
 pub enum KeeperKind {
     /// The vault keeper: two floating hands sweeping lasers and hurling nova orbs.
     Hands,
-    /// A hulking, buffed-up stalker: winds up showing several lunge routes and
-    /// takes one at random, or rampages wall to wall across the room, with a
-    /// moderate cooldown between.
+    /// A hulking, buffed-up stalker: winds up showing straight lunges fanned
+    /// evenly round it and takes one at random, maybe twice in a row, or
+    /// rampages wall to wall across the room, with a moderate cooldown between.
     Stalker,
     /// A beefy, buffed-up brute: melee only, it has to get up close to slam,
-    /// and keeps calling in guards to do its fighting for it.
+    /// keeps calling in guards to do its fighting for it, and as it's worn
+    /// down hardens for a few seconds, immune and slowly healing.
     Brute,
     /// A very beefy crystal that shifts between phases (see `PrismPhase`):
     /// negating all damage, or sending the crew's shots back at them. It
@@ -389,8 +399,8 @@ impl KeeperKind {
     pub fn details(self) -> &'static str {
         match self {
             Self::Hands => "Guards a vault. Two floating hands sweep lasers and hurl nova orbs; badly hurt, both attack at once.",
-            Self::Stalker => "Guards a vault. Shows several ways it might lunge; just before it goes, the one it picked turns white: get off it. Sometimes rampages wall to wall instead. Riot shields stop it.",
-            Self::Brute => "Guards a vault. A beefy brute that slams whoever it reaches, and keeps calling in guards to fight for it.",
+            Self::Stalker => "Guards a vault. Fans its lunges out all around it; the one it picks turns white just before it goes, and it may go again. Sometimes rampages wall to wall. Riot shields stop it.",
+            Self::Brute => "Guards a vault. Slams whoever it reaches and never stops calling in guards. Worn down, it hardens for a few seconds: immune, and slowly healing.",
             Self::Prism => "Guards a vault. Shifts between negating all damage and reflecting every shot back; hit it while it's exposed. Blinks anywhere in a moment and lashes the crew with arcs.",
         }
     }
@@ -538,10 +548,19 @@ pub enum BruteState {
     Recover { blow: u8 },
     /// Roaring, calling in guards: they appear at `BruteLook::summons` when it ends.
     Summon,
+    /// Hunkered down behind its armour for `brute_harden_time` seconds:
+    /// immune to all harm (`Health::negating`) and slowly healing, standing
+    /// still while its guards fight for it.
+    Harden,
 }
 
 /// How far from `BruteLook::at` a Vault Brute's slam reaches.
 pub const BRUTE_SLAM_RADIUS: f32 = 32.0;
+
+/// Seconds a Vault Brute stays hardened (`BruteState::Harden`): immune and healing.
+pub fn brute_harden_time(enraged: bool) -> f32 {
+    if enraged { ENRAGED_HARDEN_TIME } else { HARDEN_TIME }
+}
 
 /// Seconds a vault stalker crouches with its routes showing before it lunges.
 pub fn stalker_wind_up(enraged: bool) -> f32 {
@@ -710,6 +729,8 @@ struct StalkerBrain {
     hits: Vec<Entity>,
     /// Its last attack was a rampage: the next is a lunge.
     rampaged: bool,
+    /// Lunges done in this go: it may chain up to `MAX_LUNGES`.
+    lunges: u8,
 }
 
 /// Host only: the vault brute's hidden side; what it's doing is its `BruteLook`.
@@ -720,6 +741,8 @@ struct BruteBrain {
     /// Seconds until it may roar for guards again.
     summon_cd: f32,
     velocity: Vec2,
+    /// How many of `HARDEN_AT` it has hardened for (or skipped past) already.
+    hardened: usize,
 }
 
 /// Host only: the vault prism's hidden side; what it's doing is its `PrismLook`.
@@ -769,6 +792,7 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
                 strafe_timer: 3.0,
                 hits: Vec::new(),
                 rampaged: false,
+                lunges: 0,
             },
             StalkerLook { state: StalkerState::Prowl, routes: Vec::new(), chosen: None, lane: None },
         ));
@@ -794,7 +818,7 @@ pub fn spawn_keeper(commands: &mut Commands, pos: Vec2, deck: u8, kind: KeeperKi
     }
     if kind == KeeperKind::Brute {
         commands.entity(body).insert((
-            BruteBrain { timer: 0.0, summon_cd: FIRST_SUMMON, velocity: Vec2::ZERO },
+            BruteBrain { timer: 0.0, summon_cd: FIRST_SUMMON, velocity: Vec2::ZERO, hardened: 0 },
             BruteLook { state: BruteState::Plod, at: pos.round(), summons: Vec::new() },
         ));
         return;
@@ -901,28 +925,6 @@ fn prowl_dir(pos: Vec2, crew: &[Vec2], strafe: f32) -> Vec2 {
     want.clamp_length_max(1.0)
 }
 
-/// Which of the pirates at `crew` a lunge from `pos` goes through, as indices
-/// in the order it reaches them: the `MAX_MARKS` nearest, each next the
-/// closest to the last.
-fn pick_marks(pos: Vec2, crew: &[Vec2]) -> Vec<usize> {
-    let mut nearest: Vec<usize> = (0..crew.len()).collect();
-    nearest.sort_by(|&a, &b| crew[a].distance(pos).total_cmp(&crew[b].distance(pos)));
-    nearest.truncate(MAX_MARKS);
-    let mut order = Vec::with_capacity(nearest.len());
-    let mut from = pos;
-    while !nearest.is_empty() {
-        let (i, _) = nearest
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| crew[**a].distance(from).total_cmp(&crew[**b].distance(from)))
-            .unwrap();
-        let next = nearest.remove(i);
-        from = crew[next];
-        order.push(next);
-    }
-    order
-}
-
 /// Keeps a body of half-extent `half` on the vault room's floor, `room`.
 fn in_room(room: Rect, half: Vec2, p: Vec2) -> Vec2 {
     if room.width() <= half.x * 2.0 || room.height() <= half.y * 2.0 {
@@ -936,110 +938,53 @@ fn roll(rng: &mut Rng, n: usize) -> usize {
     (rng.unit() * n as f32) as usize % n
 }
 
-/// Up to `n` of the pirates at `crew`, picked at random, in a random order.
-fn shuffled(rng: &mut Rng, crew: &[Vec2], n: usize) -> Vec<Vec2> {
-    let mut left = crew.to_vec();
-    let mut picked = Vec::with_capacity(n.min(left.len()));
-    while picked.len() < n && !left.is_empty() {
-        picked.push(left.swap_remove(roll(rng, left.len())));
-    }
-    picked
+/// `n` unit directions spread evenly all round, like the `n`th roots of
+/// unity turned by `start` radians: the `k`th at `start + 2πk/n`, in that order.
+fn spoke_dirs(start: f32, n: usize) -> Vec<Vec2> {
+    (0..n).map(|k| Vec2::from_angle(start + k as f32 * std::f32::consts::TAU / n as f32)).collect()
 }
 
-/// Which way a route from `pos` sets off: toward its first point at least
-/// `MIN_LEG` away. `None` if it never gets that far.
-fn heading(pos: Vec2, route: &[Vec2]) -> Option<Vec2> {
-    route.iter().find(|p| p.distance(pos) >= MIN_LEG).map(|p| (*p - pos).normalize())
+/// The lunges it might take from `pos`, each a single straight leg (its end,
+/// in whole pixels): `count` spokes fanned evenly round it (`spoke_dirs`),
+/// turned so one aims straight at a random pirate at `crew`, or any way if
+/// there's nobody. Each runs `SPOKE_REACH` out, cut short where a body of
+/// half-extent `half` would leave the room floor `room` or hit something
+/// `blocked` says it can't stand in. Spokes cut shorter than `MIN_LEG` are
+/// left out; the rest keep their places round it, in order.
+fn plan_spokes(room: Rect, half: Vec2, pos: Vec2, crew: &[Vec2], count: usize, blocked: impl Fn(Vec2) -> bool, rng: &mut Rng) -> Vec<Vec<Vec2>> {
+    let aim = (!crew.is_empty()).then(|| crew[roll(rng, crew.len())] - pos).filter(|to| to.length() >= 1.0);
+    let start = aim.map_or_else(|| rng.unit() * std::f32::consts::TAU, Vec2::to_angle);
+    spoke_dirs(start, count.max(1))
+        .into_iter()
+        .filter_map(|dir| {
+            let mut at = pos;
+            let mut gone = 0.0;
+            while gone < SPOKE_REACH {
+                let step = (SPOKE_REACH - gone).min(2.0);
+                let next = pos + dir * (gone + step);
+                if in_room(room, half, next) != next || blocked(next) {
+                    break;
+                }
+                at = next;
+                gone += step;
+            }
+            let end = at.round();
+            (end.distance(pos) >= MIN_LEG).then(|| vec![end])
+        })
+        .collect()
 }
 
-/// The routes a lunge from `pos` might take, `count` of them if there's room:
-/// each the points it passes through in order, on the room floor `room` (for
-/// a body of half-extent `half`). With pirates at `crew`, the first goes
-/// through up to `MAX_MARKS` of them in a chain (see `pick_marks`); the rest
-/// take them in other orders, swerve past one and cut back through, or feint
-/// into open floor before turning on someone. No two set off within
-/// `ROUTE_SPLIT` of each other, so even a lone pirate can't just stand aside
-/// from one line.
-fn plan_routes(room: Rect, half: Vec2, pos: Vec2, crew: &[Vec2], count: usize, rng: &mut Rng) -> Vec<Vec<Vec2>> {
-    let fit = |p: Vec2| in_room(room, half, p).round();
-    let mut routes: Vec<Vec<Vec2>> = Vec::new();
-    // Takes a route if it sets off its own way.
-    let offer = |routes: &mut Vec<Vec<Vec2>>, route: Vec<Vec2>| {
-        let mut route: Vec<Vec2> = route.into_iter().map(fit).collect();
-        route.dedup_by(|a, b| a.distance(*b) < 1.0);
-        route.truncate(MAX_LEGS);
-        let Some(dir) = heading(pos, &route) else { return };
-        let apart = routes
-            .iter()
-            .filter_map(|r| heading(pos, r))
-            .all(|other| dir.angle_to(other).abs() >= ROUTE_SPLIT);
-        if apart && routes.len() < count {
-            routes.push(route);
-        }
-    };
+/// How many spokes a wind-up shows: a fresh random count in `SPOKES` (or
+/// `ENRAGED_SPOKES`), both ends included.
+fn spoke_count(rng: &mut Rng, enraged: bool) -> usize {
+    let (lo, hi) = if enraged { ENRAGED_SPOKES } else { SPOKES };
+    lo + roll(rng, hi - lo + 1)
+}
 
-    if !crew.is_empty() {
-        let chain: Vec<Vec2> = pick_marks(pos, crew).into_iter().map(|i| fit(crew[i])).collect();
-        // Always on offer, however close they stand.
-        if heading(pos, &chain).is_some() {
-            offer(&mut routes, chain);
-        } else {
-            routes.push(chain);
-        }
-    }
-    for _ in 0..48 {
-        if routes.len() >= count {
-            break;
-        }
-        let kind = if crew.is_empty() { 2 } else { roll(rng, 3) };
-        let route = match kind {
-            // The crew in another order.
-            0 => shuffled(rng, crew, MAX_MARKS),
-            // Past a pirate, off to one side, then back through them and on.
-            1 => {
-                let target = crew[roll(rng, crew.len())];
-                let to = target - pos;
-                let swerve = (SWERVE_MIN + rng.unit() * (SWERVE_MAX - SWERVE_MIN)) * rng.signed().signum();
-                let past = pos + Vec2::from_angle(swerve).rotate(to.normalize_or(Vec2::X)) * (to.length() + OVERSHOOT);
-                let mut route = vec![past, target];
-                let others: Vec<Vec2> = crew.iter().copied().filter(|p| *p != target).collect();
-                if !others.is_empty() && rng.unit() < 0.5 {
-                    route.push(others[roll(rng, others.len())]);
-                } else {
-                    route.push(target + (target - fit(past)).normalize_or(Vec2::X) * OVERSHOOT);
-                }
-                route
-            }
-            // Into open floor, then through one or two of them.
-            _ => {
-                let dir = Vec2::from_angle(rng.unit() * std::f32::consts::TAU);
-                let feint = pos + dir * (FEINT_MIN + rng.unit() * (FEINT_MAX - FEINT_MIN));
-                let mut route = vec![feint];
-                if crew.is_empty() {
-                    route.push(feint + Vec2::from_angle(rng.signed() * 2.0).rotate(dir) * FEINT_MAX);
-                } else {
-                    let n = 1 + roll(rng, 2);
-                    route.extend(shuffled(rng, crew, n));
-                }
-                route
-            }
-        };
-        offer(&mut routes, route);
-    }
-    // Cornered or crowded: feints fanned out all around, then at someone.
-    let start = rng.unit() * std::f32::consts::TAU;
-    for k in 0..24 {
-        if routes.len() >= count {
-            break;
-        }
-        let dir = Vec2::from_angle(start + k as f32 * std::f32::consts::TAU / 24.0);
-        let mut route = vec![pos + dir * FEINT_MAX];
-        if let Some(target) = crew.first() {
-            route.push(*target);
-        }
-        offer(&mut routes, route);
-    }
-    routes
+/// Whether, `done` lunges into a go, it winds up straight away for another:
+/// at the odds of `CHAIN_CHANCE` (or `ENRAGED_CHAIN_CHANCE`), and never past `MAX_LUNGES`.
+fn lunges_again(rng: &mut Rng, done: u8, enraged: bool) -> bool {
+    done < MAX_LUNGES && rng.unit() < if enraged { ENRAGED_CHAIN_CHANCE } else { CHAIN_CHANCE }
 }
 
 /// How far a body at `p` can go along unit `dir` before leaving `floor`.
@@ -1148,16 +1093,17 @@ fn prism_guard(health: &mut Mut<Health>, mirror: &mut Mut<Reflector>, phase: Pri
     }
 }
 
-/// The most of its guards alive at once, facing `crew` pirates.
+/// The most guards one roar calls in, facing `crew` pirates.
 fn summon_cap(crew: usize) -> usize {
     (CAP_PER_PIRATE * crew).clamp(MIN_CAP, MAX_SUMMONS)
 }
 
 /// How many guards a roar calls in facing `crew` pirates, with `alive` of its
-/// summons still up: a lone pirate isn't swamped, and never past the cap.
+/// summons still up: a lone pirate isn't swamped by one roar, and the guards
+/// already up don't hold it back, short of `MAX_ALIVE`.
 fn summon_count(enraged: bool, alive: usize, crew: usize) -> usize {
     let wanted = BASE_SUMMONS + crew.clamp(1, SUMMON_CREW) + if enraged { ENRAGED_SUMMONS } else { 0 };
-    wanted.min(summon_cap(crew).saturating_sub(alive))
+    wanted.min(summon_cap(crew)).min(MAX_ALIVE.saturating_sub(alive))
 }
 
 /// Every kind of guard a roar can call in.
@@ -1561,9 +1507,10 @@ fn drive_keeper(
 }
 
 /// Wakes, moves and fights the stalker: it prowls around the crew, then
-/// either winds up showing several routes and lunges along one picked at
-/// random, or rears up and rampages wall to wall across the room, then stands
-/// spent for a moment. A riot shield in its way stops a lunge, or a whole
+/// either winds up showing straight lunges fanned evenly round it and takes
+/// one picked at random (maybe winding up for one more from where it lands),
+/// or rears up and rampages wall to wall across the room, then stands spent
+/// for a moment. A riot shield in its way stops a lunge, or a whole
 /// rampage, dead.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_stalker(
@@ -1616,6 +1563,11 @@ fn drive_stalker(
         let aside = (target - from).normalize_or(Vec2::X).perp() * rng.signed() * LANE_JITTER;
         clip_lane(&grid, half, from, rampage_lane(room, half, from, target + aside))
     };
+    // The lunges a wind-up from `from` shows: a fresh count, fanned evenly round it.
+    let spokes = |rng: &mut Rng, from: Vec2| {
+        let count = spoke_count(rng, enraged);
+        plan_spokes(room, half, from, &spots, count, |p| grid.collides(p, half), rng)
+    };
 
     let mut state = look.state;
     let mut routes = look.routes.clone();
@@ -1644,8 +1596,8 @@ fn drive_stalker(
                     state = StalkerState::Rear;
                 } else {
                     brain.rampaged = false;
-                    let count = if enraged { ENRAGED_ROUTES } else { ROUTES };
-                    routes = plan_routes(room, half, pos, &spots, count, &mut rng);
+                    brain.lunges = 0;
+                    routes = spokes(&mut rng, pos);
                     state = StalkerState::WindUp;
                 }
             }
@@ -1684,8 +1636,18 @@ fn drive_stalker(
                         let hit = hit + 1;
                         brain.timer = 0.0;
                         if hit as usize >= legs {
-                            state = StalkerState::Recover;
-                            brain.recover = RECOVER;
+                            brain.lunges += 1;
+                            // Maybe straight into another wind-up, from where it landed.
+                            let again = if lunges_again(&mut rng, brain.lunges, enraged) { spokes(&mut rng, pos) } else { Vec::new() };
+                            if again.is_empty() {
+                                state = StalkerState::Recover;
+                                brain.recover = RECOVER;
+                            } else {
+                                routes = again;
+                                chosen = None;
+                                state = StalkerState::WindUp;
+                                brain.hits.clear();
+                            }
                         } else {
                             state = StalkerState::Lunge { hit };
                         }
@@ -1767,7 +1729,9 @@ fn drive_stalker(
 /// and, once one is close, raises its fists and slams them down in front of
 /// it, then stands stuck a moment. Every so often (and as soon as it enrages)
 /// it stops to roar instead, calling in guards at the room's edges to do its
-/// fighting for it. Riot shields stop its slam.
+/// fighting for it. As its health first drops below each of `HARDEN_AT`, it
+/// hardens once it's plodding again: stands still for `brute_harden_time`,
+/// negating all harm and slowly healing. Riot shields stop its slam.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_brute(
     mut commands: Commands,
@@ -1775,12 +1739,12 @@ fn drive_brute(
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
-    mut brutes: Query<(&mut Keeper, &KeeperJam, &Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
+    mut brutes: Query<(&mut Keeper, &KeeperJam, &mut Health, &mut Transform, &mut Knockback, &mut BruteBrain, &mut BruteLook)>,
     mut crew: Crew,
     summoned: Query<&Enemy, With<Summoned>>,
     riot_shields: Query<(&RiotShield, &Transform), (Without<Keeper>, Without<Hurtbox>)>,
 ) {
-    let Ok((mut keeper, jam, health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
+    let Ok((mut keeper, jam, mut health, mut body, mut knockback, mut brain, mut look)) = brutes.single_mut() else { return };
     let jammed = jam.0;
     let dt = time.delta_secs();
     // Nothing pushes it around.
@@ -1788,6 +1752,9 @@ fn drive_brute(
         knockback.0 = Vec2::ZERO;
     }
     if !keeper.awake {
+        if health.negating {
+            health.negating = false;
+        }
         let at = look.at;
         look.set_if_neq(BruteLook { state: BruteState::Plod, at, summons: Vec::new() });
         return;
@@ -1795,13 +1762,16 @@ fn drive_brute(
     let start = body.translation.truncate();
     let mut pos = start;
 
-    if !keeper.enraged && health.current <= health.max * ENRAGE_AT {
+    let enraging = !keeper.enraged && health.current <= health.max * ENRAGE_AT;
+    if enraging {
         keeper.enraged = true;
-        // Enraging, it roars for help as soon as it's free.
+        // Enraging, it roars for help as soon as it's free (after hardening, if it's due).
         brain.summon_cd = 0.0;
         fx(&mut commands, FxKind::Explosion, pos, 0.0, KEEPER_COLOR);
         banner.show(format!("THE {} IS ENRAGED", keeper.kind.name()), KEEPER_COLOR, 3.0);
     }
+    // Thresholds of `HARDEN_AT` its health has dropped below by now.
+    let worn = HARDEN_AT.iter().filter(|share| health.current < health.max * **share).count();
     let enraged = keeper.enraged;
     let power = might(keeper.tier).power;
     let half = Vec2::splat(KEEPER_HALF);
@@ -1825,10 +1795,21 @@ fn drive_brute(
     brain.timer += dt;
     brain.summon_cd -= dt;
     match state {
+        BruteState::Plod if worn > brain.hardened => {
+            // Worn past another threshold: it hunkers down before anything else.
+            brain.hardened = worn;
+            state = BruteState::Harden;
+            brain.timer = 0.0;
+            brain.velocity = Vec2::ZERO;
+            fx(&mut commands, FxKind::Burst, pos, 0.0, KEEPER_COLOR);
+            if !enraging {
+                banner.show(format!("THE {} HARDENS", keeper.kind.name()), KEEPER_COLOR, 2.0);
+            }
+        }
         BruteState::Plod => {
             if brain.summon_cd <= 0.0 {
                 brain.summon_cd = if enraged { ENRAGED_SUMMON_GAP } else { SUMMON_GAP };
-                // At the cap, it skips this roar.
+                // Only with `MAX_ALIVE` of its guards up does it skip this roar.
                 let count = summon_count(enraged, summoned.iter().filter(|g| !g.is_hacked()).count(), pirates.len());
                 if count > 0 {
                     let open = |p: Vec2| !grid.collides(p, Vec2::splat(SUMMON_HALF));
@@ -1907,6 +1888,16 @@ fn drive_brute(
                 brain.timer = 0.0;
             }
         }
+        BruteState::Harden => {
+            // Stands still behind its armour, slowly healing.
+            let max = health.max;
+            health.heal(max * HARDEN_HEAL * dt);
+            if brain.timer >= brute_harden_time(enraged) {
+                state = BruteState::Plod;
+                brain.timer = 0.0;
+                fx(&mut commands, FxKind::Burst, pos, 0.0, KEEPER_COLOR);
+            }
+        }
         BruteState::Summon => {
             if brain.timer >= ROAR {
                 // The cap was checked as the roar began: nothing else calls guards in.
@@ -1922,6 +1913,11 @@ fn drive_brute(
     }
     if state != BruteState::Summon {
         summons.clear();
+    }
+    // Immune to everything while hardened, and only then.
+    let negating = state == BruteState::Harden;
+    if health.negating != negating {
+        health.negating = negating;
     }
 
     if pos != start {
@@ -2313,18 +2309,6 @@ mod tests {
         assert_eq!(KeeperKind::pick(1, 3), KeeperKind::Hands);
     }
 
-    #[test]
-    fn marks_the_nearest_three_in_a_chain() {
-        let pos = Vec2::ZERO;
-        assert!(pick_marks(pos, &[]).is_empty());
-        assert_eq!(pick_marks(pos, &[Vec2::new(50.0, 0.0)]), vec![0]);
-        // Four pirates: the farthest is spared, and after the nearest it goes
-        // on to whoever's closest to them, not to itself.
-        let crew = [Vec2::new(200.0, 0.0), Vec2::new(30.0, 0.0), Vec2::new(-60.0, 0.0), Vec2::new(70.0, 0.0)];
-        assert_eq!(pick_marks(pos, &crew), vec![1, 3, 2]);
-        assert_eq!(pick_marks(pos, &crew).len(), MAX_MARKS);
-    }
-
     /// A vault-sized floor for the route and lane tests: 15 by 11 tiles.
     const ROOM: Rect = Rect { min: Vec2::new(0.0, 0.0), max: Vec2::new(240.0, 176.0) };
 
@@ -2333,63 +2317,125 @@ mod tests {
         p.cmpge(ROOM.min + half).all() && p.cmple(ROOM.max - half).all()
     }
 
-    fn check_routes(pos: Vec2, crew: &[Vec2], count: usize, seed: u32) -> Vec<Vec<Vec2>> {
-        let mut rng = Rng::new(seed);
-        let routes = plan_routes(ROOM, Vec2::splat(KEEPER_HALF), pos, crew, count, &mut rng);
-        let cornered = pos.distance(ROOM.min) < 40.0;
-        if cornered {
-            // Only a quarter of the directions are open: not always room for four.
-            assert!((ROUTES..=count).contains(&routes.len()), "seed {seed}: cornered, still a few routes");
-        } else {
-            assert_eq!(routes.len(), count, "seed {seed}: as many routes as asked for");
-        }
-        for route in &routes {
-            assert!((1..=MAX_LEGS).contains(&route.len()), "seed {seed}: 1 to {MAX_LEGS} legs");
-            assert!(route.iter().all(|p| on_floor(*p) && *p == p.round()), "seed {seed}: on the floor, whole pixels");
-        }
-        for (i, a) in routes.iter().enumerate() {
-            for b in &routes[i + 1..] {
-                let (a, b) = (heading(pos, a).unwrap(), heading(pos, b).unwrap());
-                assert!(a.angle_to(b).abs() >= ROUTE_SPLIT - 1e-4, "seed {seed}: first legs head apart");
-            }
-        }
-        routes
+    /// The vault room's floor as it is now: 24 by 16 tiles.
+    const VAULT: Rect = Rect { min: Vec2::new(0.0, 0.0), max: Vec2::new(384.0, 256.0) };
+
+    /// Whether `b` is a whole number of `step`s round from `a`, give or take `slack` radians.
+    fn steps_round(a: Vec2, b: Vec2, step: f32, slack: f32) -> bool {
+        let turns = a.angle_to(b).rem_euclid(std::f32::consts::TAU) / step;
+        (turns - turns.round()).abs() * step < slack
     }
 
     #[test]
-    fn routes_head_apart_on_the_floor_and_one_goes_through_the_crew() {
-        let pos = Vec2::new(120.0, 88.0);
-        let crew = [Vec2::new(170.0, 90.0), Vec2::new(100.0, 140.0), Vec2::new(60.0, 40.0)];
-        let chain: Vec<Vec2> = pick_marks(pos, &crew).into_iter().map(|i| crew[i]).collect();
-        let mut firsts = Vec::new();
-        for seed in 1..200 {
-            for count in [ROUTES, ENRAGED_ROUTES] {
-                let routes = check_routes(pos, &crew, count, seed);
-                assert_eq!(routes[0], chain, "the through-the-crew chain is always one of them");
-                firsts.extend(routes[1..].iter().map(|r| r[0]));
+    fn spokes_are_spread_evenly_like_the_roots_of_unity() {
+        for n in 1..=8 {
+            let start = 0.3 * n as f32;
+            let dirs = spoke_dirs(start, n);
+            assert_eq!(dirs.len(), n);
+            assert!(dirs[0].distance(Vec2::from_angle(start)) < 1e-5, "the first along `start`");
+            for k in 0..n {
+                assert!((dirs[k].length() - 1.0).abs() < 1e-5);
+                let turn = dirs[k].angle_to(dirs[(k + 1) % n]).rem_euclid(std::f32::consts::TAU);
+                let want = if n == 1 { 0.0 } else { std::f32::consts::TAU / n as f32 };
+                assert!((turn - want).abs() < 1e-4 || (n == 1 && (turn - std::f32::consts::TAU).abs() < 1e-4), "{n} spokes: {turn} round to the next");
             }
         }
-        firsts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        firsts.dedup();
-        assert!(firsts.len() > 50, "the other routes vary from lunge to lunge");
-        // Cornered, there's still room for a few.
-        for seed in 1..50 {
-            check_routes(Vec2::new(12.0, 12.0), &crew, ENRAGED_ROUTES, seed);
+        // A fresh count each wind-up, over the whole range and never outside it.
+        let mut rng = Rng::new(5);
+        for (enraged, (lo, hi)) in [(false, SPOKES), (true, ENRAGED_SPOKES)] {
+            let counts: Vec<usize> = (0..400).map(|_| spoke_count(&mut rng, enraged)).collect();
+            assert!(counts.iter().all(|n| (lo..=hi).contains(n)), "enraged {enraged}: {lo} to {hi}");
+            assert!((lo..=hi).all(|n| counts.contains(&n)), "enraged {enraged}: every count comes up");
         }
-        // Nobody about: feints only.
-        check_routes(pos, &[], ROUTES, 7);
+        assert!(SPOKES.0 >= 3 && ENRAGED_SPOKES.0 > SPOKES.0 && ENRAGED_SPOKES.1 > SPOKES.1);
     }
 
     #[test]
-    fn a_lone_pirate_cant_just_stand_aside() {
-        let pos = Vec2::new(120.0, 88.0);
-        let pirate = Vec2::new(180.0, 88.0);
+    fn spokes_reach_out_evenly_and_one_aims_at_a_pirate() {
+        let half = Vec2::splat(KEEPER_HALF);
+        let on_vault_floor = |p: Vec2| p.cmpge(VAULT.min + half).all() && p.cmple(VAULT.max - half).all();
+        let pos = Vec2::new(192.0, 128.0);
+        let crew = [Vec2::new(250.0, 140.0), Vec2::new(150.0, 60.0), Vec2::new(100.0, 200.0)];
+        let mut aimed = [0; 3];
         for seed in 1..200 {
-            let routes = check_routes(pos, &[pirate], ROUTES, seed);
-            let straight = routes.iter().filter(|r| heading(pos, r).unwrap().angle_to(pirate - pos).abs() < 0.1).count();
-            assert_eq!(straight, 1, "seed {seed}: only one route sets off straight at them");
-            assert!(routes.iter().all(|r| r.contains(&pirate)), "seed {seed}: but every route comes for them");
+            for n in 3..=7 {
+                let mut rng = Rng::new(seed);
+                let spokes = plan_spokes(VAULT, half, pos, &crew, n, |_| false, &mut rng);
+                assert_eq!(spokes.len(), n, "seed {seed}: room for every spoke mid-room");
+                let dirs: Vec<Vec2> = spokes.iter().map(|s| (s[0] - pos).normalize()).collect();
+                for (k, spoke) in spokes.iter().enumerate() {
+                    assert_eq!(spoke.len(), 1, "a single straight leg");
+                    let end = spoke[0];
+                    assert!(on_vault_floor(end) && end == end.round(), "seed {seed}: on the floor, whole pixels");
+                    assert!(end.distance(pos) <= SPOKE_REACH + 1.0 && end.distance(pos) >= MIN_LEG);
+                    // Kept in order round it, each 2π/n on from the last.
+                    let turn = dirs[k].angle_to(dirs[(k + 1) % n]).rem_euclid(std::f32::consts::TAU);
+                    assert!((turn - std::f32::consts::TAU / n as f32).abs() < 0.03, "seed {seed}, {n} spokes: {turn} between spokes");
+                }
+                let at = crew.iter().position(|c| dirs.iter().any(|d| d.angle_to(*c - pos).abs() < 0.03));
+                let at = at.unwrap_or_else(|| panic!("seed {seed}: one spoke aims straight at a pirate"));
+                aimed[at] += 1;
+            }
         }
+        assert!(aimed.iter().all(|n| *n > 100), "it aims at each of them in turn: {aimed:?}");
+        // Out in the open, unaimed, the full reach.
+        let mut rng = Rng::new(3);
+        let open = Rect { min: Vec2::splat(-1000.0), max: Vec2::splat(1000.0) };
+        for spoke in plan_spokes(open, half, Vec2::ZERO, &[], 5, |_| false, &mut rng) {
+            assert!((spoke[0].length() - SPOKE_REACH).abs() <= 1.0);
+        }
+        // Nobody about: it faces any way.
+        let starts: Vec<i32> = (1..50)
+            .map(|seed| {
+                let mut rng = Rng::new(seed);
+                let spokes = plan_spokes(VAULT, half, pos, &[], 3, |_| false, &mut rng);
+                ((spokes[0][0] - pos).to_angle() * 10.0) as i32
+            })
+            .collect();
+        assert!(starts.iter().any(|a| *a != starts[0]), "unaimed, the fan turns from wind-up to wind-up");
+    }
+
+    #[test]
+    fn walls_cut_spokes_short_and_drop_the_stubs_without_moving_the_rest() {
+        let half = Vec2::splat(KEEPER_HALF);
+        // Cornered: those into the walls are dropped, the rest keep their angles.
+        let pos = Vec2::new(14.0, 14.0);
+        let pirate = Vec2::new(150.0, 100.0);
+        for seed in 1..100 {
+            for n in 3..=7 {
+                let mut rng = Rng::new(seed);
+                let spokes = plan_spokes(VAULT, half, pos, &[pirate], n, |_| false, &mut rng);
+                assert!(!spokes.is_empty() && spokes.len() < n, "seed {seed}: some dropped, not all");
+                let aim = (pirate - pos).normalize();
+                assert!(spokes.iter().any(|s| (s[0] - pos).normalize().angle_to(aim).abs() < 0.03), "the one at the pirate stays");
+                for s in &spokes {
+                    assert!(s[0].distance(pos) >= MIN_LEG);
+                    assert!(steps_round(aim, s[0] - pos, std::f32::consts::TAU / n as f32, 0.05), "seed {seed}: still at its root");
+                }
+            }
+        }
+        // Something solid ahead cuts it short, just before it.
+        let pos = Vec2::new(192.0, 128.0);
+        let mut rng = Rng::new(1);
+        let spokes = plan_spokes(VAULT, half, pos, &[pos + Vec2::new(100.0, 0.0)], 4, |p| p.x > 240.0, &mut rng);
+        assert!(spokes.iter().any(|s| (s[0] - Vec2::new(240.0, 128.0)).length() <= 2.0), "stops at the block: {spokes:?}");
+        // Boxed in all round: nothing to show, so it goes back to prowling.
+        let mut rng = Rng::new(1);
+        assert!(plan_spokes(VAULT, half, pos, &[], 5, |p| p.distance(pos) > 10.0, &mut rng).is_empty());
+    }
+
+    #[test]
+    fn goes_again_sometimes_but_never_a_third_time() {
+        let mut rng = Rng::new(11);
+        for enraged in [false, true] {
+            let again = (0..1000).filter(|_| lunges_again(&mut rng, 1, enraged)).count() as f32 / 1000.0;
+            let chance = if enraged { ENRAGED_CHAIN_CHANCE } else { CHAIN_CHANCE };
+            assert!((again - chance).abs() < 0.06, "enraged {enraged}: went again {again} of the time");
+            for done in MAX_LUNGES..MAX_LUNGES + 3 {
+                assert!((0..200).all(|_| !lunges_again(&mut rng, done, enraged)));
+            }
+        }
+        assert_eq!(MAX_LUNGES, 2, "one more at most");
     }
 
     #[test]
@@ -2437,21 +2483,26 @@ mod tests {
     }
 
     #[test]
-    fn roars_never_raise_more_than_the_cap() {
-        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (2, MIN_CAP), "a lone pirate isn't swamped");
-        assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (4, 6));
+    fn roars_keep_coming_whoever_is_still_up() {
+        assert_eq!((summon_count(false, 0, 1), summon_count(true, 0, 1)), (3, MIN_CAP), "a lone pirate isn't swamped");
+        assert_eq!(MIN_CAP, 4);
+        assert_eq!((summon_count(false, 0, 3), summon_count(true, 0, 3)), (5, 9));
         assert_eq!(summon_count(false, 0, 5), BASE_SUMMONS + SUMMON_CREW, "a big crew calls no more each roar");
-        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 6, 9, MAX_SUMMONS));
-        assert_eq!(summon_count(true, summon_cap(3) - 1, 3), 1, "shrinks near the cap");
+        assert_eq!((summon_cap(1), summon_cap(2), summon_cap(3), summon_cap(9)), (MIN_CAP, 8, 12, MAX_SUMMONS));
+        // Guards still up from earlier roars don't cut the next one short...
         for crew in 0..5 {
-            for alive in 0..MAX_SUMMONS + 3 {
-                for enraged in [false, true] {
-                    assert!(alive + summon_count(enraged, alive, crew) <= summon_cap(crew).max(alive));
+            for enraged in [false, true] {
+                let full = summon_count(enraged, 0, crew);
+                for alive in 0..=MAX_ALIVE - full {
+                    assert_eq!(summon_count(enraged, alive, crew), full, "crew {crew} enraged {enraged} alive {alive}");
+                }
+                // ...until the ceiling.
+                for alive in 0..MAX_ALIVE + 3 {
+                    assert!(alive + summon_count(enraged, alive, crew) <= MAX_ALIVE.max(alive));
                 }
             }
         }
-        assert_eq!(summon_count(false, MAX_SUMMONS, 3), 0);
-        assert_eq!(summon_count(true, summon_cap(1), 1), 0);
+        assert_eq!(summon_count(true, MAX_ALIVE, 3), 0);
         // A roar brings as many different kinds as it can, and over a fight, all of them.
         let mut rng = Rng::new(3);
         for count in 0..12 {
@@ -2872,6 +2923,153 @@ mod tests {
                 }
             }
             panic!("it never lunged");
+        }
+
+        #[test]
+        fn the_stalker_sometimes_goes_again_but_never_a_third_time() {
+            let (mut app, stalker, pirate) = keeper_in(KeeperKind::Stalker);
+            let (mut spot, _) = beside(&app, stalker, 60.0);
+            app.world_mut().get_mut::<Health>(pirate).unwrap().negating = true;
+            let look = |app: &App| app.world().get::<StalkerLook>(stalker).unwrap().clone();
+            // Lunges in each go, from its first wind-up until it recovers.
+            let mut goes: Vec<u8> = Vec::new();
+            let mut lunges = 0;
+            let mut last = StalkerState::Prowl;
+            for _ in 0..(90.0 / DT) as usize {
+                if look(&app).state == StalkerState::Prowl {
+                    // Back in its sight wherever its last lunge took it.
+                    spot = beside(&app, stalker, 60.0).0;
+                }
+                place(&mut app, pirate, spot);
+                if look(&app).state == StalkerState::Prowl {
+                    // Straight into the next go, and always a lunge, never a rampage.
+                    let mut brain = app.world_mut().get_mut::<StalkerBrain>(stalker).unwrap();
+                    brain.cooldown = 0.0;
+                    brain.rampaged = true;
+                }
+                app.update();
+                let now = look(&app);
+                match (last, now.state) {
+                    (StalkerState::WindUp, StalkerState::Lunge { .. }) => lunges += 1,
+                    (StalkerState::Lunge { .. }, StalkerState::WindUp) => {
+                        assert!(!now.routes.is_empty() && now.chosen.is_none(), "a fresh fan for the next, nothing picked yet");
+                    }
+                    (StalkerState::Lunge { .. }, StalkerState::Recover) => {
+                        goes.push(lunges);
+                        lunges = 0;
+                    }
+                    _ => {}
+                }
+                if now.state == StalkerState::WindUp {
+                    assert!(now.routes.iter().all(|r| r.len() == 1), "straight lunges only");
+                }
+                last = now.state;
+            }
+            assert!(goes.len() >= 8, "plenty of goes: {goes:?}");
+            assert!(goes.iter().all(|n| (1..=MAX_LUNGES).contains(n)), "never a third: {goes:?}");
+            assert!(goes.contains(&1) && goes.contains(&2), "sometimes once, sometimes twice: {goes:?}");
+        }
+
+        fn brute_state(app: &App, brute: Entity) -> BruteState {
+            app.world().get::<BruteLook>(brute).unwrap().state
+        }
+
+        /// Sets the brute's health to `share` of its max.
+        fn wear(app: &mut App, brute: Entity, share: f32) {
+            let mut health = app.world_mut().get_mut::<Health>(brute).unwrap();
+            health.current = health.max * share;
+        }
+
+        #[test]
+        fn the_brute_hardens_as_it_wears_down_immune_and_healing() {
+            let (mut app, brute, pirate) = keeper_in(KeeperKind::Brute);
+            let (far, _) = beside(&app, brute, 120.0);
+            app.world_mut().get_mut::<Health>(pirate).unwrap().negating = true;
+            // No roars unless it enrages.
+            app.world_mut().get_mut::<BruteBrain>(brute).unwrap().summon_cd = 1e6;
+            let max = app.world().get::<Health>(brute).unwrap().max;
+            let harden = |app: &mut App| {
+                place(app, pirate, far);
+                app.update();
+            };
+            harden(&mut app);
+            assert_eq!(brute_state(&app, brute), BruteState::Plod);
+            assert!(!app.world().get::<Health>(brute).unwrap().negating);
+
+            // Just under 75%: down it hunkers, shrugging everything off and healing.
+            wear(&mut app, brute, 0.74);
+            harden(&mut app);
+            assert_eq!(brute_state(&app, brute), BruteState::Harden);
+            assert!(app.world().get::<Health>(brute).unwrap().negating);
+            let from = at(&app, brute);
+            let mut last = hp(&app, brute);
+            let mut frames = 0;
+            while brute_state(&app, brute) == BruteState::Harden {
+                assert!(!app.world_mut().get_mut::<Health>(brute).unwrap().hurt(500.0), "nothing hurts it");
+                harden(&mut app);
+                let now = hp(&app, brute);
+                assert!(now >= last && now <= max, "healing, never past its max");
+                last = now;
+                frames += 1;
+                assert!(frames < 600, "it gets up again");
+            }
+            let held = frames as f32 * DT;
+            assert!((held - brute_harden_time(false)).abs() < 3.0 * DT, "hardened {held:.2} s");
+            assert_eq!(at(&app, brute), from, "standing still");
+            let healed = (last - 0.74 * max) / max;
+            assert!((healed - HARDEN_HEAL * brute_harden_time(false)).abs() < 0.003, "healed {healed} of its max");
+            assert!(!app.world().get::<Health>(brute).unwrap().negating, "and open to harm again");
+            assert!(app.world_mut().get_mut::<Health>(brute).unwrap().hurt(10.0));
+
+            // That threshold is spent: further down, but above half, nothing.
+            wear(&mut app, brute, 0.6);
+            for _ in 0..30 {
+                harden(&mut app);
+                assert_ne!(brute_state(&app, brute), BruteState::Harden);
+            }
+
+            // Below half: it enrages and hardens, then roars once it's done.
+            wear(&mut app, brute, 0.45);
+            harden(&mut app);
+            assert!(app.world().get::<Keeper>(brute).unwrap().enraged);
+            assert_eq!(brute_state(&app, brute), BruteState::Harden);
+            let mut roared = false;
+            for _ in 0..((brute_harden_time(true) + 0.5) / DT) as usize {
+                harden(&mut app);
+                if brute_state(&app, brute) == BruteState::Summon {
+                    roared = true;
+                    break;
+                }
+            }
+            assert!(roared, "roars for guards once it's up again");
+            assert!(!app.world().get::<Health>(brute).unwrap().negating);
+            for _ in 0..(2.0 / DT) as usize {
+                harden(&mut app);
+            }
+            assert_eq!(brute_state(&app, brute), BruteState::Plod);
+
+            // Below a quarter: the last time.
+            wear(&mut app, brute, 0.2);
+            harden(&mut app);
+            assert_eq!(brute_state(&app, brute), BruteState::Harden);
+            for _ in 0..((brute_harden_time(true) + 0.2) / DT) as usize {
+                harden(&mut app);
+            }
+            assert_ne!(brute_state(&app, brute), BruteState::Harden);
+            wear(&mut app, brute, 0.05);
+            for _ in 0..30 {
+                harden(&mut app);
+                assert_ne!(brute_state(&app, brute), BruteState::Harden, "three times a fight at most");
+            }
+
+            // Asleep, it's never left immune.
+            wear(&mut app, brute, 0.04);
+            app.world_mut().get_mut::<BruteBrain>(brute).unwrap().hardened = 0;
+            harden(&mut app);
+            assert!(app.world().get::<Health>(brute).unwrap().negating);
+            app.world_mut().get_mut::<Keeper>(brute).unwrap().awake = false;
+            harden(&mut app);
+            assert!(!app.world().get::<Health>(brute).unwrap().negating);
         }
 
         #[test]

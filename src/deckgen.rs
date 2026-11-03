@@ -6,8 +6,8 @@
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 
-pub const COLS: usize = 60;
-pub const ROWS: usize = 42;
+pub const COLS: usize = 64;
+pub const ROWS: usize = 44;
 /// Guards never start closer than this many tiles to the crew's arrival point.
 const GUARD_CLEARANCE: usize = 12;
 
@@ -139,7 +139,7 @@ enum Shape {
 
 /// Every deck's vault room: an arena to fight the keeper in around the vault.
 /// Even sides, so the 2x2 vault sits dead centre.
-const VAULT_ROOM: (usize, usize) = (18, 12);
+const VAULT_ROOM: (usize, usize) = (24, 16);
 
 /// Rooms every deck needs: the vault, the arrival, the lift and the pad.
 const MIN_ROOMS: usize = 4;

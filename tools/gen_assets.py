@@ -1202,6 +1202,7 @@ def floor_shadows():
 # Each deck draws the same shapes in its own steel, paint and light, so riding
 # a lift down reads as arriving somewhere new. Floors, grating and the hull are
 # drawn as 2x2 panels and cut into quarters, so a room isn't a grid of squares.
+# `core` is the light of the vault room's power (see the strongroom below).
 # --------------------------------------------------------------------------
 
 DECK_THEMES = [
@@ -1210,18 +1211,21 @@ DECK_THEMES = [
         steel=rgb(58, 64, 82), cap=rgb(30, 34, 47), rim=rgb(104, 114, 142), face=rgb(52, 58, 76),
         light=rgb(80, 230, 255), screen=rgb(70, 220, 130), led=rgb(255, 176, 50), paint=rgb(232, 190, 40),
         pipe=rgb(92, 98, 116), grime=rgb(22, 24, 32), under=rgb(13, 14, 21), hull=rgb(15, 17, 25),
+        core=rgb(80, 230, 255),
     ),
     # Deck 2, the engine works: warm gunmetal, copper pipe, orange lamps, rust.
     SimpleNamespace(
         steel=rgb(68, 63, 58), cap=rgb(35, 32, 30), rim=rgb(140, 122, 100), face=rgb(62, 56, 51),
         light=rgb(255, 156, 64), screen=rgb(255, 190, 80), led=rgb(120, 230, 110), paint=rgb(232, 118, 40),
         pipe=rgb(156, 102, 66), grime=rgb(52, 32, 20), under=rgb(17, 13, 12), hull=rgb(20, 17, 16),
+        core=rgb(96, 214, 255),
     ),
     # Deck 3, the treasury: dark teal slate, brass trim, mint lamps, gold paint.
     SimpleNamespace(
         steel=rgb(46, 56, 60), cap=rgb(22, 27, 31), rim=rgb(178, 148, 86), face=rgb(40, 49, 54),
         light=rgb(120, 255, 196), screen=rgb(120, 255, 196), led=rgb(255, 210, 90), paint=rgb(214, 172, 60),
         pipe=rgb(156, 134, 86), grime=rgb(16, 22, 24), under=rgb(9, 13, 15), hull=rgb(12, 16, 18),
+        core=rgb(120, 255, 196),
     ),
 ]
 
@@ -1881,6 +1885,396 @@ def floor_lips():
                 px[y][x] = c
         lips[f"lip_{side}"] = px
     return lips
+
+
+# --------------------------------------------------------------------------
+# The vault room, fitted out as a strongroom: armoured plate inside a band of
+# grating, a seal set into the floor round the vault, power conduits running
+# from its dais out to the walls, beacons in the corners and armoured walls.
+# Its lights are the deck's cold `core` and its inlay muted metal, so the
+# keepers' red, amber, violet and white warnings still stand out over it.
+# --------------------------------------------------------------------------
+
+# Stencil letters, 3x5, beside DIGITS.
+LETTERS = {
+    "V": ["#.#", "#.#", "#.#", ".#.", ".#."],
+    "A": [".#.", "#.#", "###", "#.#", "#.#"],
+    "U": ["#.#", "#.#", "#.#", "#.#", "###"],
+    "L": ["#..", "#..", "#..", "#..", "###"],
+    "T": ["###", ".#.", ".#.", ".#.", ".#."],
+    "-": ["...", "...", "###", "...", "..."],
+}
+
+
+def heavy_bolt(px, x, y, base):
+    """A big hex-headed bolt, 3x3, lit from the top left."""
+    for dy, row in enumerate([[8, 26, 10], [20, 34, -8], [0, -12, -26]]):
+        for dx, tone in enumerate(row):
+            px[y + dy][x + dx] = shade(base, tone)
+    if y + 3 < len(px) and x + 3 < len(px[0]):
+        px[y + 3][x + 2] = px[y + 2][x + 3] = shade(base, -34)
+
+
+def armour_plate(T, seed):
+    """A raised armour plate, 32x32: chamfered corners, a lit bevel on its
+    top and left, a heavy bolt in each corner."""
+    n = PANEL
+    base = mix(T.steel, T.cap, 0.22)
+    px = brushed(base, n, n, seed)
+    half = n / 2
+    for y in range(n):
+        for x in range(n):
+            d = min(x, y, n - 1 - x, n - 1 - y)
+            corner = min(x, n - 1 - x) + min(y, n - 1 - y)
+            upper_left = x + y < n - 1
+            if d == 0 or corner < 4:
+                px[y][x] = shade(base, -30)
+            elif corner == 4:
+                lit = (x < half) == (y < half)
+                px[y][x] = shade(base, (16 if x < half else -14) if lit else 0)
+            elif d == 1:
+                px[y][x] = shade(base, 15 if (x == 1 or y == 1) and upper_left or (x == 1 and y < n - 2) or (y == 1 and x < n - 2) else -15)
+            elif d == 2:
+                px[y][x] = shade(px[y][x], 4 if (x == 2 or y == 2) else -6)
+            else:
+                # A faint sheen across the plate's face.
+                px[y][x] = shade(px[y][x], max(0.0, 4 - abs(x - y) * 0.35))
+    for x, y in [(4, 4), (n - 7, 4), (4, n - 7), (n - 7, n - 7)]:
+        heavy_bolt(px, x, y, base)
+    return px, base
+
+
+def strongroom_plates(T, seed):
+    """The strongroom's floor, 32x32 each: a plain armour plate, one locked by
+    a bar across, one by a bar down, and one with a light set into it."""
+    n = PANEL
+    plain, base = armour_plate(T, seed)
+
+    def barred(down):
+        px, _ = armour_plate(T, seed + (2 if down else 1))
+        for a in range(6, n - 6):
+            for b in range(13, 19):
+                x, y = (b, a) if down else (a, b)
+                edge = b in (13, 18)
+                px[y][x] = shade(base, -24 if edge else -14)
+            for b in (15, 16):
+                x, y = (b, a) if down else (a, b)
+                if 8 <= a < n - 8:
+                    px[y][x] = shade(base, 18 if b == 15 else 4)
+        for a in (8, n - 11):
+            x, y = (14, a) if down else (a, 14)
+            heavy_bolt(px, x, y, base)
+        return px
+
+    lit, _ = armour_plate(T, seed + 3)
+    c = 15.5
+    for y in range(n):
+        for x in range(n):
+            d = abs(x - c) + abs(y - c)
+            if d < 3.0:
+                lit[y][x] = mix(T.core, WHITE, 0.45 - d * 0.15)
+            elif d < 4.0:
+                lit[y][x] = mix(T.core, T.under, 0.35)
+            elif d < 5.0:
+                lit[y][x] = shade(T.under, 6)
+            elif d < 6.0:
+                lit[y][x] = shade(base, 12 if y > c else -20)
+            elif d < 9.0:
+                lit[y][x] = mix(lit[y][x], T.core, 0.14 * (9.0 - d) / 3.0)
+
+    panels = [plain, barred(False), barred(True), lit]
+    for i, px in enumerate(panels):
+        weather(px, T, seed + 200 + i, grime=0.7, scratches=3)
+    return panels
+
+
+def radial(size, color, peak, reach=1.0, power=1.6):
+    """A soft round pool of light, brightest in the middle."""
+    px = [[CLEAR for _ in range(size)] for _ in range(size)]
+    c = (size - 1) / 2
+    for y in range(size):
+        for x in range(size):
+            t = max(0.0, 1.0 - math.hypot(x - c, y - c) / (c * reach))
+            a = int(peak * t ** power)
+            if a:
+                px[y][x] = color[:3] + (a,)
+    return px
+
+
+def vault_seal(T, size=180):
+    """The seal set into the strongroom floor round the vault's dais: inlaid
+    rings, a dial of ticks and eight lit studs, all translucent so the plate
+    shows through. The dais (32x32) sits in its middle."""
+    px = [[CLEAR for _ in range(size)] for _ in range(size)]
+    c = (size - 1) / 2
+    inlay = mix(T.rim, T.steel, 0.25)[:3]
+
+    def put(x, y, color, a):
+        px[y][x] = color[:3] + (int(a),)
+
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x - c, y - c
+            r = math.hypot(dx, dy)
+            ang = math.atan2(dy, dx)
+            # Inlaid bands: a dark seam either side of a strip of metal, lit
+            # on the side facing the light.
+            lit = -(dx + dy) / max(r, 1.0)
+            for r0, r1 in [(83.0, 87.0), (60.0, 62.5), (23.0, 25.5)]:
+                if r0 <= r < r1:
+                    if r < r0 + 1.0 or r >= r1 - 1.0:
+                        put(x, y, (0, 0, 0), 120)
+                    else:
+                        put(x, y, shade(inlay, 10 * lit), 150)
+            if 87.0 <= r < 88.0 or 62.5 <= r < 63.5:
+                put(x, y, (255, 255, 255), 14 + 10 * max(0.0, -lit))
+            # The inner field sinks a touch under the dais.
+            if 25.5 <= r < 60.0:
+                put(x, y, (0, 0, 0), 30)
+            # A dial of ticks between the bands, every 7.5 degrees, long ones
+            # every 30.
+            if 65.0 <= r < 81.0:
+                step = math.pi / 24
+                k = round(ang / step)
+                off = abs(ang - k * step) * r
+                long = k % 4 == 0
+                if off < 0.7 and (long or r >= 73.0):
+                    put(x, y, inlay, 110 if long else 80)
+            # Clamps holding the dais, on its diagonals.
+            for q in range(4):
+                a = math.pi / 4 + q * math.pi / 2
+                along = dx * math.cos(a) + dy * math.sin(a)
+                across = -dx * math.sin(a) + dy * math.cos(a)
+                if 20.0 <= along < 31.0 and abs(across) < 3.5:
+                    edge = along < 21.0 or along >= 30.0 or abs(across) >= 2.5
+                    put(x, y, shade(T.steel, -24 if edge else 6 - 4 * across), 235)
+    # Eight lit studs round the dial, clear of the conduits on its axes.
+    for k in range(8):
+        a = math.pi / 8 + k * math.pi / 4
+        sx, sy = c + 72 * math.cos(a), c + 72 * math.sin(a)
+        for y in range(int(sy) - 4, int(sy) + 6):
+            for x in range(int(sx) - 4, int(sx) + 6):
+                d = math.hypot(x - sx, y - sy)
+                if d < 1.6:
+                    put(x, y, mix(T.core, WHITE, 0.5), 255)
+                elif d < 2.4:
+                    put(x, y, T.core, 230)
+                elif d < 3.3:
+                    put(x, y, shade(T.steel, -30), 220)
+                elif d < 5.0:
+                    put(x, y, T.core, 40 * (5.0 - d) / 1.7)
+    return px
+
+
+def conduits(T):
+    """A power conduit set into the floor, as 16x16 lengths running across
+    and down, a junction node on it, the coupling it ends in at the wall,
+    and the glow a node throws."""
+    trench = shade(T.under, 4)
+    across = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+    rows = {
+        3: shade(T.steel, -34), 4: shade(T.steel, 18), 5: shade(T.steel, -6), 6: trench,
+        7: mix(T.core, trench, 0.55), 8: mix(T.core, WHITE, 0.3), 9: mix(T.core, trench, 0.2),
+        10: mix(T.core, trench, 0.6), 11: trench, 12: shade(T.steel, -18), 13: shade(T.steel, -40),
+    }
+    for y, color in rows.items():
+        for x in range(SIZE):
+            across[y][x] = color
+    for x in (3, 4, 11, 12):
+        # Clamps across the channel.
+        for y in range(5, 12):
+            across[y][x] = shade(T.steel, 14 if x in (3, 11) else -14)
+    for x in range(SIZE):
+        across[14][x] = (0, 0, 0, 70)
+    down = [[across[x][y] for x in range(SIZE)] for y in range(SIZE)]
+    # Down the screen, light falls on the left lip rather than the top.
+    for y in range(SIZE):
+        down[y][3], down[y][4], down[y][12], down[y][13] = shade(T.steel, -34), shade(T.steel, 18), shade(T.steel, -18), shade(T.steel, -40)
+
+    def housing(radius_out, lens):
+        px = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+        c = 7.5
+        for y in range(SIZE):
+            for x in range(SIZE):
+                dx, dy = x - c, y - c
+                # An octagon, so it reads as machined.
+                d = max(abs(dx), abs(dy), (abs(dx) + abs(dy)) / 1.35)
+                if d < lens:
+                    px[y][x] = mix(T.core, WHITE, 0.5 * (1.0 - d / lens))
+                elif d < lens + 1.0:
+                    px[y][x] = shade(T.under, 4)
+                elif d < radius_out - 1.0:
+                    px[y][x] = shade(T.steel, 6 - 8 * (dx + dy) / max(d, 1.0))
+                elif d < radius_out:
+                    px[y][x] = shade(T.steel, -36)
+                elif d < radius_out + 1.0 and dx + dy > 0:
+                    px[y][x] = (0, 0, 0, 80)
+        return px
+
+    node = housing(7.6, 2.6)
+    coupling = housing(7.9, 1.6)
+    for x, y in [(2, 2), (12, 2), (2, 12), (12, 12)]:
+        coupling[y][x] = shade(T.steel, 30)
+        coupling[y + 1][x + 1] = shade(T.steel, -30)
+    return {
+        "conduit_h": across, "conduit_v": down, "conduit_node": node, "conduit_end": coupling,
+        "conduit_glow": radial(40, T.core, 80),
+    }
+
+
+def beacon(T):
+    """A floor beacon in the strongroom's corners, and the light it throws."""
+    px = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+    c = 7.5
+    for y in range(SIZE):
+        for x in range(SIZE):
+            dx, dy = x - c, y - c
+            r = math.hypot(dx, dy)
+            if r < 3.2:
+                px[y][x] = mix(T.core, WHITE, 0.6 * (1.0 - r / 3.2))
+            elif r < 4.3:
+                px[y][x] = mix(T.core, T.under, 0.4)
+            elif r < 5.3:
+                px[y][x] = shade(T.under, 6)
+            elif r < 7.0:
+                px[y][x] = shade(T.steel, 10 - 14 * (dx + dy) / r)
+            elif r < 7.9:
+                px[y][x] = shade(T.steel, -38)
+            elif r < 8.6 and dx + dy > 0:
+                px[y][x] = (0, 0, 0, 70)
+    for a in range(4):
+        ang = math.pi / 4 + a * math.pi / 2
+        x, y = int(round(c + 6 * math.cos(ang))), int(round(c + 6 * math.sin(ang)))
+        px[y][x] = shade(T.steel, 34)
+    return px
+
+
+def threshold(T):
+    """Paint just inside the vault's gate, 32x32: worn stripes in the deck's
+    paint, translucent so the grating shows through."""
+    px = [[CLEAR for _ in range(PANEL)] for _ in range(PANEL)]
+    for y in range(PANEL):
+        for x in range(PANEL):
+            if min(x, y, PANEL - 1 - x, PANEL - 1 - y) == 0:
+                px[y][x] = (0, 0, 0, 110)
+                continue
+            stripe = ((x + y) // 4) % 2 == 0
+            wear = noise(x, y, 611) * 0.7 + noise(x // 3, y // 3, 612) * 0.3
+            if stripe:
+                px[y][x] = mix(T.paint, T.rim, 0.3)[:3] + (100 if wear < 0.72 else 50,)
+            else:
+                px[y][x] = (0, 0, 0, 70)
+    return px
+
+
+def stencil_word(text, color, seed, scale=2):
+    """A worn, translucent stencilled word."""
+    glyphs = [LETTERS.get(ch) or DIGITS.get(ch) or ["..."] * 5 for ch in text]
+    w = (len(glyphs) * 4 - 1) * scale
+    px = [[CLEAR for _ in range(w)] for _ in range(5 * scale)]
+    for i, glyph in enumerate(glyphs):
+        for gy, line in enumerate(glyph):
+            for gx, on in enumerate(line):
+                if on != "#":
+                    continue
+                for sy in range(scale):
+                    for sx in range(scale):
+                        x, y = (i * 4 + gx) * scale + sx, gy * scale + sy
+                        if noise(x, y, seed) > 0.22:
+                            px[y][x] = color[:3] + (105,)
+    return px
+
+
+def strongroom_faces(T):
+    """The strongroom's walls, seen from the front: armour plate, a light
+    strip that lights the floor, a grille with the vault's power glowing
+    behind it, and a pilaster."""
+    hi, lo = shade(T.face, 18), shade(T.face, -22)
+
+    def base(seed):
+        px = face_base(T, seed)
+        for x in range(SIZE):
+            px[13][x] = mix(T.rim, T.face, 0.35)
+        return px
+
+    armour = base(41)
+    bevel(armour, 1, 3, 14, 11, hi, lo)
+    for y in range(4, 11):
+        for x in range(2, 14):
+            armour[y][x] = shade(armour[y][x], 6)
+    for x in (3, 6, 9, 12):
+        for y in (4, 9):
+            armour[y][x] = shade(T.rim, -6)
+            armour[y + 1][x + 1] = lo
+
+    strip = base(42)
+    bevel(strip, 1, 4, 14, 10, lo, hi)
+    for y in range(5, 10):
+        for x in range(2, 14):
+            heat = 1.0 - abs(y - 7) / 2.5
+            strip[y][x] = mix(T.core, WHITE, heat * 0.5) if 5 < y < 9 else mix(T.core, T.under, 0.7)
+
+    grille = base(43)
+    bevel(grille, 2, 3, 13, 11, lo, hi)
+    for y in range(4, 11):
+        for x in range(3, 13):
+            glow = 1.0 - abs(x - 7.5) / 6.0
+            grille[y][x] = shade(T.face, -36) if y % 2 == 0 else mix(T.under, T.core, 0.25 + 0.4 * glow)
+
+    pilaster = base(44)
+    for y in range(2, 14):
+        for x in range(5, 11):
+            pilaster[y][x] = shade(T.face, 26 if x == 5 else 12 if x < 8 else -4 if x < 10 else -26)
+    for y in (4, 11):
+        for x in range(5, 11):
+            pilaster[y][x] = shade(T.rim, -20 if y == 11 else 0)
+    pilaster[7][7] = pilaster[7][8] = T.core
+    pilaster[8][7] = pilaster[8][8] = mix(T.core, T.face, 0.5)
+
+    faces = [armour, strip, grille, pilaster]
+    for i, px in enumerate(faces):
+        weather(px, T, 400 + i, grime=0.4, scratches=1)
+    return faces
+
+
+def strongroom_trims(T):
+    """A running light along the top of the strongroom's side and far walls,
+    on each tile's lit rim between its bolts (see `wall_cap`)."""
+    trims = {}
+    last = SIZE - 1
+    for side, at in [("n", lambda d, i: (i, d)), ("e", lambda d, i: (last - d, i)), ("w", lambda d, i: (d, i))]:
+        px = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
+        for i in (7, 8):
+            for d, color in [(1, mix(T.core, WHITE, 0.4)), (0, T.core), (2, T.core[:3] + (90,))]:
+                x, y = at(d, i)
+                px[y][x] = color
+        for i in (6, 9):
+            x, y = at(1, i)
+            px[y][x] = T.core[:3] + (110,)
+        trims[f"vault_trim_{side}"] = px
+    return trims
+
+
+def strongroom_tiles(T, seed, deck):
+    """Every piece of the strongroom one deck needs, by file name."""
+    tiles = {}
+    for i, px in enumerate(strongroom_plates(T, seed)):
+        for q, quarter in enumerate(quarters(px)):
+            tiles[f"vault_plate_{i}_{q}"] = quarter
+    tiles.update({f"vault_face_{i}": px for i, px in enumerate(strongroom_faces(T))})
+    tiles.update(strongroom_trims(T))
+    tiles.update(conduits(T))
+    tiles.update({
+        "vault_seal": vault_seal(T),
+        "vault_beacon": beacon(T),
+        "vault_threshold": threshold(T),
+        "vault_beacon_glow": radial(56, T.core, 56),
+        "vault_glow": radial(96, T.core, 60, power=2.2),
+        "spill_vault": spill(T.core, 50),
+        "vault_stencil": stencil_word("VAULT", mix(T.paint, T.rim, 0.45), 620 + deck),
+        "vault_number": stencil_word(f"0{deck + 1}", mix(T.paint, T.rim, 0.45), 630 + deck),
+    })
+    return tiles
 
 
 # How often each look turns up; keep these in step with `draw_deck` in room.rs.
@@ -2944,6 +3338,7 @@ def main():
     sets = []
     for deck, theme in enumerate(DECK_THEMES):
         tiles = deck_tiles(theme, 1 + deck)
+        tiles.update(strongroom_tiles(theme, 1 + deck, deck))
         sets.append(tiles)
         for name, px in tiles.items():
             write_png(os.path.join(ROOT, "tiles", f"deck_{deck}", f"{name}.png"), px)
