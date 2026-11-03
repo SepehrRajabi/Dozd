@@ -234,11 +234,11 @@ const SUMMON_HALF: f32 = 6.0;
 /// The Vault Prism's phases: calm, it holds each guard (aegis or mirror, in
 /// turn) this long, with `PRISM_EXPOSED_TIME` exposed between them.
 pub const PRISM_GUARD_TIME: f32 = 4.0;
-pub const PRISM_EXPOSED_TIME: f32 = 4.5;
+pub const PRISM_EXPOSED_TIME: f32 = 5.0;
 /// Enraged, it goes in and out of both guards at once: this long in both,
 /// then this long exposed.
 pub const PRISM_BOTH_TIME: f32 = 3.5;
-pub const PRISM_ENRAGED_EXPOSED_TIME: f32 = 3.0;
+pub const PRISM_ENRAGED_EXPOSED_TIME: f32 = 3.5;
 /// For this long before each shift, `PrismLook::next` shows what's coming.
 pub const PRISM_WARN: f32 = 0.8;
 /// Seconds a blink takes, from vanishing to reappearing at `PrismLook::warp`.
@@ -269,7 +269,7 @@ const PRISM_ARC_GAP: f32 = 1.1;
 const ENRAGED_PRISM_ARC_GAP: f32 = 0.8;
 /// Each arc's damage to each of the nearest `PRISM_ARC_TARGETS` in reach (not
 /// shared out, unlike the Arc Coil's), and how hard it throws them.
-pub const PRISM_ARC_HIT: f32 = 14.0;
+pub const PRISM_ARC_HIT: f32 = 12.0;
 const PRISM_ARC_TARGETS: usize = 3;
 const ENRAGED_PRISM_ARC_TARGETS: usize = 4;
 const PRISM_ARC_KNOCKBACK: f32 = 60.0;
@@ -463,7 +463,7 @@ fn keeper_health(kind: KeeperKind, tier: VaultTier, crew: usize) -> f32 {
         KeeperKind::Hands => 1800.0,
         KeeperKind::Stalker => 2400.0,
         KeeperKind::Brute => 3000.0,
-        KeeperKind::Prism => 3600.0,
+        KeeperKind::Prism => 3200.0,
     };
     base * might(tier).health * (0.4 + 0.6 * crew.max(1) as f32)
 }
@@ -2258,7 +2258,7 @@ mod tests {
                 KeeperKind::Hands => 1800.0,
                 KeeperKind::Stalker => 2400.0,
                 KeeperKind::Brute => 3000.0,
-                KeeperKind::Prism => 3600.0,
+                KeeperKind::Prism => 3200.0,
             };
             assert_eq!(keeper_health(kind, VaultTier::Silver, 1), base);
             assert_eq!(keeper_health(kind, VaultTier::Silver, 0), keeper_health(kind, VaultTier::Silver, 1), "never less than solo");
