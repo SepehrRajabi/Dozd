@@ -1008,6 +1008,17 @@ PERK_SYMBOLS = {
         ".wSSSSw.",
         ".wwwwww.",
     ],
+    # Full ammo: three rounds standing side by side.
+    "resupply": [
+        "........",
+        ".w.w.w..",
+        "wSwSwSw.",
+        "wSwSwSw.",
+        "wSwSwSw.",
+        "wwwwwww.",
+        "wSwSwSw.",
+        "wwwwwww.",
+    ],
 }
 
 PERK_COLORS = {
@@ -1016,6 +1027,7 @@ PERK_COLORS = {
     "shock_field": (rgb(90, 210, 255), rgb(20, 70, 120)),
     "cloak": (rgb(190, 120, 255), rgb(70, 35, 120)),
     "recharge": (rgb(255, 220, 65), rgb(115, 85, 15)),
+    "resupply": (rgb(255, 115, 175), rgb(120, 30, 70)),
 }
 
 

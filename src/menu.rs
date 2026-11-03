@@ -487,7 +487,7 @@ fn extras_screen(mut commands: Commands, assets: Res<AssetServer>) {
 fn settings_screen(mut commands: Commands, assets: Res<AssetServer>, settings: Res<Settings>) {
     let root = screen_root(&mut commands, &assets, MenuScreen::Settings);
     let rows = [
-        (Setting::Reinforcements, "REINFORCEMENTS", "Guard waves arrive while the alarm is up. The host's setting counts."),
+        (Setting::Reinforcements, "REINFORCEMENTS", "Guard waves arrive while the alarm is up, in solo raids. Always on in LAN games."),
         (Setting::Vsync, "VSYNC", "Wait for the monitor between frames. Stops tearing."),
         (Setting::RefreshRate, "REFRESH RATE", "Frames per second cap. With vsync on, the monitor's rate is the ceiling."),
     ];

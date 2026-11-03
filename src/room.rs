@@ -33,7 +33,7 @@ const CARRIED_HALF: f32 = 6.0;
 // 'G' vault gate (2 tiles, the only way into the vault room; open once its keeper is down)
 // loot: c chip, i ingot, x crystal, r relic, p plasma, w crate
 // guards: d sentry drone, s stalker, h warden, b brute, g herald
-// perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak, 5 recharge
+// perks: 1 overdrive, 2 nano patch, 3 shock field, 4 cloak, 5 recharge, 6 resupply
 
 pub struct RoomPlugin;
 

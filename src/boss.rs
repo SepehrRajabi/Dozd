@@ -171,8 +171,11 @@ const DASH_TIME: f32 = 0.8;
 /// Seconds braced at the wall between dashes, the next lane showing.
 const BRACE: f32 = 0.45;
 const ENRAGED_BRACE: f32 = 0.35;
-/// Each lane runs through a pirate, or up to this far to one side of them.
-const LANE_JITTER: f32 = 10.0;
+/// A rampage dash only roughly heads for the crew: it sets off toward a
+/// pirate it can see swung up to `LANE_SWING` radians either way, or, with
+/// odds `WILD_LANE`, any way at all.
+const LANE_SWING: f32 = 55.0 * std::f32::consts::PI / 180.0;
+const WILD_LANE: f32 = 0.35;
 /// A lane shorter than this ahead of it isn't worth dashing: it heads for the
 /// middle of the room instead.
 const MIN_DASH: f32 = 64.0;
@@ -1000,6 +1003,16 @@ fn edge_reach(floor: Rect, p: Vec2, dir: Vec2) -> f32 {
     if reach.is_finite() { reach.max(0.0) } else { 0.0 }
 }
 
+/// Which way a rampage dash from `from` sets off, given a pirate at `target`:
+/// roughly their way, swung up to `LANE_SWING` either side, or now and then
+/// (`WILD_LANE`) any way at all.
+fn rampage_dir(rng: &mut Rng, from: Vec2, target: Vec2) -> Vec2 {
+    if rng.unit() < WILD_LANE {
+        return Vec2::from_angle(rng.unit() * std::f32::consts::TAU);
+    }
+    Vec2::from_angle(rng.signed() * LANE_SWING).rotate((target - from).normalize_or(Vec2::X))
+}
+
 /// A rampage dash's lane from `from` toward `aim`, from wall to wall of the
 /// room floor `room` (for a body of half-extent `half`): it starts behind
 /// `from` and ends past `aim`, where the dash ends. If that's hardly any way
@@ -1558,10 +1571,11 @@ fn drive_stalker(
         .map(|(_, _, _, t, ..)| t.translation.truncate())
         .collect();
     // A dash's lane from `from`: wall to wall, through or just beside someone.
+    // A dash's lane from `from`: wall to wall, only roughly toward someone.
     let next_lane = |rng: &mut Rng, from: Vec2| {
         let target = spots[roll(rng, spots.len())];
-        let aside = (target - from).normalize_or(Vec2::X).perp() * rng.signed() * LANE_JITTER;
-        clip_lane(&grid, half, from, rampage_lane(room, half, from, target + aside))
+        let aim = from + rampage_dir(rng, from, target) * MIN_DASH;
+        clip_lane(&grid, half, from, rampage_lane(room, half, from, aim))
     };
     // The lunges a wind-up from `from` shows: a fresh count, fanned evenly round it.
     let spokes = |rng: &mut Rng, from: Vec2| {
@@ -2436,6 +2450,20 @@ mod tests {
             }
         }
         assert_eq!(MAX_LUNGES, 2, "one more at most");
+    }
+
+    #[test]
+    fn rampage_dashes_only_roughly_head_for_the_crew() {
+        let mut rng = Rng::new(11);
+        let (from, target) = (Vec2::ZERO, Vec2::new(100.0, 0.0));
+        let offs: Vec<f32> = (0..2000).map(|_| rampage_dir(&mut rng, from, target).to_angle().abs()).collect();
+        assert!(offs.iter().all(|a| a.is_finite()));
+        let share = |test: &dyn Fn(f32) -> bool| offs.iter().filter(|a| test(**a)).count() as f32 / offs.len() as f32;
+        // Rarely dead on them, often well off, and now and then any way at all.
+        assert!(share(&|a| a < 0.05) < 0.15, "too often straight at them");
+        assert!(share(&|a| a > 0.5) > 0.4, "too rarely well off");
+        let past = share(&|a| a > LANE_SWING + 0.01);
+        assert!(past > 0.1 && past < WILD_LANE, "wild dashes: {past}");
     }
 
     #[test]

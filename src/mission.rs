@@ -415,8 +415,16 @@ fn tick_banner(time: Res<Time>, mut banner: ResMut<Banner>) {
     banner.timer = (banner.timer - time.delta_secs()).max(0.0);
 }
 
+/// Whether guard waves come once the alarm is up: always in a LAN game, and
+/// in a solo raid as the reinforcements setting says.
+fn reinforcements_on(settings: &Settings, mode: &NetMode) -> bool {
+    settings.reinforcements || *mode != NetMode::Solo
+}
+
 /// Copies host-only mission state into the replicated status, only when it changes.
+#[allow(clippy::too_many_arguments)]
 fn publish_status(
+    mode: Res<NetMode>,
     state: Res<State<GameState>>,
     heist: Res<Heist>,
     alarm: Res<Alarm>,
@@ -433,7 +441,7 @@ fn publish_status(
         seed: heist.seed,
         deck: heist.deck,
         alarm: alarm.level,
-        reinforcements: settings.reinforcements,
+        reinforcements: reinforcements_on(&settings, &mode),
         // Whole seconds are all the HUD shows; avoids replicating every frame.
         next_wave: alarm.wave_timer.max(0.0).ceil(),
         extraction: (extraction.progress * 10.0).round() / 10.0,
@@ -482,6 +490,7 @@ fn announce_alarm(mut alarm: ResMut<Alarm>, mut banner: ResMut<Banner>) {
 }
 
 fn run_waves(
+    mode: Res<NetMode>,
     mut commands: Commands,
     time: Res<Time>,
     grid: Res<RoomGrid>,
@@ -496,7 +505,7 @@ fn run_waves(
     }
     let dt = time.delta_secs();
     alarm.level = (alarm.level + ALARM_CREEP * dt).min(MAX_ALARM);
-    if !settings.reinforcements {
+    if !reinforcements_on(&settings, &mode) {
         return;
     }
     alarm.wave_timer -= dt;
@@ -1284,6 +1293,17 @@ mod tests {
         let solo = outcome(seat(Finished, 3000, 3000), tally, Settlement::default());
         assert_eq!(solo.title, "EXTRACTED");
         assert_eq!(solo.detail, "You got out with 3,000 cr from deck 2");
+    }
+
+    #[test]
+    fn lan_games_always_send_reinforcements() {
+        let off = Settings { reinforcements: false, ..Settings::default() };
+        let on = Settings { reinforcements: true, ..Settings::default() };
+        let host = NetMode::Host { port: 5000, code: "ABCD-EFGH".into() };
+        assert!(!reinforcements_on(&off, &NetMode::Solo), "solo follows the setting");
+        assert!(reinforcements_on(&on, &NetMode::Solo));
+        assert!(reinforcements_on(&off, &host), "a LAN game has them whatever the host's setting");
+        assert!(reinforcements_on(&on, &host));
     }
 
     #[test]

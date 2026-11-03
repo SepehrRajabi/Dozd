@@ -12,7 +12,7 @@ pub const REFRESH_RATES: [Option<u32>; 6] = [None, Some(30), Some(60), Some(120)
 
 #[derive(Resource, Clone, PartialEq, Debug)]
 pub struct Settings {
-    /// Reinforcement waves once the alarm is raised. Only the host's choice counts.
+    /// Reinforcement waves once the alarm is raised, in solo raids; LAN games always have them.
     pub reinforcements: bool,
     pub vsync: bool,
     /// Frames per second the game won't exceed; `None` leaves it to vsync or the GPU.

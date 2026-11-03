@@ -145,7 +145,7 @@ const VAULT_ROOM: (usize, usize) = (24, 16);
 const MIN_ROOMS: usize = 4;
 
 /// Perk pickups: restores and ammo are common, the tactical ones rarer.
-const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2), ('5', 2)];
+const PERK_TABLE: &[(char, u32)] = &[('1', 3), ('2', 3), ('3', 2), ('4', 2), ('5', 2), ('6', 3)];
 
 pub fn generate(seed: u32, deck: u8, decks: u8) -> Layout {
     // A corridor between other rooms can clip the sealed vault room; roll again.
@@ -624,7 +624,7 @@ mod tests {
                     assert_eq!(tiles[y][x], 'V');
                     assert_eq!(tiles[y + 1][x + 1], 'V');
                 }
-                let perks = ['1', '2', '3', '4', '5'].into_iter().map(count).sum::<usize>();
+                let perks = ['1', '2', '3', '4', '5', '6'].into_iter().map(count).sum::<usize>();
                 assert!((1..=3).contains(&perks), "seed {seed} deck {deck}: {perks} perks");
             }
         }

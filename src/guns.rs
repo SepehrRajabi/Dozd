@@ -363,6 +363,17 @@ impl Arsenal {
         self.reloading = None;
     }
 
+    /// Fills every magazine, packs every gun with as many spare rounds as it
+    /// can carry (twice its reserve), and cancels any reload.
+    pub fn resupply(&mut self) {
+        self.refill();
+        for gun in &mut self.guns {
+            if let (Some(spare), Some(reserve)) = (gun.spare.as_mut(), gun.kind.stats().reserve) {
+                *spare = (*spare).max(reserve * 2);
+            }
+        }
+    }
+
     /// Adds a magazine's worth of spare rounds to `kind`, up to twice its
     /// reserve. Returns the rounds actually added.
     pub fn add_ammo_for(&mut self, kind: GunKind) -> u32 {
@@ -1021,6 +1032,32 @@ mod tests {
     use crate::player::CrewSize;
     use crate::room::NextSeed;
     use crate::{GamePlugins, GameState};
+
+    /// A resupply fills every magazine and packs every limited gun with as
+    /// many spare rounds as it carries, never taking any away.
+    #[test]
+    fn resupply_fills_every_gun() {
+        let kinds = [GunKind::BlasterPistol, GunKind::PulseRifle, GunKind::GrenadeLauncher];
+        let mut arsenal = Arsenal::new(&kinds);
+        for gun in &mut arsenal.guns {
+            gun.ammo = 0;
+            if let Some(spare) = gun.spare.as_mut() {
+                *spare = 1;
+            }
+        }
+        arsenal.reloading = Some(1.0);
+        arsenal.resupply();
+        assert_eq!(arsenal.reloading, None);
+        for gun in &arsenal.guns {
+            let stats = gun.kind.stats();
+            assert_eq!(gun.ammo, stats.magazine, "{:?} magazine", gun.kind);
+            assert_eq!(gun.spare, stats.reserve.map(|r| r * 2), "{:?} spare", gun.kind);
+        }
+        // Already full, it changes nothing.
+        let before: Vec<_> = arsenal.guns.iter().map(|g| (g.ammo, g.spare)).collect();
+        arsenal.resupply();
+        assert_eq!(before, arsenal.guns.iter().map(|g| (g.ammo, g.spare)).collect::<Vec<_>>());
+    }
 
     /// A challenge's damage reward multiplies a pirate's shots on top of their
     /// boons: two Gunners fire the same frame, one with +30% running.

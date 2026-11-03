@@ -62,10 +62,12 @@ pub enum PerkKind {
     Cloak,
     /// The class ability is ready again at once.
     Recharge,
+    /// Every gun's magazine and spare rounds filled to the most it carries.
+    Resupply,
 }
 
 impl PerkKind {
-    pub const ALL: [PerkKind; 5] = [Self::Overdrive, Self::NanoPatch, Self::ShockField, Self::Cloak, Self::Recharge];
+    pub const ALL: [PerkKind; 6] = [Self::Overdrive, Self::NanoPatch, Self::ShockField, Self::Cloak, Self::Recharge, Self::Resupply];
 
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
@@ -74,6 +76,7 @@ impl PerkKind {
             '3' => Self::ShockField,
             '4' => Self::Cloak,
             '5' => Self::Recharge,
+            '6' => Self::Resupply,
             _ => return None,
         })
     }
@@ -85,6 +88,7 @@ impl PerkKind {
             Self::ShockField => "SHOCK FIELD",
             Self::Cloak => "CLOAK",
             Self::Recharge => "RECHARGE",
+            Self::Resupply => "RESUPPLY",
         }
     }
 
@@ -96,6 +100,7 @@ impl PerkKind {
             Self::ShockField => "CONTROL",
             Self::Cloak => "STEALTH",
             Self::Recharge => "ABILITY",
+            Self::Resupply => "AMMO",
         }
     }
 
@@ -106,6 +111,7 @@ impl PerkKind {
             Self::ShockField => "stuns enemies near you",
             Self::Cloak => "unseen until you fire",
             Self::Recharge => "ability ready again",
+            Self::Resupply => "all ammo refilled",
         }
     }
 
@@ -117,6 +123,7 @@ impl PerkKind {
             Self::ShockField => "Guards that come close are stunned and lose whatever attack they were winding up.",
             Self::Cloak => "Guards can't see you, so you can slip past or line up a shot. Firing breaks it.",
             Self::Recharge => "Your class ability comes off cooldown at once, and a riot shield recharges to full.",
+            Self::Resupply => "Fills every magazine and packs every gun with as many spare rounds as it can carry.",
         }
     }
 
@@ -128,6 +135,7 @@ impl PerkKind {
             Self::ShockField => Some(8.0),
             Self::Cloak => Some(12.0),
             Self::Recharge => None,
+            Self::Resupply => None,
         }
     }
 
@@ -138,6 +146,7 @@ impl PerkKind {
             Self::ShockField => Color::srgb(0.35, 0.82, 1.0),
             Self::Cloak => Color::srgb(0.75, 0.47, 1.0),
             Self::Recharge => Color::srgb(1.0, 0.86, 0.25),
+            Self::Resupply => Color::srgb(1.0, 0.45, 0.68),
         }
     }
 
@@ -148,6 +157,7 @@ impl PerkKind {
             Self::ShockField => "sprites/perks/shock_field.png",
             Self::Cloak => "sprites/perks/cloak.png",
             Self::Recharge => "sprites/perks/recharge.png",
+            Self::Resupply => "sprites/perks/resupply.png",
         }
     }
 }
@@ -282,6 +292,7 @@ fn pick_up_perks(
                 ability.cooldown = 0.0;
                 ability.charge = RIOT_LIFE;
             }
+            PerkKind::Resupply => arsenal.resupply(),
             PerkKind::ShockField | PerkKind::Cloak => {}
         }
         fx(&mut commands, FxKind::Perk(kind), pos, 0.0, kind.color());

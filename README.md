@@ -10,7 +10,8 @@ before security overwhelms you.
 
 Each deck down is harder than the last: more rooms, more guards in each, and
 nastier ones, and once the alarm is up, reinforcements come faster, in bigger
-waves, and with more of the heavy guards.
+waves, and with more of the heavy guards. LAN games always have
+reinforcements; in a solo raid they can be turned off under **SETTINGS**.
 
 Every deck is laid out fresh from the run's seed. Its rooms come in many
 kinds: plain, L-shaped or cross-shaped rooms, long galleries and great halls,
@@ -50,7 +51,8 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   crouches and fans out again from where it landed for a second lunge. Now and
   then it rampages instead: it rears up, then dashes wall to wall across the
   room four times (six enraged), bracing at the wall between dashes with the
-  next lane showing. A dash does massive damage. It stands spent for a moment
+  next lane showing. Each dash only roughly heads for the crew, and now and
+  then goes any way at all. A dash does massive damage. It stands spent for a moment
   after either attack. Stand between the spokes, or at least off the white
   one, and out of the lane.
 
