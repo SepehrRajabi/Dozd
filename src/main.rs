@@ -27,6 +27,7 @@ mod perks;
 mod player;
 mod room;
 mod settings;
+mod stats;
 mod vault;
 
 use bevy::prelude::*;
@@ -167,7 +168,7 @@ impl Plugin for GamePlugins {
             drops::DropsPlugin,
             class::ClassPlugin,
             crew::CrewPlugin,
-            (vault::VaultPlugin, challenge::ChallengePlugin, breach::BreachPlugin, boss::BossPlugin),
+            (vault::VaultPlugin, challenge::ChallengePlugin, breach::BreachPlugin, boss::BossPlugin, stats::StatsPlugin),
         ));
     }
 }

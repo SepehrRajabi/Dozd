@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::abilities::{Active, LIFESTEAL_CHANCE, LIFESTEAL_SHARE, Passive, RICOCHET_CHANCE};
 use crate::boss::Keeper;
 use crate::challenge::Rewards;
-use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, Shake, Team, fx, spawn_projectile};
+use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, SentryShot, Shake, Team, fx, spawn_projectile};
 use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::{GunKind, muzzle};
 use crate::hud::{self, HudSlot, Meter};
@@ -162,6 +162,7 @@ impl Plugin for ClassPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalLoadout>()
             .init_resource::<Loadouts>()
+            .init_resource::<CrewNames>()
             .init_resource::<Blackout>()
             .add_systems(OnExit(GameState::Playing), |mut blackout: ResMut<Blackout>| blackout.0 = 0.0)
             .add_systems(
@@ -335,6 +336,29 @@ pub struct Loadout {
     /// Always set once sanitized; optional for loadouts from older versions.
     pub active: Option<Active>,
     pub guns: Vec<GunKind>,
+    /// The display name its player chose; empty for none (see `crew_label`).
+    pub name: String,
+}
+
+/// How long a display name can be.
+pub const NAME_LEN: usize = 12;
+
+/// Whether `c` can be part of a display name: what the game's font can draw.
+pub fn name_allows(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')
+}
+
+/// A display name as the game keeps it, whatever was typed or sent: only
+/// allowed characters, no spaces around it, and no more than `NAME_LEN` long.
+pub fn clean_name(raw: &str) -> String {
+    let allowed: String = raw.chars().filter(|c| name_allows(*c)).collect();
+    allowed.trim().chars().take(NAME_LEN).collect::<String>().trim_end().to_string()
+}
+
+/// What to call the pirate in `slot`: their display name, or `P1`, `P2`... if
+/// they chose none.
+pub fn crew_label(name: &str, slot: usize) -> String {
+    if name.is_empty() { format!("P{}", slot + 1) } else { name.to_string() }
 }
 
 impl Loadout {
@@ -351,6 +375,7 @@ impl Loadout {
             passive: Self::default_passive(class),
             active: class.actives().next(),
             guns: DEFAULT.to_vec(),
+            name: String::new(),
         };
         loadout.guns.truncate(loadout.slots());
         loadout
@@ -400,8 +425,10 @@ impl Loadout {
     }
 
     /// Makes a loadout from another machine legal: abilities of its own class,
-    /// no repeated guns, no more guns than slots, and at least one gun.
+    /// no repeated guns, no more guns than slots, at least one gun, and a
+    /// clean name.
     pub fn sanitized(mut self) -> Self {
+        self.name = clean_name(&self.name);
         if self.passive.class() != self.class {
             self.passive = Self::default_passive(self.class);
         }
@@ -430,7 +457,11 @@ impl Loadout {
 
     /// The pick saved by `save`, if there is a readable one.
     pub fn load() -> Option<Self> {
-        let text = fs::read_to_string(Self::path()?).ok()?;
+        Self::parse(&fs::read_to_string(Self::path()?).ok()?)
+    }
+
+    /// Reads back what `to_text` wrote, or an older version's shorter file.
+    fn parse(text: &str) -> Option<Self> {
         let mut lines = text.lines();
         let class = PirateClass::parse(lines.next()?.trim())?;
         let guns = lines
@@ -438,7 +469,8 @@ impl Loadout {
             .split(',')
             .map(|name| GunKind::ALL.into_iter().find(|g| format!("{g:?}") == name.trim()))
             .collect::<Option<Vec<_>>>()?;
-        // Abilities came later; older files go without, and get the defaults.
+        // Abilities and names came later; older files go without, and get the
+        // defaults.
         let mut loadout = Self { guns, ..Self::new(class) };
         if let Some(passive) = lines.next().and_then(Passive::parse) {
             loadout.passive = passive;
@@ -446,18 +478,25 @@ impl Loadout {
         if let Some(active) = lines.next().and_then(Active::parse) {
             loadout.active = Some(active);
         }
+        if let Some(name) = lines.next() {
+            loadout.name = name.to_string();
+        }
         Some(loadout.sanitized())
     }
 
     /// Remembers this pick for the next launch. Failing to is harmless.
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
-        let guns: Vec<String> = self.guns.iter().map(|g| format!("{g:?}")).collect();
-        let active = self.active.map_or("-".to_string(), |a| format!("{a:?}"));
-        let text = format!("{}\n{}\n{:?}\n{active}\n", self.class.name(), guns.join(","), self.passive);
-        if let Err(error) = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(&path, text)) {
+        if let Err(error) = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(&path, self.to_text())) {
             warn!("couldn't save the loadout to {}: {error}", path.display());
         }
+    }
+
+    /// One line each: class, guns, passive, active and name.
+    fn to_text(&self) -> String {
+        let guns: Vec<String> = self.guns.iter().map(|g| format!("{g:?}")).collect();
+        let active = self.active.map_or("-".to_string(), |a| format!("{a:?}"));
+        format!("{}\n{}\n{:?}\n{active}\n{}\n", self.class.name(), guns.join(","), self.passive, self.name)
     }
 }
 
@@ -481,6 +520,12 @@ impl Loadouts {
         self.0.get(&owner).unwrap_or(&local.0)
     }
 }
+
+/// Host-side: the name each client goes by, by `NetworkId`. Apart from
+/// `Loadouts` because a joiner whose class is taken has no loadout stored yet,
+/// and the crew should still see their name.
+#[derive(Resource, Default)]
+pub struct CrewNames(pub HashMap<u64, String>);
 
 /// What the crew's passives are doing for a pirate right now, worked out by
 /// the host and shared so every HUD can show it.
@@ -1194,7 +1239,7 @@ fn run_sentries(
             &mut commands,
             Projectile {
                 team: Team::Player,
-                // A sentry's shots aren't the Engineer's own.
+                // A sentry's shots aren't the Engineer's own: see `SentryShot`.
                 owner: None,
                 velocity: Vec2::from_angle(angle) * SENTRY_SHOT_SPEED,
                 remaining: SENTRY_RANGE * 1.5,
@@ -1207,7 +1252,8 @@ fn run_sentries(
             },
             ProjectileLook::OrangePellet,
             muzzle,
-        );
+        )
+        .insert(SentryShot(sentry.owner));
         fx(&mut commands, FxKind::MuzzleFlash, muzzle, dir.to_angle(), SENTRY_COLOR);
         // Gunfire is gunfire: guards hear a sentry like any pirate.
         noise.0.push(pivot);
@@ -1970,5 +2016,60 @@ mod tests {
         assert_eq!((old.active, old.guns.len()), (Some(Active::SpareGun), 4));
         let laser = Loadout { active: Some(Active::Laser), ..Loadout::new(PirateClass::Gunner) }.sanitized();
         assert_eq!(laser.guns.len(), 3, "a laser Gunner can't smuggle a 4th gun");
+    }
+
+    #[test]
+    fn names_keep_only_what_the_font_can_draw() {
+        assert_eq!(clean_name("Mira_the-2.0"), "Mira_the-2.0", "everything allowed stays");
+        assert_eq!(clean_name("Zo\u{eb}\u{202e}!<b>"), "Zob", "symbols and non-ASCII go");
+        assert_eq!(clean_name("\u{663}\u{ff21}x"), "x", "letters and digits beyond ASCII too");
+        assert_eq!(clean_name("a\tb\nc\r\0d\u{7f}"), "abcd", "control characters and newlines go");
+    }
+
+    #[test]
+    fn names_are_trimmed_and_capped() {
+        assert_eq!(clean_name("   Mira  "), "Mira");
+        assert_eq!(clean_name("\u{e9} Mira"), "Mira", "spaces left bare by a stripped character go too");
+        assert_eq!(clean_name("   "), "", "nothing but spaces is no name");
+        assert_eq!(clean_name("abcdefghijklmnop"), "abcdefghijkl");
+        assert_eq!(clean_name("abcdefghijklmnop").len(), NAME_LEN);
+        assert_eq!(clean_name("abcdefghijk lmnop"), "abcdefghijk", "a 12th character that's a space goes");
+    }
+
+    #[test]
+    fn a_blank_name_falls_back_on_the_slot() {
+        assert_eq!(crew_label("Mira", 1), "Mira");
+        assert_eq!(crew_label("", 0), "P1");
+        assert_eq!(crew_label("", 3), "P4");
+    }
+
+    #[test]
+    fn a_saved_name_comes_back() {
+        let loadout = Loadout { name: "Mira the Red".into(), ..Loadout::new(PirateClass::Doctor) };
+        assert_eq!(Loadout::parse(&loadout.to_text()), Some(loadout));
+        let blank = Loadout::new(PirateClass::Hacker);
+        assert_eq!(Loadout::parse(&blank.to_text()), Some(blank));
+    }
+
+    #[test]
+    fn a_file_from_before_names_loads_with_none() {
+        let old = "GUNNER\nBlasterPistol,PulseRifle,ScatterCannon\nSupply\nSpareGun\n";
+        let loadout = Loadout::parse(old).expect("an older file still reads");
+        assert_eq!((loadout.class, loadout.name.as_str()), (PirateClass::Gunner, ""));
+        assert_eq!(loadout.guns.len(), 3);
+    }
+
+    #[test]
+    fn a_doctored_file_cant_load_a_dirty_name() {
+        let file = "GUNNER\nBlasterPistol\nSupply\nSpareGun\n  Mira\u{202e}!! and then some more\nignored\n";
+        assert_eq!(Loadout::parse(file).expect("readable").name, "Mira and the");
+    }
+
+    #[test]
+    fn a_hostile_loadout_comes_out_clean() {
+        let hostile = Loadout { name: "\n\u{1b}[2J <Mira>\u{0}\u{202e} and the rest of the crew".into(), ..Loadout::new(PirateClass::Bulwark) };
+        let clean = hostile.sanitized();
+        assert_eq!(clean.name, "2J Mira and");
+        assert!(clean.name.len() <= NAME_LEN && clean.name.chars().all(name_allows));
     }
 }

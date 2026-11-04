@@ -240,9 +240,10 @@ fn spawn_vote_panel(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     ));
 }
 
-/// What the call says to the pirate `me` (a `Player::owner`), and the
-/// answers so far: e.g. "P1" and "IS CALLING THE CREW INTO THE SILVER VAULT".
-fn call_text(breach: &Breach, by: u64, me: u64, players: &[(u64, u8)]) -> (String, String) {
+/// What the call says to the pirate `me` (a `Player::owner`), given each
+/// pirate's owner and label: e.g. "MIRA" and "IS CALLING THE CREW INTO THE
+/// SILVER VAULT".
+fn call_text(breach: &Breach, by: u64, me: u64, players: &[(u64, String)]) -> (String, String) {
     let vault = format!("THE {} VAULT", breach.tier.name());
     if by == me {
         return ("YOU".into(), format!("CALLED THE CREW INTO {vault}"));
@@ -250,7 +251,7 @@ fn call_text(breach: &Breach, by: u64, me: u64, players: &[(u64, u8)]) -> (Strin
     let caller = players
         .iter()
         .find(|(owner, _)| *owner == by)
-        .map_or_else(|| "A CREWMATE".into(), |(_, slot)| format!("P{}", slot + 1));
+        .map_or_else(|| "A CREWMATE".into(), |(_, label)| label.to_uppercase());
     (caller, format!("IS CALLING THE CREW INTO {vault}"))
 }
 
@@ -294,7 +295,8 @@ fn update_vote_panel(
 
     let slots: Vec<(u64, u8)> = players.iter().map(|p| (p.owner, p.slot)).collect();
     let slot_of = |owner: u64| slots.iter().find(|(o, _)| *o == owner).map(|(_, slot)| *slot);
-    let (who, what) = call_text(breach, by, me, &slots);
+    let labels: Vec<(u64, String)> = players.iter().map(|p| (p.owner, p.label())).collect();
+    let (who, what) = call_text(breach, by, me, &labels);
     let who_color = if by == me { hud::TEXT } else { slot_of(by).map_or(hud::TEXT, slot_color) };
     set_text(&mut texts, *caller, &who, who_color);
     set_text(&mut texts, *call, &what, hud::TEXT);
@@ -341,6 +343,7 @@ fn set_text(texts: &mut Query<(&mut Text, &mut TextColor)>, entity: Entity, cont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class::crew_label;
     use crate::vault::VaultTier;
 
     fn breach() -> Breach {
@@ -356,14 +359,21 @@ mod tests {
 
     #[test]
     fn the_call_names_its_caller_and_vault() {
-        let players = [(10, 0), (20, 2)];
+        let players = [(10, crew_label("", 0)), (20, crew_label("", 2))];
         let (who, what) = call_text(&breach(), 10, 20, &players);
-        assert_eq!(who, "P1");
+        assert_eq!(who, "P1", "no name chosen");
         assert_eq!(what, "IS CALLING THE CREW INTO THE SILVER VAULT");
         let (who, what) = call_text(&breach(), 20, 20, &players);
         assert_eq!(who, "YOU");
         assert_eq!(what, "CALLED THE CREW INTO THE SILVER VAULT");
         assert_eq!(call_text(&breach(), 99, 20, &players).0, "A CREWMATE");
         assert_eq!(ready_text(2, 3), "2/3 READY");
+    }
+
+    #[test]
+    fn the_call_names_its_caller_in_capitals() {
+        let players = [(10, crew_label("Mira", 0)), (20, crew_label("", 1))];
+        assert_eq!(call_text(&breach(), 10, 20, &players).0, "MIRA");
+        assert_eq!(call_text(&breach(), 20, 10, &players).0, "P2");
     }
 }

@@ -479,8 +479,8 @@ fn track_challenges(
                 };
                 banner.show(
                     format!(
-                        "P{} {} completed {}  -  {}{whom} for {:.0} s",
-                        player.slot + 1,
+                        "{} {} completed {}  -  {}{whom} for {:.0} s",
+                        player.label(),
                         player.class.name(),
                         challenge.name,
                         challenge.reward.describe(),
@@ -654,6 +654,7 @@ mod tests {
                         left_early: false,
                         payout: 0,
                         deck: 0,
+                        name: String::new(),
                     },
                     Health::new(100.0, 0.0),
                     Rewards::default(),

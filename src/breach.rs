@@ -101,7 +101,7 @@ pub fn spawn_breach(commands: &mut Commands, gate: &GateSpot, deck: u8) {
 /// A living pirate still in the heist on the current deck, as the breach sees them.
 struct Pirate {
     owner: u64,
-    slot: u8,
+    label: String,
     pos: Vec2,
     accept: bool,
     decline: bool,
@@ -132,7 +132,7 @@ fn run_breach(
         .filter(|(p, h, ..)| !h.is_dead() && p.status == PirateStatus::Active && p.deck == heist.deck)
         .map(|(p, _, c, t)| Pirate {
             owner: p.owner,
-            slot: p.slot,
+            label: p.label(),
             pos: t.translation.truncate(),
             accept: c.accept,
             decline: c.decline,
@@ -186,7 +186,7 @@ fn run_breach(
                 next = BreachState::Fight;
             } else if declined.is_some() || *clock <= 0.0 {
                 let text = match declined {
-                    Some(p) => format!("P{} ISN'T READY TO BREACH THE VAULT", p.slot + 1),
+                    Some(p) => format!("{} ISN'T READY TO BREACH THE VAULT", p.label.to_uppercase()),
                     None => "THE CALL TO BREACH THE VAULT LAPSED".to_string(),
                 };
                 banner.show(text, Color::srgb(1.0, 0.75, 0.35), 3.0);

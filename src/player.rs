@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::abilities::{Active, Passive};
 use crate::challenge::Rewards;
-use crate::class::{Ability, Boons, LASER_SLOW, Laser, LocalLoadout, Loadout, Loadouts, PirateClass};
+use crate::class::{Ability, Boons, CrewNames, LASER_SLOW, Laser, LocalLoadout, Loadout, Loadouts, PirateClass, crew_label};
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::Arsenal;
@@ -15,6 +15,7 @@ use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, NetMode, PlayerIn
 use crate::mission::MissionStatus;
 use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
+use crate::stats::RunStats;
 use crate::vault::Looting;
 use crate::{GameState, Level, PIXEL_SCALE, Rng};
 
@@ -108,6 +109,7 @@ pub enum PirateStatus {
 }
 
 #[derive(Component, Serialize, Deserialize, Clone)]
+#[require(RunStats)]
 pub struct Player {
     /// `LocalId` of the machine controlling this pirate.
     pub owner: u64,
@@ -127,6 +129,15 @@ pub struct Player {
     pub payout: u32,
     /// Deck this pirate is on (0 = top). The crew only moves down together.
     pub deck: u8,
+    /// The display name they chose, already clean; empty for none.
+    pub name: String,
+}
+
+impl Player {
+    /// What to call this pirate on screen.
+    pub fn label(&self) -> String {
+        crew_label(&self.name, self.slot as usize)
+    }
 }
 
 #[derive(Component)]
@@ -240,6 +251,7 @@ fn spawn_player(commands: &mut Commands, owner: u64, loadout: &Loadout, slot: u8
             left_early: false,
             payout: 0,
             deck,
+            name: loadout.name.clone(),
         },
         Team::Player,
         Health::new(MAX_HEALTH, 0.5).with_shield(loadout.passive.shield()),
@@ -390,6 +402,7 @@ fn receive_loadouts(
     clients: Query<(&NetworkId, Has<AuthorizedClient>), Without<Refused>>,
     local: Res<LocalLoadout>,
     mut loadouts: ResMut<Loadouts>,
+    mut names: ResMut<CrewNames>,
     players: Query<&Player>,
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
@@ -398,13 +411,18 @@ fn receive_loadouts(
     for FromClient { client_id, message } in messages.read() {
         let Some((id, authorized)) = client_id.entity().and_then(|e| clients.get(e).ok()) else { continue };
         let id = id.get();
-        // Once aboard, a pirate keeps their class and guns until the lobby.
+        // Once aboard, a pirate keeps their class, guns and name until the lobby.
         if *state.get() != GameState::Lobby && players.iter().any(|p| p.owner == id) {
             continue;
         }
+        let loadout = message.0.clone().sanitized();
+        // Their name holds whatever becomes of the class they asked for.
+        names.0.insert(id, loadout.name.clone());
+        if let Some(held) = loadouts.0.get_mut(&id) {
+            held.name.clone_from(&loadout.name);
+        }
         // One of each class per crew. A joiner whose class is taken waits,
         // and picks another from what the roster shows is free.
-        let loadout = message.0.clone().sanitized();
         let taken = local.0.class == loadout.class
             || loadouts.0.iter().any(|(&owner, l)| owner != id && l.class == loadout.class);
         if taken {
@@ -423,12 +441,14 @@ fn on_client_left(
     mut commands: Commands,
     ids: Query<&NetworkId, Without<Refused>>,
     mut loadouts: ResMut<Loadouts>,
+    mut names: ResMut<CrewNames>,
     mut order: ResMut<JoinOrder>,
     players: Query<(Entity, &Player)>,
 ) {
     let Ok(id) = ids.get(remove.entity) else { return };
     info!("client {} left", id.get());
     loadouts.0.remove(&id.get());
+    names.0.remove(&id.get());
     order.0.retain(|o| *o != id.get());
     for (entity, player) in &players {
         if player.owner == id.get() {
@@ -459,7 +479,7 @@ fn dress_player(
         entity.insert(LocalPlayer);
     } else {
         entity.with_child((
-            Text2d::new(format!("P{}", player.slot + 1)),
+            Text2d::new(player.label()),
             TextFont::from_font_size(6.0 * PIXEL_SCALE),
             TextColor(slot_color(player.slot)),
             Transform::from_xyz(0.0, 13.0, 1.0).with_scale(Vec3::splat(1.0 / PIXEL_SCALE)),
@@ -784,6 +804,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::crew::{Crewmate, Roster};
     use crate::net::StartSession;
     use crate::room::NextSeed;
     use crate::GamePlugins;
@@ -875,5 +896,104 @@ mod tests {
         app.update();
         app.update();
         assert_ne!(*app.world().resource::<State<GameState>>().get(), GameState::Over, "the host can");
+    }
+
+    const JOINER: u64 = 1 << 63 | 9;
+
+    /// `host`, opened to joiners, with one aboard the lobby or run it's in.
+    fn host_with_joiner(app: &mut App) -> Entity {
+        app.insert_resource(NetMode::Host { port: 0, code: String::new() });
+        app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(JOINER), AuthorizedClient)).id()
+    }
+
+    /// The joiner asks for `class`, going by `name`.
+    fn choose(app: &mut App, client: Entity, class: PirateClass, name: &str) {
+        let loadout = Loadout { name: name.into(), ..Loadout::new(class) };
+        app.world_mut().write_message(FromClient { client_id: ClientId::Client(client), message: ChooseLoadout(loadout) });
+        app.update();
+        app.update();
+    }
+
+    fn roster_entry(app: &mut App) -> Option<Crewmate> {
+        let mut rosters = app.world_mut().query::<&Roster>();
+        let roster = rosters.single(app.world()).expect("the host keeps a roster");
+        roster.0.iter().find(|c| c.owner == JOINER).cloned()
+    }
+
+    fn pirate_name(app: &mut App) -> Option<String> {
+        let mut pirates = app.world_mut().query::<&Player>();
+        pirates.iter(app.world()).find(|p| p.owner == JOINER).map(|p| p.name.clone())
+    }
+
+    #[test]
+    fn a_joiner_whose_class_is_taken_shows_their_name() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        // The host plays the Gunner.
+        choose(&mut app, client, PirateClass::Gunner, "Mira");
+        let entry = roster_entry(&mut app).expect("on the roster");
+        assert_eq!((entry.class, entry.name.as_str()), (None, "Mira"), "still choosing, but named");
+        assert!(pirate_name(&mut app).is_none(), "no pirate until they pick a free class");
+        let mut rosters = app.world_mut().query::<&Roster>();
+        assert_eq!(rosters.single(app.world()).unwrap().label(1).as_deref(), Some("Mira"));
+        assert!(!app.world().resource::<Loadouts>().0.contains_key(&JOINER));
+
+        // A name from a modified client is cleaned like any other.
+        choose(&mut app, client, PirateClass::Gunner, " \nZed\u{7}!!  ");
+        assert_eq!(roster_entry(&mut app).unwrap().name, "Zed");
+
+        // Picking a free class brings the name aboard.
+        choose(&mut app, client, PirateClass::Engineer, "Zed");
+        let entry = roster_entry(&mut app).unwrap();
+        assert_eq!((entry.class, entry.name.as_str()), (Some(PirateClass::Engineer), "Zed"));
+        assert_eq!(pirate_name(&mut app).as_deref(), Some("Zed"));
+    }
+
+    #[test]
+    fn a_pirate_aboard_keeps_their_name_until_the_lobby() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        choose(&mut app, client, PirateClass::Engineer, "Zed");
+        assert_eq!(roster_entry(&mut app).unwrap().name, "Mira");
+        assert_eq!(pirate_name(&mut app).as_deref(), Some("Mira"));
+    }
+
+    #[test]
+    fn a_blank_name_stays_the_slot_label() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Engineer, "   ");
+        let mut pirates = app.world_mut().query::<&Player>();
+        let pirate = pirates.iter(app.world()).find(|p| p.owner == JOINER).expect("aboard");
+        assert_eq!(pirate.label(), "P2");
+        let mut rosters = app.world_mut().query::<&Roster>();
+        assert_eq!(rosters.single(app.world()).unwrap().label(1).as_deref(), Some("P2"));
+    }
+
+    #[test]
+    fn a_rename_reaches_the_kept_loadout_even_if_its_class_is_refused() {
+        let mut app = host();
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Lobby);
+        app.update();
+        app.update();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        choose(&mut app, client, PirateClass::Gunner, "Zed");
+        let kept = &app.world().resource::<Loadouts>().0[&JOINER];
+        assert_eq!((kept.class, kept.name.as_str()), (PirateClass::Engineer, "Zed"), "the name the next run spawns with");
+        assert_eq!(roster_entry(&mut app).unwrap().name, "Zed");
+    }
+
+    #[test]
+    fn leaving_forgets_the_name() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Gunner, "Mira");
+        assert!(app.world().resource::<CrewNames>().0.contains_key(&JOINER));
+        app.world_mut().despawn(client);
+        app.update();
+        assert!(app.world().resource::<CrewNames>().0.is_empty());
+        assert!(roster_entry(&mut app).is_none());
     }
 }

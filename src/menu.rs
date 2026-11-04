@@ -7,13 +7,13 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::abilities::{Active, Passive};
 use crate::boss::{KEEPER_COLOR, KeeperKind, PRISM_COLOR};
-use crate::class::{LocalLoadout, Loadout, PirateClass};
+use crate::class::{LocalLoadout, Loadout, NAME_LEN, PirateClass, clean_name, name_allows};
 use crate::guns::GunKind;
 use crate::crew::Roster;
 use crate::enemies::EnemyKind;
 use crate::net::{
-    CODE_LEN, ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, local_ip,
-    parse_code, parse_port, resolve, room_code, show_code,
+    CODE_LEN, ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, VERSION,
+    local_ip, parse_code, parse_port, resolve, room_code, show_code,
 };
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
@@ -189,6 +189,8 @@ enum FieldKind {
     Address,
     /// Typed in capitals, however it's keyed.
     Code,
+    /// Last, so Tab still goes from the address straight to the code.
+    Name,
 }
 
 impl FieldKind {
@@ -197,6 +199,7 @@ impl FieldKind {
             Self::Port => c.is_ascii_digit(),
             Self::Address => c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'),
             Self::Code => c.is_ascii_alphanumeric() || c == '-',
+            Self::Name => name_allows(c),
         }
     }
 }
@@ -210,6 +213,18 @@ struct TextField {
     submit: MenuCommand,
     /// Takes the typing. One field on a screen has it; Tab or a click moves it.
     focused: bool,
+}
+
+impl TextField {
+    /// Adds what was typed, as far as this field takes it.
+    fn type_in(&mut self, text: &str) {
+        for c in text.chars() {
+            let c = if self.kind == FieldKind::Code { c.to_ascii_uppercase() } else { c };
+            if self.kind.allows(c) && self.value.len() < self.max_len {
+                self.value.push(c);
+            }
+        }
+    }
 }
 
 #[derive(Component)]
@@ -406,7 +421,7 @@ fn text_field(
         BackgroundColor(Color::srgb(0.02, 0.02, 0.05)),
         BorderColor::all(GOLD),
         children![
-            (FieldText, Text::new(value), TextFont::from_font_size(20.0), TextColor(TEXT)),
+            (FieldText, Text::new(value), TextFont::from_font_size(20.0), TextColor(TEXT), TextLayout::no_wrap()),
             (
                 Caret,
                 Node {
@@ -417,20 +432,60 @@ fn text_field(
                 },
                 BackgroundColor(GOLD),
             ),
-            (Placeholder, Text::new(placeholder), TextFont::from_font_size(20.0), TextColor(DIM)),
+            // Out of the flow: hidden, it would still crowd what's typed.
+            (
+                Placeholder,
+                Text::new(placeholder),
+                TextFont::from_font_size(20.0),
+                TextColor(DIM),
+                TextLayout::no_wrap(),
+                Node { position_type: PositionType::Absolute, left: Val::Px(15.0), ..default() },
+            ),
         ],
     )
 }
 
+/// A box and the label over it, for laying boxes side by side: both screens
+/// with a name box only just fit a 720 px tall window.
+fn field_column() -> Node {
+    Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(6.0), ..default() }
+}
+
+/// The box for this player's display name, and the label over it.
+fn name_field(parent: &mut ChildSpawnerCommands, loadout: &LocalLoadout, submit: MenuCommand) {
+    parent.spawn(field_column()).with_children(|name| {
+        name.spawn(label("Your name  (optional)", 14.0, DIM));
+        name.spawn(text_field(FieldKind::Name, &loadout.0.name, "Mira", NAME_LEN, 200.0, false, submit));
+    });
+}
+
+/// Where notices show. Wide enough that a long one, like being refused for
+/// running another build, wraps to two lines: a third wouldn't leave the main
+/// menu any room at 720 px tall.
 fn status_line() -> impl Bundle {
     (
         StatusText,
         Text::new(""),
         TextFont::from_font_size(16.0),
         TextColor(ERROR),
+        TextLayout::justify(Justify::Center),
         Node {
-            max_width: Val::Px(560.0),
+            max_width: Val::Px(640.0),
             margin: UiRect::top(Val::Px(6.0)),
+            ..default()
+        },
+    )
+}
+
+/// Small print in the bottom-left corner, clear of the centred column. Its last
+/// line is always the build, so players can compare theirs with a host's.
+fn corner_note(text: impl Into<String>) -> impl Bundle {
+    (
+        label(text, 13.0, DIM),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(14.0),
+            left: Val::Px(18.0),
             ..default()
         },
     )
@@ -447,21 +502,9 @@ fn main_screen(mut commands: Commands, assets: Res<AssetServer>, loadout: Res<Lo
         parent.spawn(button("SETTINGS", MenuCommand::OpenSettings));
         parent.spawn(button("QUIT", MenuCommand::Quit));
         parent.spawn(status_line());
+        // On two lines: as one, it would reach under a long notice.
+        parent.spawn(corner_note(format!("LAN co-op for up to {} pirates\n{VERSION}", PirateClass::ALL.len())));
     });
-    commands.spawn((
-        DespawnOnExit(MenuScreen::Main),
-        label(
-            format!("v{}   -   LAN co-op for up to {} pirates", env!("CARGO_PKG_VERSION"), PirateClass::ALL.len()),
-            13.0,
-            DIM,
-        ),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            left: Val::Px(18.0),
-            ..default()
-        },
-    ));
 }
 
 fn multiplayer_screen(mut commands: Commands, assets: Res<AssetServer>) {
@@ -522,12 +565,19 @@ fn setting_row(setting: Setting, name: &str, value: &str) -> impl Bundle {
     )
 }
 
-fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<MenuMemory>) {
+fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<MenuMemory>, loadout: Res<LocalLoadout>) {
     let root = screen_root(&mut commands, &assets, MenuScreen::Host);
     commands.entity(root).with_children(|parent| {
         parent.spawn(label("HOST A CREW", 24.0, GOLD));
-        parent.spawn(label("Port", 14.0, DIM));
-        parent.spawn(text_field(FieldKind::Port, &memory.port, "5000", 5, 320.0, true, MenuCommand::StartHost));
+        parent
+            .spawn(Node { column_gap: Val::Px(16.0), ..default() })
+            .with_children(|row| {
+                row.spawn(field_column()).with_children(|port| {
+                    port.spawn(label("Port", 14.0, DIM));
+                    port.spawn(text_field(FieldKind::Port, &memory.port, "5000", 5, 104.0, true, MenuCommand::StartHost));
+                });
+                name_field(row, &loadout, MenuCommand::StartHost);
+            });
         parent.spawn((HostHint, label("", 16.0, TEXT)));
         let code = room_code();
         parent
@@ -544,21 +594,20 @@ fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
         parent.spawn(button("START HOSTING", MenuCommand::StartHost));
         parent.spawn(button("BACK", MenuCommand::Back));
         parent.spawn(status_line());
+        parent.spawn(corner_note(VERSION));
     });
 }
 
-fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<MenuMemory>) {
+fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<MenuMemory>, loadout: Res<LocalLoadout>) {
     let root = screen_root(&mut commands, &assets, MenuScreen::Join);
     commands.entity(root).with_children(|parent| {
         parent.spawn(label("JOIN A CREW", 24.0, GOLD));
-        // Side by side, so the screen still fits a 720 px tall window.
-        let column = || Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(6.0), ..default() };
         // Straight to the code when the address is already filled in from last time.
         let code_first = !memory.address.is_empty() && memory.code.is_empty();
         parent
             .spawn(Node { column_gap: Val::Px(16.0), ..default() })
             .with_children(|row| {
-                row.spawn(column()).with_children(|address| {
+                row.spawn(field_column()).with_children(|address| {
                     address.spawn(label("Host address  (ip, ip:port or hostname)", 14.0, DIM));
                     address.spawn(text_field(
                         FieldKind::Address,
@@ -570,7 +619,7 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
                         MenuCommand::Connect,
                     ));
                 });
-                row.spawn(column()).with_children(|code| {
+                row.spawn(field_column()).with_children(|code| {
                     code.spawn(label("Room code  (from the host)", 14.0, DIM));
                     code.spawn(text_field(
                         FieldKind::Code,
@@ -582,11 +631,13 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
                         MenuCommand::Connect,
                     ));
                 });
+                name_field(row, &loadout, MenuCommand::Connect);
             });
         parent.spawn(label("TAB switches between the boxes", 13.0, DIM));
         parent.spawn(button("CONNECT", MenuCommand::Connect));
         parent.spawn(button("BACK", MenuCommand::Back));
         parent.spawn(status_line());
+        parent.spawn(corner_note(VERSION));
     });
 }
 
@@ -968,6 +1019,16 @@ fn button_actions(mut commands: Commands, buttons: Query<(&Interaction, &MenuCom
     }
 }
 
+/// Makes what's in the name box this player's display name, and remembers it
+/// for next launch. A name that's already theirs is left alone.
+fn take_name(typed: &str, loadout: &mut ResMut<LocalLoadout>) {
+    let name = clean_name(typed);
+    if loadout.0.name != name {
+        loadout.0.name = name;
+        loadout.0.save();
+    }
+}
+
 fn run_menu_command(
     command: On<MenuCommand>,
     mut commands: Commands,
@@ -983,6 +1044,7 @@ fn run_menu_command(
     mut exit: MessageWriter<AppExit>,
     roster: Option<Single<&Roster>>,
     mut next_state: ResMut<NextState<GameState>>,
+    mut loadout: ResMut<LocalLoadout>,
 ) {
     let joining = matches!(*mode, NetMode::Join { .. });
     let field = |kind: FieldKind| fields.iter().find(|f| f.kind == kind).map(|f| f.value.clone()).unwrap_or_default();
@@ -1020,6 +1082,7 @@ fn run_menu_command(
         MenuCommand::StartHost => {
             let port = field(FieldKind::Port);
             memory.port = port.clone();
+            take_name(&field(FieldKind::Name), &mut loadout);
             match parse_port(&port) {
                 Ok(port) => {
                     memory.save();
@@ -1034,6 +1097,8 @@ fn run_menu_command(
             let (address, code) = (field(FieldKind::Address), field(FieldKind::Code));
             memory.address = address.clone();
             memory.code = code.clone();
+            // Before the session starts: the host hears it in the first message.
+            take_name(&field(FieldKind::Name), &mut loadout);
             // Checked here too, so a bad code sends the typing back to its box.
             match (resolve(&address), parse_code(&code)) {
                 (Ok(addr), Ok(code)) => {
@@ -1051,7 +1116,7 @@ fn run_menu_command(
             }
         }
         MenuCommand::StartRun => match roster.as_deref().and_then(|r| waiting_on(r)) {
-            Some(slot) => notice.0 = Some(format!("Waiting for P{} to pick a class", slot + 1)),
+            Some(name) => notice.0 = Some(format!("Waiting for {name} to pick a class")),
             None => {
                 notice.0 = None;
                 next_state.set(GameState::Playing);
@@ -1070,6 +1135,12 @@ fn run_menu_command(
     }
 }
 
+/// What to call the crewmate who took `class`, if anyone other than `me` did.
+fn taken_by(roster: &Roster, class: PirateClass, me: u64) -> Option<String> {
+    let owner = roster.holder(class).filter(|owner| *owner != me)?;
+    roster.label(roster.slot(owner)?)
+}
+
 fn choice_actions(
     choices: Query<(&Interaction, &Choice), Changed<Interaction>>,
     state: Res<State<GameState>>,
@@ -1079,10 +1150,9 @@ fn choice_actions(
     mut notice: ResMut<Notice>,
 ) {
     // In the lobby, one of each class per crew.
-    let taken_by = |class: PirateClass| {
+    let taken = |class: PirateClass| {
         let roster = roster.as_deref().filter(|_| *state.get() == GameState::Lobby)?;
-        let owner = roster.holder(class).filter(|owner| *owner != local.0)?;
-        Some(roster.slot(owner).unwrap_or(0))
+        taken_by(roster, class, local.0)
     };
     for (interaction, choice) in &choices {
         if *interaction != Interaction::Pressed {
@@ -1090,8 +1160,8 @@ fn choice_actions(
         }
         let loadout = &mut loadout.0;
         notice.0 = match *choice {
-            Choice::Class(class) if let Some(slot) = taken_by(class) => {
-                notice.0 = Some(format!("P{} already plays the {}", slot + 1, class.name()));
+            Choice::Class(class) if let Some(name) = taken(class) => {
+                notice.0 = Some(format!("{name} already plays the {}", class.name()));
                 continue;
             }
             Choice::Class(class) => {
@@ -1129,14 +1199,11 @@ fn style_choices(
     mut notes: Query<(&ClassNote, &mut Text, &mut TextColor)>,
 ) {
     let roster = roster.as_deref().filter(|_| *state.get() == GameState::Lobby);
-    let taken_by = |class: PirateClass| {
-        let owner = roster?.holder(class).filter(|owner| *owner != local.0)?;
-        Some(roster?.slot(owner).unwrap_or(0))
-    };
+    let taken = |class: PirateClass| taken_by(roster?, class, local.0);
     for (note, mut text, mut color) in &mut notes {
-        let (content, tint) = match (roster, taken_by(note.0)) {
+        let (content, tint) = match (roster, taken(note.0)) {
             (None, _) => (String::new(), DIM),
-            (_, Some(slot)) => (format!("TAKEN BY P{}", slot + 1), ERROR),
+            (_, Some(name)) => (format!("TAKEN BY {}", name.to_uppercase()), ERROR),
             (Some(roster), None) if roster.class_of(local.0) == Some(note.0) => ("YOURS".into(), GOLD),
             (Some(_), None) => (String::new(), DIM),
         };
@@ -1149,12 +1216,12 @@ fn style_choices(
     let loadout = &loadout.0;
     for (interaction, choice, mut background, mut border) in &mut cards {
         let chosen = match *choice {
-            Choice::Class(class) => loadout.class == class && taken_by(class).is_none(),
+            Choice::Class(class) => loadout.class == class && taken(class).is_none(),
             Choice::Passive(passive) => loadout.passive == passive,
             Choice::Active(active) => loadout.active == Some(active),
             Choice::Gun(gun) => loadout.guns.contains(&gun),
         };
-        let taken = matches!(*choice, Choice::Class(class) if taken_by(class).is_some());
+        let taken = matches!(*choice, Choice::Class(class) if taken(class).is_some());
         let (bg, edge) = match (interaction, chosen) {
             _ if taken => (Color::srgb(0.04, 0.04, 0.07), Color::NONE),
             (Interaction::Pressed, _) => (BUTTON_PRESSED, GOLD),
@@ -1250,14 +1317,9 @@ fn edit_fields(
         }
         let Some((mut field, _)) = fields.iter_mut().find(|(f, _)| f.focused) else { continue };
         match &key.logical_key {
-            Key::Character(text) => {
-                for c in text.chars() {
-                    let c = if field.kind == FieldKind::Code { c.to_ascii_uppercase() } else { c };
-                    if field.kind.allows(c) && field.value.len() < field.max_len {
-                        field.value.push(c);
-                    }
-                }
-            }
+            Key::Character(text) => field.type_in(text),
+            // A key of its own, not a character.
+            Key::Space => field.type_in(" "),
             Key::Backspace => {
                 field.value.pop();
             }
@@ -1632,9 +1694,9 @@ struct CrewChip(usize);
 #[derive(Component)]
 struct LobbyHint;
 
-/// The first pirate in the roster still choosing a class, if any.
-fn waiting_on(roster: &Roster) -> Option<usize> {
-    roster.0.iter().position(|(_, class)| class.is_none())
+/// What to call the first pirate in the roster still choosing a class, if any.
+fn waiting_on(roster: &Roster) -> Option<String> {
+    roster.label(roster.0.iter().position(|c| c.class.is_none())?)
 }
 
 fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetMode>) {
@@ -1661,7 +1723,13 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
                     row.spawn((LobbyCode, label("", 24.0, GOLD)));
                 });
             parent
-                .spawn(Node { column_gap: Val::Px(10.0), ..default() })
+                .spawn(Node {
+                    column_gap: Val::Px(10.0),
+                    row_gap: Val::Px(6.0),
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                })
                 .with_children(|chips| {
                     for i in 0..PirateClass::ALL.len() {
                         chips.spawn((
@@ -1671,7 +1739,7 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
                                 display: Display::None,
                                 ..default()
                             }),
-                            children![label("", 14.0, TEXT)],
+                            children![(label("", 14.0, TEXT), TextLayout::no_wrap())],
                         ));
                     }
                 });
@@ -1686,6 +1754,7 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
                 });
             parent.spawn((LobbyHint, label("", 15.0, DIM)));
             parent.spawn(status_line());
+            parent.spawn(corner_note(VERSION));
         });
 }
 
@@ -1724,11 +1793,11 @@ fn update_lobby(
         if node.display != display {
             node.display = display;
         }
-        let Some(&(owner, class)) = entry else { continue };
-        let you = if owner == local.0 { "  (you)" } else { "" };
-        let (content, color) = match class {
-            Some(class) => (format!("P{}  {}{you}", chip.0 + 1, class.name()), class.color()),
-            None => (format!("P{}  choosing...{you}", chip.0 + 1), DIM),
+        let (Some(entry), Some(name)) = (entry, roster.label(chip.0)) else { continue };
+        let you = if entry.owner == local.0 { "  (you)" } else { "" };
+        let (content, color) = match entry.class {
+            Some(class) => (format!("{name}  {}{you}", class.name()), class.color()),
+            None => (format!("{name}  choosing...{you}"), DIM),
         };
         border.set_if_neq(BorderColor { top: color, ..BorderColor::all(hud::EDGE) });
         if let Some(Ok((mut text, mut tint))) = children.first().map(|c| chip_texts.get_mut(*c)) {
@@ -1742,7 +1811,7 @@ fn update_lobby(
     let mine = roster.class_of(local.0);
     let content = match (waiting_on(&roster), &*mode) {
         _ if mine.is_none() => "Your class is taken: pick a free one".to_string(),
-        (Some(slot), _) => format!("Waiting for P{} to pick a class", slot + 1),
+        (Some(name), _) => format!("Waiting for {name} to pick a class"),
         (None, NetMode::Host { .. }) => "Everyone's ready. Start when you are".to_string(),
         (None, _) => "Waiting for the host to start".to_string(),
     };
@@ -1759,5 +1828,74 @@ fn send_lobby_loadout(
 ) {
     if matches!(*mode, NetMode::Join { .. }) {
         messages.write(ChooseLoadout(loadout.0.clone()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::crew::Crewmate;
+
+    fn field(kind: FieldKind, max_len: usize) -> TextField {
+        TextField { value: String::new(), max_len, kind, submit: MenuCommand::Back, focused: true }
+    }
+
+    fn crewmate(owner: u64, class: Option<PirateClass>, name: &str) -> Crewmate {
+        Crewmate { owner, class, name: name.into() }
+    }
+
+    #[test]
+    fn a_name_box_takes_what_a_name_can_hold() {
+        for c in ['a', 'Z', '7', ' ', '-', '_', '.'] {
+            assert!(FieldKind::Name.allows(c), "{c:?}");
+        }
+        for c in ['/', '!', ':', '\n', '\u{e9}'] {
+            assert!(!FieldKind::Name.allows(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn typing_stops_at_the_field_limit() {
+        let mut name = field(FieldKind::Name, NAME_LEN);
+        name.type_in("Dread");
+        name.type_in(" ");
+        name.type_in("Pirate Roberts");
+        assert_eq!(name.value, "Dread Pirate");
+        assert_eq!(name.value.len(), NAME_LEN);
+    }
+
+    #[test]
+    fn only_a_name_takes_spaces_and_only_a_code_is_capitalised() {
+        let mut address = field(FieldKind::Address, 40);
+        address.type_in("10.0.0.1 ");
+        assert_eq!(address.value, "10.0.0.1");
+        let mut code = field(FieldKind::Code, CODE_LEN + 1);
+        code.type_in("ab-c");
+        assert_eq!(code.value, "AB-C");
+        let mut name = field(FieldKind::Name, NAME_LEN);
+        name.type_in("ab");
+        assert_eq!(name.value, "ab");
+    }
+
+    #[test]
+    fn tab_reaches_the_name_last() {
+        assert!(FieldKind::Port < FieldKind::Name);
+        assert!(FieldKind::Code < FieldKind::Name);
+    }
+
+    #[test]
+    fn the_lobby_calls_pirates_by_name() {
+        use PirateClass::*;
+        let roster = Roster(vec![
+            crewmate(1, Some(Gunner), "Mira"),
+            crewmate(2, Some(Doctor), ""),
+            crewmate(3, None, "Sol"),
+        ]);
+        assert_eq!(taken_by(&roster, Gunner, 2).as_deref(), Some("Mira"));
+        assert_eq!(taken_by(&roster, Doctor, 1).as_deref(), Some("P2"), "no name chosen");
+        assert_eq!(taken_by(&roster, Gunner, 1), None, "not taken from its own holder");
+        assert_eq!(taken_by(&roster, Hacker, 1), None);
+        assert_eq!(waiting_on(&roster).as_deref(), Some("Sol"));
     }
 }

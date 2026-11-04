@@ -111,8 +111,8 @@ pub fn panel_class(node: Node, class_color: Color) -> (Node, BackgroundColor, Bo
     (node, BackgroundColor(card_back(class_color)), border)
 }
 
-/// Credits with thousands separators, e.g. `1,240 cr`.
-pub fn credits(amount: u32) -> String {
+/// A whole number with thousands separators, e.g. `1,240`.
+pub fn thousands(amount: u32) -> String {
     let digits = amount.to_string();
     let mut out = String::new();
     for (i, digit) in digits.chars().enumerate() {
@@ -121,7 +121,12 @@ pub fn credits(amount: u32) -> String {
         }
         out.push(digit);
     }
-    out + " cr"
+    out
+}
+
+/// Credits with thousands separators, e.g. `1,240 cr`.
+pub fn credits(amount: u32) -> String {
+    thousands(amount) + " cr"
 }
 
 pub fn text(content: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {

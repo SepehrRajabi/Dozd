@@ -1,3 +1,4 @@
+use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Noise>()
             .add_message::<CrewHit>()
+            .add_message::<SentryHit>()
             .add_systems(OnEnter(GameState::Playing), reset_noise)
             .add_systems(
                 Update,
@@ -69,6 +71,8 @@ pub struct Health {
     pub negating: bool,
     /// Grace period granted after each hit.
     grace: f32,
+    /// All the shield and hull lost to hits so far: a pirate's damage taken.
+    pub taken: f32,
 }
 
 /// Shield regen waits this long after the last hit.
@@ -89,6 +93,7 @@ impl Health {
             warded: 0.0,
             negating: false,
             grace,
+            taken: 0.0,
         }
     }
 
@@ -133,6 +138,7 @@ impl Health {
         self.since_hit = 0.0;
         self.flash = 0.12;
         self.invulnerable = self.grace;
+        self.taken += dealt;
         Some(dealt)
     }
 }
@@ -177,6 +183,23 @@ pub struct CrewHit {
     /// the crew themselves.
     pub drains: bool,
 }
+
+/// Host-side: an Engineer's sentry hurt a guard, by `dealt`. Apart from
+/// `CrewHit` because a sentry isn't the Engineer's own weapon: this feeds their
+/// run stats, never lifesteal or challenges.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct SentryHit {
+    /// `Player::owner` of the Engineer who dropped the sentry.
+    pub owner: u64,
+    pub dealt: f32,
+    /// The hit took the guard from alive to dead.
+    pub killed: bool,
+}
+
+/// Server-side: this shot came from the sentry of the pirate with this
+/// `Player::owner`, for `SentryHit`.
+#[derive(Component, Clone, Copy)]
+pub struct SentryShot(pub u64);
 
 /// Server-side projectile state; clients only see its [`ProjectileLook`] and transform.
 #[derive(Component)]
@@ -223,7 +246,7 @@ impl ProjectileLook {
     }
 }
 
-pub fn spawn_projectile(commands: &mut Commands, projectile: Projectile, look: ProjectileLook, pos: Vec2) {
+pub fn spawn_projectile<'a>(commands: &'a mut Commands, projectile: Projectile, look: ProjectileLook, pos: Vec2) -> EntityCommands<'a> {
     let angle = projectile.velocity.to_angle();
     commands.spawn((
         Level,
@@ -231,7 +254,7 @@ pub fn spawn_projectile(commands: &mut Commands, projectile: Projectile, look: P
         projectile,
         look,
         Transform::from_translation(pos.extend(15.0)).with_rotation(Quat::from_rotation_z(angle)),
-    ));
+    ))
 }
 
 /// Host-side grenade in flight: follows an arc from `from` and explodes at `to`.
@@ -537,18 +560,19 @@ fn move_projectiles(
     time: Res<Time>,
     grid: Res<RoomGrid>,
     mut rng: ResMut<Rng>,
-    mut projectiles: Query<(Entity, &mut Projectile, &ProjectileLook, &mut Transform)>,
+    mut projectiles: Query<(Entity, &mut Projectile, &ProjectileLook, &mut Transform, Option<&SentryShot>)>,
     targets: ShotTargets,
     mut victims: Query<(&mut Health, Option<&mut Knockback>)>,
     riot_shields: Query<(&RiotShield, &Transform), Without<Projectile>>,
     mut crew_hits: MessageWriter<CrewHit>,
+    mut sentry_hits: MessageWriter<SentryHit>,
 ) {
     // Sub-step so fast shots can't tunnel through walls or targets in one frame.
     const MAX_STEP: f32 = 4.0;
     let shields = shield_outlines(&riot_shields);
     let blocked = |pos: Vec2| hits_shield(&shields, pos);
 
-    'projectiles: for (entity, mut projectile, look, mut transform) in &mut projectiles {
+    'projectiles: for (entity, mut projectile, look, mut transform, sentry) in &mut projectiles {
         let travel = projectile.velocity * time.delta_secs();
         let steps = (travel.length() / MAX_STEP).ceil().max(1.0);
         for _ in 0..steps as u32 {
@@ -592,6 +616,11 @@ fn move_projectiles(
                     && *team == Team::Enemy
                 {
                     crew_hits.write(CrewHit { owner, dealt, killed: health.is_dead(), drains: true });
+                }
+                if let Some(&SentryShot(owner)) = sentry
+                    && *team == Team::Enemy
+                {
+                    sentry_hits.write(SentryHit { owner, dealt, killed: health.is_dead() });
                 }
                 if let Some(mut knockback) = knockback {
                     knockback.0 += projectile.velocity.normalize_or_zero() * projectile.knockback;

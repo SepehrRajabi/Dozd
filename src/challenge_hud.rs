@@ -126,8 +126,9 @@ fn spawn_card(commands: &mut Commands, challenge: Entity) -> Entity {
         .with_child(spacer())
         .add_children(&[status])
         .id();
+    // A long reward beside a long name puts the name on a line of its own.
     let footer = commands
-        .spawn(Node { column_gap: Val::Px(6.0), align_items: AlignItems::Baseline, ..default() })
+        .spawn(Node { column_gap: Val::Px(6.0), flex_wrap: FlexWrap::Wrap, align_items: AlignItems::Baseline, ..default() })
         .add_children(&[reward])
         .with_child(spacer())
         .add_children(&[span])
@@ -235,7 +236,7 @@ fn update_challenge_cards(
             ChallengeState::Open => span_text(challenge.span, challenge.left),
             ChallengeState::Done { by } if Some(by) == local => "by you".into(),
             ChallengeState::Done { by } => match players.iter().find(|p| p.owner == by) {
-                Some(p) => format!("by P{} {}", p.slot + 1, p.class.name()),
+                Some(p) => format!("by {} {}", p.label(), p.class.name()),
                 None => "by a crewmate".into(),
             },
             ChallengeState::Failed => "missed".into(),

@@ -212,6 +212,20 @@ encrypted with it, so strangers who stumble on your port can't get in or
 listen in. It's an 8-character code, so treat it as a lock against
 passers-by rather than serious security.
 
+The Host and Join screens also take a display name of up to 12 characters,
+remembered for next time. It shows in the lobby, over your pirate, on crew
+cards and in the results; leave it blank to go by P1, P2 and so on.
+
+Everyone in a crew has to run the same build. Each build carries a fingerprint
+of the code and assets that made it, shown beside the version on the menu and
+in the lobby, e.g. `v0.1.0 (b721ab11)`. A host turns away anyone on a different
+build, and tells them why.
+
+When a run ends, solo or online, the results screen lists every pirate's
+kills, damage done, damage taken and the credits they picked up themselves,
+before any split. An Engineer's sentry counts as theirs; hacked guards count
+for nobody.
+
 | Class | Passives | Actives (Q) |
 | --- | --- | --- |
 | Gunner | **Supply:** they and every crewmate, wherever they are, have a 30% chance for a shot not to use up ammo. **Ricochet:** a bullet that hits a guard has a 30% chance to bounce on into the 2 guards nearest it, for 60% of its damage | **Spare gun:** no Q, but carries a 4th gun. **Laser:** fires a beam for 3 s that cuts through every guard in its path until it reaches a wall, killing even the toughest in under a second (25 s cooldown). It kicks, so the beam shakes off your aim, you walk at under half speed and can't fire your guns while it's on, and guards hear it |

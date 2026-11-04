@@ -25,9 +25,14 @@ use crate::mission::MissionStatus;
 use crate::perks::{PerkPickup, Perks};
 use crate::player::{Aim, Dash, Player, Walking};
 use crate::vault::{Looting, Vault};
+use crate::stats::RunStats;
 use crate::{GameState, Level};
 
 pub const DEFAULT_PORT: u16 = 5000;
+/// This build, as shown to players. Only builds with the same fingerprint
+/// (`DOZD_BUILD`, see `build.rs`) can play together: `Cargo.toml`'s version
+/// alone wouldn't tell two different builds apart.
+pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"), " (", env!("DOZD_BUILD"), ")");
 const PROTOCOL_ID: u64 = 0xD02D;
 /// One pirate per class: the host plus a joiner for each class left.
 const MAX_CLIENTS: usize = PirateClass::ALL.len() - 1;
@@ -254,14 +259,18 @@ pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((RepliconPlugins, RepliconRenetPlugins))
-            .insert_resource(NetMode::Solo)
+        app.add_plugins((RepliconPlugins, RepliconRenetPlugins));
+        // The handshake compares type names and their order, which most changes
+        // leave alone: this makes it turn away every build but the host's own.
+        app.world_mut().resource_mut::<ProtocolHasher>().add_custom(env!("DOZD_BUILD"));
+        app.insert_resource(NetMode::Solo)
             .insert_resource(LocalId(HOST_ID))
             .init_resource::<Notice>()
             .init_resource::<Connection>()
             // Registration order must match on every machine; keep it all here.
             .replicate::<Transform>()
             .replicate::<Player>()
+            .replicate::<RunStats>()
             .replicate::<Aim>()
             .replicate::<Walking>()
             .replicate::<Dash>()
@@ -298,6 +307,7 @@ impl Plugin for NetPlugin {
             .add_server_event::<Fx>(Channel::Unordered)
             .add_observer(start_session)
             .add_observer(end_session)
+            .add_observer(on_protocol_mismatch)
             .add_systems(Update, watch_connection);
     }
 }
@@ -431,6 +441,36 @@ fn end_session(
     NextState::set_if_neq(&mut *next_state, GameState::Menu);
 }
 
+/// What a joiner is told when the host says it's running another build.
+fn wrong_build_message() -> String {
+    format!("The host is running a different build than yours ({VERSION}). You both need the same build to play together")
+}
+
+/// What a joiner who had a connection is told on losing it. `waiting` means
+/// they're still in the menu: the host's world never arrived, so if it hung up,
+/// it most likely turned them away for their build and word of that got lost.
+fn lost_host_message(reason: Option<NetcodeDisconnectReason>, waiting: bool) -> String {
+    match reason {
+        Some(NetcodeDisconnectReason::DisconnectedByServer) if waiting => {
+            format!("The host turned you away. You may be on a different build ({VERSION})")
+        }
+        Some(NetcodeDisconnectReason::DisconnectedByServer) => "The host closed the connection".into(),
+        _ => "Lost connection to the host".into(),
+    }
+}
+
+/// Ends a joiner's session when the host says it's running another build.
+///
+/// This can't fight `watch_connection`. Word arrives in `PreUpdate`, so the
+/// session is over before `watch_connection` looks, in `Update`. And once
+/// `watch_connection` sees the link down, nothing more can arrive: it's then
+/// the only one to speak, with its best guess.
+fn on_protocol_mismatch(_: On<ProtocolMismatch>, mut commands: Commands, mode: Res<NetMode>) {
+    if matches!(*mode, NetMode::Join { .. }) {
+        commands.trigger(EndSession(Some(wrong_build_message())));
+    }
+}
+
 /// Sends a joiner back to the menu if the host can't be reached, turns them
 /// away or goes away.
 fn watch_connection(
@@ -438,6 +478,7 @@ fn watch_connection(
     time: Res<Time>,
     mode: Res<NetMode>,
     state: Res<State<ClientState>>,
+    game: Res<State<GameState>>,
     transport: Option<Res<NetcodeClientTransport>>,
     mut connection: ResMut<Connection>,
 ) {
@@ -447,12 +488,8 @@ fn watch_connection(
         ClientState::Connected => connection.connected = true,
         _ if connection.connected => {
             connection.connected = false;
-            let message = if reason == Some(NetcodeDisconnectReason::DisconnectedByServer) {
-                "The host closed the connection"
-            } else {
-                "Lost connection to the host"
-            };
-            commands.trigger(EndSession(Some(message.into())));
+            let waiting = *game.get() == GameState::Menu;
+            commands.trigger(EndSession(Some(lost_host_message(reason, waiting))));
         }
         // The only refusal netcode sends: every seat is taken.
         _ if reason == Some(NetcodeDisconnectReason::ConnectionDenied) => {
@@ -473,7 +510,136 @@ fn watch_connection(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy_replicon::shared::backend::connected_client::NetworkId;
+
     use super::*;
+    use crate::class::{CrewNames, Loadouts, LocalLoadout};
+    use crate::crew::JoinOrder;
+    use crate::room::NextSeed;
+    use crate::{GamePlugins, Rng};
+
+    /// The game with the network left out, as the menu leaves it.
+    fn game() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(1.0 / 60.0)))
+            .add_plugins(GamePlugins)
+            .insert_resource(NextSeed(3))
+            .insert_resource(Rng::new(3));
+        app
+    }
+
+    /// A joiner waiting in the menu whose link to the host just went down, so
+    /// `watch_connection` speaks up at its first chance.
+    fn dropped_joiner() -> App {
+        let mut app = game();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
+        app.insert_resource(NetMode::Join { addr, code: "ABCDEFGH".into() });
+        app.world_mut().resource_mut::<Connection>().connected = true;
+        app
+    }
+
+    fn notice(app: &App) -> Option<&str> {
+        app.world().resource::<Notice>().0.as_deref()
+    }
+
+    #[test]
+    fn the_version_names_the_release_and_the_build() {
+        assert!(VERSION.contains(env!("CARGO_PKG_VERSION")));
+        assert!(VERSION.contains(env!("DOZD_BUILD")));
+        assert!(!env!("DOZD_BUILD").is_empty());
+    }
+
+    #[test]
+    fn being_turned_away_says_why_and_what_to_do() {
+        let message = wrong_build_message();
+        assert!(message.contains(VERSION));
+        assert!(message.contains("different build"));
+        assert!(message.contains("same build"));
+    }
+
+    #[test]
+    fn losing_the_host_is_only_blamed_on_the_build_before_its_world_arrives() {
+        let hung_up = Some(NetcodeDisconnectReason::DisconnectedByServer);
+        let guess = lost_host_message(hung_up, true);
+        assert!(guess.contains("turned you away") && guess.contains(VERSION));
+        assert_eq!(lost_host_message(hung_up, false), "The host closed the connection");
+        assert_eq!(lost_host_message(None, true), "Lost connection to the host");
+        assert_eq!(lost_host_message(None, false), "Lost connection to the host");
+    }
+
+    #[test]
+    fn notices_fit_the_menu() {
+        // Two lines of 66 letters: 640 px at 16 px Fira Mono. Less, as lines
+        // break between words.
+        for message in [wrong_build_message(), lost_host_message(Some(NetcodeDisconnectReason::DisconnectedByServer), true)] {
+            assert!(message.len() <= 120, "`{message}` won't fit");
+        }
+    }
+
+    #[test]
+    fn word_of_another_build_ends_the_session_and_stands() {
+        let mut app = dropped_joiner();
+        // Arrives as packets do, ahead of `watch_connection` in the same frame.
+        app.add_systems(PreUpdate, |mut commands: Commands| commands.trigger(ProtocolMismatch));
+        app.update();
+        app.update();
+        assert_eq!(notice(&app), Some(wrong_build_message().as_str()));
+        assert_eq!(*app.world().resource::<NetMode>(), NetMode::Solo);
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Menu);
+    }
+
+    #[test]
+    fn word_of_another_build_after_the_session_ended_changes_nothing() {
+        let mut app = dropped_joiner();
+        app.update();
+        let first = notice(&app).expect("the dropped joiner is told").to_string();
+        assert_eq!(*app.world().resource::<NetMode>(), NetMode::Solo);
+        app.world_mut().trigger(ProtocolMismatch);
+        app.update();
+        assert_eq!(notice(&app), Some(first.as_str()));
+    }
+
+    #[test]
+    fn a_joiner_turned_away_leaves_nothing_behind() {
+        let mut app = game();
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+        app.insert_resource(NetMode::Host { port: 0, code: String::new() });
+
+        // Connected but not authorized: replicon delivers what such a client
+        // sends, and its loadout goes out alongside the hash that fails.
+        const ID: u64 = 1 << 63 | 9;
+        let client = app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(ID))).id();
+        let host_class = app.world().resource::<LocalLoadout>().0.class;
+        let class = *PirateClass::ALL.iter().find(|c| **c != host_class).unwrap();
+        let message = ChooseLoadout(Loadout { name: "Zed".into(), ..Loadout::new(class) });
+        app.world_mut().write_message(FromClient { client_id: ClientId::Client(client), message });
+        app.update();
+        app.update();
+        assert!(app.world().resource::<Loadouts>().0.contains_key(&ID), "held while they're connected");
+
+        let mut players = app.world_mut().query::<&Player>();
+        assert!(!players.iter(app.world()).any(|p| p.owner == ID), "no pirate");
+        let mut rosters = app.world_mut().query::<&Roster>();
+        let roster = rosters.single(app.world()).expect("the host keeps a roster");
+        assert!(!roster.0.iter().any(|c| c.owner == ID), "not on the roster");
+
+        // The handshake's refusal: gone the same frame it was checked.
+        app.world_mut().write_message(DisconnectRequest { client });
+        app.update();
+        assert!(app.world().get_entity(client).is_err(), "disconnected");
+        assert!(!app.world().resource::<Loadouts>().0.contains_key(&ID));
+        assert!(!app.world().resource::<CrewNames>().0.contains_key(&ID));
+        assert!(!app.world().resource::<JoinOrder>().0.contains(&ID));
+    }
 
     #[test]
     fn room_codes_round_trip_and_key_sessions() {

@@ -2,14 +2,16 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::class::PirateClass;
 use crate::combat::{FxKind, Health, fx};
 use crate::enemies::{EnemyLook, roll_reinforcement, spawn_enemy};
 use crate::hud::{self, HudSlot, Meter};
 use crate::loot::LootKind;
 use crate::net::{LocalPlayer, NetMode, authority};
-use crate::player::{DASH_COOLDOWN, Dash, OFF_DECK, PirateStatus, Player};
+use crate::player::{DASH_COOLDOWN, Dash, OFF_DECK, PirateStatus, Player, slot_color};
 use crate::room::{DECKS, Heist, RoomGrid};
 use crate::settings::Settings;
+use crate::stats::RunStats;
 use crate::vault::VaultTier;
 use crate::{GameState, Rng};
 
@@ -37,6 +39,19 @@ const BAR_ALARM: f32 = 0.04;
 const SPAWN_CLEARANCE: f32 = 70.0;
 /// Each pirate who leaves early grows the final group's pool by this share of it.
 pub const CREW_BONUS_PER_LEAVER: f64 = 0.25;
+/// Height of a pirate's row in the results table: their portrait and the border.
+const STAT_ROW_HEIGHT: f32 = 34.0;
+/// Width of the results table's PIRATE column: portrait, and the longest name
+/// over the class.
+const STAT_PIRATE_WIDTH: f32 = 132.0;
+/// The results table's number columns, in the order of `StatLine::cells`:
+/// heading, width and colour. Damage and credits have room for eight digits.
+const STAT_COLUMNS: [(&str, f32, Color); 4] = [
+    ("KILLS", 52.0, hud::TEXT),
+    ("DAMAGE DONE", 100.0, hud::TEXT),
+    ("DAMAGE TAKEN", 100.0, hud::TEXT),
+    ("CREDITS", 130.0, hud::GOLD),
+];
 
 pub struct MissionPlugin;
 
@@ -86,6 +101,7 @@ impl Plugin for MissionViewPlugin {
                     update_extraction_hud,
                     update_got_out,
                     update_results.run_if(in_state(GameState::Over)),
+                    update_results_table.run_if(in_state(GameState::Over)),
                 )
                     .chain()
                     .after(follow_host_state),
@@ -359,6 +375,18 @@ struct ResultsDetail;
 
 #[derive(Component)]
 struct ResultsBreakdown;
+
+/// Holds the results table's pirate rows, under its header.
+#[derive(Component)]
+struct ResultsTable;
+
+/// A pirate's row in the results table: who it's for, and the text of its
+/// number columns.
+#[derive(Component)]
+struct StatRow {
+    who: StatWho,
+    cells: [Entity; STAT_COLUMNS.len()],
+}
 
 /// Created once per session; it persists across restarts so clients keep following it.
 fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>) {
@@ -1146,7 +1174,7 @@ fn spawn_results(
             align_items: AlignItems::Center,
             ..default()
         },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.02, 0.7)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.02, 0.88)),
         children![(
             ResultsPanel,
             hud::panel_accent(
@@ -1174,6 +1202,11 @@ fn spawn_results(
                     ResultsBreakdown,
                     hud::text(shown.lines.join("\n"), 15.0, hud::LABEL),
                     TextLayout::justify(Justify::Center),
+                ),
+                (
+                    stat_column(),
+                    // `update_results_table` fills in the rows.
+                    children![stat_header(), (ResultsTable, stat_column())],
                 ),
                 (
                     Node {
@@ -1214,6 +1247,206 @@ fn update_results(
     let lines = shown.lines.join("\n");
     if breakdown.0 != lines {
         breakdown.0 = lines;
+    }
+}
+
+/// What a results row shows of who it's for: its slot, class, whether it's
+/// this machine's pirate, and what they're called.
+type StatWho = (u8, PirateClass, bool, String);
+
+/// What a pirate did over the run, as plain values.
+struct PirateStats {
+    slot: u8,
+    /// What to call them.
+    label: String,
+    class: PirateClass,
+    local: bool,
+    kills: u32,
+    dealt: f32,
+    taken: f32,
+    credits: u32,
+}
+
+/// A pirate's row in the results table, ready to show.
+#[derive(PartialEq, Debug)]
+struct StatLine {
+    slot: u8,
+    label: String,
+    class: PirateClass,
+    local: bool,
+    /// One for each of `STAT_COLUMNS`.
+    cells: [String; STAT_COLUMNS.len()],
+}
+
+impl StatLine {
+    fn who(&self) -> StatWho {
+        (self.slot, self.class, self.local, self.label.clone())
+    }
+}
+
+/// Damage to the nearest whole point.
+fn damage(amount: f32) -> String {
+    hud::thousands(amount.round() as u32)
+}
+
+/// The results table's rows, in join order.
+fn stat_lines(mut crew: Vec<PirateStats>) -> Vec<StatLine> {
+    crew.sort_by_key(|pirate| pirate.slot);
+    crew.into_iter()
+        .map(|p| StatLine {
+            slot: p.slot,
+            label: p.label,
+            class: p.class,
+            local: p.local,
+            cells: [hud::thousands(p.kills), damage(p.dealt), damage(p.taken), hud::credits(p.credits)],
+        })
+        .collect()
+}
+
+/// A stack of the results table's rows.
+fn stat_column() -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(2.0),
+        ..default()
+    }
+}
+
+/// A row of the results table. Every row has the shape of the highlighted one,
+/// so the columns line up whichever row stands out.
+fn table_row(height: Val, color: Color, highlight: bool) -> (Node, BackgroundColor, BorderColor) {
+    let (node, back, border) = hud::panel_class(
+        Node {
+            height,
+            column_gap: Val::Px(20.0),
+            align_items: AlignItems::Center,
+            padding: UiRect::horizontal(Val::Px(10.0)),
+            ..default()
+        },
+        color,
+    );
+    if highlight {
+        (node, back, border)
+    } else {
+        (node, BackgroundColor(Color::NONE), BorderColor::all(Color::NONE))
+    }
+}
+
+/// The PIRATE column's cell.
+fn stat_pirate_cell() -> Node {
+    Node {
+        width: Val::Px(STAT_PIRATE_WIDTH),
+        column_gap: Val::Px(6.0),
+        align_items: AlignItems::Center,
+        flex_shrink: 0.0,
+        ..default()
+    }
+}
+
+/// A number column's cell, holding its text to the right edge.
+fn stat_number_cell(width: f32) -> Node {
+    Node {
+        width: Val::Px(width),
+        justify_content: JustifyContent::FlexEnd,
+        flex_shrink: 0.0,
+        ..default()
+    }
+}
+
+/// One line of table text: a big figure never wraps the row taller.
+fn stat_text(content: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    (hud::text(content, size, color), TextLayout::no_wrap(), Node { flex_shrink: 0.0, ..default() })
+}
+
+fn stat_heading(name: &'static str) -> impl Bundle {
+    stat_text(name, 11.0, hud::LABEL)
+}
+
+/// The column headings.
+fn stat_header() -> impl Bundle {
+    (
+        table_row(Val::Auto, Color::NONE, false),
+        Children::spawn((
+            Spawn((stat_pirate_cell(), children![stat_heading("PIRATE")])),
+            SpawnIter(STAT_COLUMNS.into_iter().map(|(name, width, _)| (stat_number_cell(width), children![stat_heading(name)]))),
+        )),
+    )
+}
+
+fn spawn_stat_row(commands: &mut Commands, assets: &AssetServer, line: &StatLine) -> Entity {
+    let class = line.class;
+    let row = commands
+        .spawn((
+            table_row(Val::Px(STAT_ROW_HEIGHT), class.color(), line.local),
+            children![(
+                stat_pirate_cell(),
+                children![
+                    hud::portrait(assets.load(class.sprite()), class.color(), 24.0),
+                    (
+                        Node { flex_direction: FlexDirection::Column, ..default() },
+                        children![
+                            stat_text(line.label.clone(), 13.0, slot_color(line.slot)),
+                            stat_text(class.name(), 11.0, class.color()),
+                        ],
+                    ),
+                ],
+            )],
+        ))
+        .insert_if(hud::wash(class.color()), || line.local)
+        .id();
+    let cells = std::array::from_fn(|i| {
+        let (_, width, color) = STAT_COLUMNS[i];
+        let text = commands.spawn(stat_text(line.cells[i].clone(), 15.0, color)).id();
+        commands.spawn((stat_number_cell(width), ChildOf(row))).add_child(text);
+        text
+    });
+    commands.entity(row).insert(StatRow { who: line.who(), cells }).id()
+}
+
+/// Keeps the results table in step with the crew as replication catches up:
+/// a client's numbers can land a moment after the run ends, and a pirate can
+/// arrive late. The rows are only rebuilt when who's in them changes, which
+/// includes a name landing.
+fn update_results_table(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    players: Query<(&Player, &Health, &RunStats, Has<LocalPlayer>)>,
+    table: Option<Single<(Entity, Option<&Children>), With<ResultsTable>>>,
+    rows: Query<&StatRow>,
+    mut texts: Query<&mut Text>,
+) {
+    let Some(table) = table else { return };
+    let (table, children) = table.into_inner();
+    let crew = players.iter().map(|(player, health, stats, local)| PirateStats {
+        slot: player.slot,
+        label: player.label(),
+        class: player.class,
+        local,
+        kills: stats.kills,
+        dealt: stats.dealt,
+        taken: health.taken,
+        credits: player.credits,
+    });
+    let lines = stat_lines(crew.collect());
+
+    let shown: Vec<&StatRow> = rows.iter_many(children.into_iter().flatten()).collect();
+    let same = shown.len() == lines.len() && shown.iter().zip(&lines).all(|(row, line)| row.who == line.who());
+    if !same {
+        commands.entity(table).despawn_children();
+        for line in &lines {
+            let row = spawn_stat_row(&mut commands, &assets, line);
+            commands.entity(table).add_child(row);
+        }
+        return;
+    }
+    for (row, line) in shown.iter().zip(&lines) {
+        for (cell, value) in row.cells.iter().zip(&line.cells) {
+            if let Ok(mut text) = texts.get_mut(*cell)
+                && text.0 != *value
+            {
+                text.0.clone_from(value);
+            }
+        }
     }
 }
 
@@ -1293,6 +1526,146 @@ mod tests {
         let solo = outcome(seat(Finished, 3000, 3000), tally, Settlement::default());
         assert_eq!(solo.title, "EXTRACTED");
         assert_eq!(solo.detail, "You got out with 3,000 cr from deck 2");
+    }
+
+    fn stats(slot: u8, class: PirateClass) -> PirateStats {
+        let label = crate::class::crew_label("", slot as usize);
+        PirateStats { slot, label, class, local: false, kills: 0, dealt: 0.0, taken: 0.0, credits: 0 }
+    }
+
+    #[test]
+    fn the_stats_table_goes_by_join_order() {
+        use PirateClass::*;
+        let crew = vec![stats(4, Doctor), stats(0, Hacker), stats(2, Gunner)];
+        let order: Vec<_> = stat_lines(crew).iter().map(|line| (line.slot, line.class)).collect();
+        assert_eq!(order, [(0, Hacker), (2, Gunner), (4, Doctor)]);
+    }
+
+    #[test]
+    fn the_stats_table_carries_each_pirates_label() {
+        let named = PirateStats { label: "Mira".into(), ..stats(0, PirateClass::Gunner) };
+        let lines = stat_lines(vec![stats(1, PirateClass::Doctor), named]);
+        let labels: Vec<_> = lines.iter().map(|line| line.label.as_str()).collect();
+        assert_eq!(labels, ["Mira", "P2"]);
+        assert_eq!(lines[0].who(), (0, PirateClass::Gunner, false, "Mira".to_string()));
+    }
+
+    #[test]
+    fn the_stats_table_rounds_and_separates() {
+        let pirate = PirateStats {
+            local: true,
+            kills: 1234,
+            dealt: 1_234_567.5,
+            taken: 999.5,
+            credits: 12_400,
+            ..stats(0, PirateClass::Gunner)
+        };
+        let line = stat_lines(vec![pirate]).remove(0);
+        assert!(line.local);
+        assert_eq!(line.cells, ["1,234", "1,234,568", "1,000", "12,400 cr"]);
+
+        let idle = stat_lines(vec![stats(1, PirateClass::Bulwark)]).remove(0);
+        assert_eq!(idle.cells, ["0", "0", "0", "0 cr"], "a pirate who did nothing still gets a row");
+        assert_eq!(damage(0.49), "0");
+        assert_eq!(damage(100.0), "100");
+        assert_eq!(hud::thousands(1000), "1,000");
+        assert_eq!(hud::thousands(999), "999");
+    }
+
+    fn results_table() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Image>()
+            .add_systems(Update, update_results_table);
+        app.world_mut().spawn((ResultsTable, stat_column()));
+        app
+    }
+
+    fn crew_member(slot: u8, class: PirateClass) -> (Player, Health) {
+        let player = Player {
+            owner: slot as u64,
+            class,
+            passive: crate::abilities::Passive::Supply,
+            active: None,
+            slot,
+            credits: 0,
+            items: 0,
+            status: PirateStatus::Active,
+            left_early: false,
+            payout: 0,
+            deck: 0,
+            name: String::new(),
+        };
+        (player, Health::new(100.0, 0.0))
+    }
+
+    /// The rows on screen, top to bottom: who each is for and its numbers.
+    fn rows_shown(app: &mut App) -> Vec<(Entity, StatWho, [String; STAT_COLUMNS.len()])> {
+        let world = app.world_mut();
+        let table = world.query_filtered::<Entity, With<ResultsTable>>().single(world).expect("the table");
+        let Some(children) = world.get::<Children>(table) else { return Vec::new() };
+        children
+            .iter()
+            .map(|row| {
+                let stat = world.get::<StatRow>(row).expect("a stat row");
+                let cells = stat.cells.map(|cell| world.get::<Text>(cell).expect("a cell's text").0.clone());
+                (row, stat.who.clone(), cells)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_stats_table_follows_replication() {
+        use PirateClass::*;
+        let mut app = results_table();
+        // Nobody's `LocalPlayer` here: someone who joined too late.
+        let late = app.world_mut().spawn(crew_member(1, Doctor)).id();
+        app.update();
+        let first = rows_shown(&mut app);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1, (1, Doctor, false, "P2".to_string()));
+        assert_eq!(first[0].2, ["0", "0", "0", "0 cr"]);
+
+        // The numbers land: same row, new text.
+        app.world_mut().entity_mut(late).insert(RunStats { kills: 3, dealt: 1500.4 });
+        app.world_mut().get_mut::<Health>(late).expect("health").taken = 12.0;
+        app.world_mut().get_mut::<Player>(late).expect("pirate").credits = 2000;
+        app.update();
+        let landed = rows_shown(&mut app);
+        assert_eq!(landed[0].0, first[0].0, "the row isn't rebuilt for new numbers");
+        assert_eq!(landed[0].2, ["3", "1,500", "12", "2,000 cr"]);
+
+        // A pirate arrives late, and it's ours: rows in join order, numbers kept.
+        let mut mine = app.world_mut().spawn(crew_member(0, Gunner));
+        mine.insert(LocalPlayer);
+        app.update();
+        let two = rows_shown(&mut app);
+        let who: Vec<_> = two.iter().map(|row| row.1.clone()).collect();
+        assert_eq!(who, [(0, Gunner, true, "P1".to_string()), (1, Doctor, false, "P2".to_string())]);
+        assert_eq!(two[1].2, ["3", "1,500", "12", "2,000 cr"]);
+
+        // Their pirate goes: its row does too, with nothing left over.
+        app.world_mut().despawn(late);
+        app.update();
+        let one = rows_shown(&mut app);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].1, (0, Gunner, true, "P1".to_string()));
+    }
+
+    #[test]
+    fn a_name_landing_late_rebuilds_its_row() {
+        let mut app = results_table();
+        let pirate = app.world_mut().spawn(crew_member(0, PirateClass::Hacker)).id();
+        app.update();
+        let first = rows_shown(&mut app);
+        assert_eq!(first[0].1.3, "P1");
+
+        app.world_mut().get_mut::<Player>(pirate).expect("pirate").name = "Mira".into();
+        app.update();
+        let named = rows_shown(&mut app);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].1.3, "Mira");
+        assert_ne!(named[0].0, first[0].0, "the name is drawn when the row is built");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::GameState;
 use crate::challenge::Rewards;
 use crate::challenge_hud::reward_chips;
 use crate::abilities::Passive;
-use crate::class::{Ability, Boons, LocalLoadout, Loadouts, PirateClass, ability_status, effects, passive_tag};
+use crate::class::{Ability, Boons, CrewNames, LocalLoadout, Loadouts, PirateClass, ability_status, crew_label, effects, passive_tag};
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter, PirateCard, PirateHeader};
 use crate::mission::MissionStatus;
@@ -25,8 +25,10 @@ use crate::player::{PirateStatus, Player, slot_color};
 const LINK_INTERVAL: f32 = 1.0;
 /// Seconds a pirate who dropped out stays on the panel, marked as gone.
 const GONE_TIME: f32 = 6.0;
-const ROW_WIDTH: f32 = 250.0;
+const ROW_WIDTH: f32 = 290.0;
 const BAR_WIDTH: f32 = 110.0;
+/// The least of a crew row's name that shows: room for `P1`.
+const LABEL_MIN: f32 = 15.0;
 const SHIELD_COLOR: Color = Color::srgb(0.45, 0.7, 1.0);
 const HULL_COLOR: Color = Color::srgb(0.4, 0.85, 0.45);
 const HULL_LOW: Color = Color::srgb(1.0, 0.35, 0.3);
@@ -76,21 +78,35 @@ impl Link {
 /// class the host accepted for each (`None` while they're still choosing).
 /// Lives on the mission status entity. A pirate's place here is their slot.
 #[derive(Component, Serialize, Deserialize, Clone, PartialEq, Eq, Default, Debug)]
-pub struct Roster(pub Vec<(u64, Option<PirateClass>)>);
+pub struct Roster(pub Vec<Crewmate>);
+
+/// One place in the `Roster`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Crewmate {
+    pub owner: u64,
+    pub class: Option<PirateClass>,
+    /// The display name they chose, already clean; empty for none.
+    pub name: String,
+}
 
 impl Roster {
     /// Who holds `class`, if anyone.
     pub fn holder(&self, class: PirateClass) -> Option<u64> {
-        self.0.iter().find(|(_, c)| *c == Some(class)).map(|(owner, _)| *owner)
+        self.0.iter().find(|c| c.class == Some(class)).map(|c| c.owner)
     }
 
     /// `owner`'s place in the crew, from 0.
     pub fn slot(&self, owner: u64) -> Option<usize> {
-        self.0.iter().position(|(o, _)| *o == owner)
+        self.0.iter().position(|c| c.owner == owner)
     }
 
     pub fn class_of(&self, owner: u64) -> Option<PirateClass> {
-        self.0.iter().find(|(o, _)| *o == owner).and_then(|(_, c)| *c)
+        self.0.iter().find(|c| c.owner == owner).and_then(|c| c.class)
+    }
+
+    /// What to call the crewmate in `slot`.
+    pub fn label(&self, slot: usize) -> Option<String> {
+        self.0.get(slot).map(|c| crew_label(&c.name, slot))
     }
 }
 
@@ -105,6 +121,7 @@ fn update_roster(
     local: Res<LocalId>,
     loadout: Res<LocalLoadout>,
     loadouts: Res<Loadouts>,
+    names: Res<CrewNames>,
     order: Res<JoinOrder>,
     clients: Query<&NetworkId, With<AuthorizedClient>>,
     mut status: Query<(Entity, Option<&mut Roster>), With<MissionStatus>>,
@@ -117,8 +134,13 @@ fn update_roster(
         .0
         .iter()
         .filter(|id| clients.iter().any(|c| c.get() == **id))
-        .map(|&id| (id, loadouts.0.get(&id).map(|l| l.class)));
-    let current = Roster([(local.0, Some(loadout.0.class))].into_iter().chain(joiners).collect());
+        .map(|&id| Crewmate {
+            owner: id,
+            class: loadouts.0.get(&id).map(|l| l.class),
+            name: names.0.get(&id).cloned().unwrap_or_default(),
+        });
+    let host = Crewmate { owner: local.0, class: Some(loadout.0.class), name: loadout.0.name.clone() };
+    let current = Roster([host].into_iter().chain(joiners).collect());
     match roster {
         Some(mut roster) => {
             roster.set_if_neq(current);
@@ -181,13 +203,15 @@ struct CrewRow {
 
 fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> Entity {
     let class = player.class;
-    let status = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
-    let link = commands.spawn(hud::text("", 11.0, hud::DIM)).id();
-    let shield = commands.spawn(hud::meter(BAR_WIDTH, 4.0, SHIELD_COLOR)).id();
-    let hull = commands.spawn(hud::meter_ticked(Val::Px(BAR_WIDTH), 7.0, HULL_COLOR, 4)).id();
     // One line each: a big haul or long name never wraps the row taller.
     let line = || TextLayout::no_wrap();
-    let credits = commands.spawn((hud::text("", 12.0, hud::GOLD), line(), Node { flex_shrink: 0.0, ..default() })).id();
+    // A pirate's state and link stay whole; their name gives way to them.
+    let fixed = || Node { flex_shrink: 0.0, ..default() };
+    let status = commands.spawn((hud::text("", 11.0, hud::DIM), line(), fixed())).id();
+    let link = commands.spawn((hud::text("", 11.0, hud::DIM), line(), fixed())).id();
+    let shield = commands.spawn(hud::meter(BAR_WIDTH, 4.0, SHIELD_COLOR)).id();
+    let hull = commands.spawn(hud::meter_ticked(Val::Px(BAR_WIDTH), 7.0, HULL_COLOR, 4)).id();
+    let credits = commands.spawn((hud::text("", 12.0, hud::GOLD), line(), fixed())).id();
     let ability = commands.spawn((hud::text("", 11.0, hud::TEXT), line())).id();
     let ready = commands.spawn((hud::text("", 11.0, hud::DIM), line())).id();
     let passive = commands.spawn((hud::text("", 11.0, hud::LABEL), line())).id();
@@ -197,8 +221,10 @@ fn spawn_row(commands: &mut Commands, assets: &AssetServer, player: &Player) -> 
     let top = commands
         .spawn(Node { column_gap: Val::Px(6.0), align_items: AlignItems::Center, ..default() })
         .with_children(|line| {
-            line.spawn(hud::text(format!("P{}", player.slot + 1), 12.0, slot_color(player.slot)));
-            line.spawn(hud::text(class.name(), 13.0, class.color()));
+            // The text can't clip itself: its box does, so a long name stops short.
+            line.spawn(Node { min_width: Val::Px(LABEL_MIN), overflow: Overflow::clip_x(), ..default() })
+                .with_child((hud::text(player.label(), 12.0, slot_color(player.slot)), TextLayout::no_wrap()));
+            line.spawn((hud::text(class.name(), 13.0, class.color()), fixed()));
             line.spawn(spacer());
         })
         .add_children(&[status, link])
@@ -505,11 +531,12 @@ fn update_local_card(
             border.set_if_neq(BorderColor::all(tint.with_alpha(0.5)));
         }
         set_text(&mut texts, card.class, class.name(), tint);
-        set_text(&mut texts, card.slot, &format!("P{}", player.slot + 1), slot_color(player.slot));
         set_text(&mut texts, card.role, class.perk(), hud::DIM);
         set_text(&mut texts, card.passive, passive.name(), tint);
         set_text(&mut texts, card.details, passive.details(), hud::DIM);
     }
+    // Out here because the next run's pirate can differ by their name alone.
+    set_text(&mut texts, card.slot, &player.label(), slot_color(player.slot));
     // Lit in their colour while it's reaching anyone.
     let (tag, color) = match passive_tag(passive, boons) {
         Some(tag) => (tag, if reaches_crew(passive) { tint } else { hud::TEXT }),
@@ -628,7 +655,7 @@ fn spawn_class_picker(mut commands: Commands, assets: Res<AssetServer>) {
                                     Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
                                 ));
                                 card.spawn(hud::text(class.name(), 18.0, class.color()));
-                                card.spawn((CardNote, hud::text("", 12.0, hud::DIM)));
+                                card.spawn((CardNote, hud::text("", 12.0, hud::DIM), TextLayout::no_wrap()));
                             });
                         }
                     });
@@ -681,8 +708,8 @@ fn update_class_picker(
         let holder = roster.holder(class).filter(|owner| *owner != local.0);
         let (note, note_color) = match holder {
             None => ("FREE".to_string(), class.color()),
-            Some(owner) => match roster.slot(owner) {
-                Some(slot) => (format!("TAKEN  P{}", slot + 1), hud::DIM),
+            Some(owner) => match roster.slot(owner).and_then(|slot| roster.label(slot)) {
+                Some(label) => (format!("TAKEN  {label}"), hud::DIM),
                 None => ("TAKEN".to_string(), hud::DIM),
             },
         };
