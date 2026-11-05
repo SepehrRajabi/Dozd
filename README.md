@@ -151,6 +151,8 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | The Vault Brute roaring guards in at the glowing spots | Worn down, the Vault Brute hardens: immune and healing, its plates counting down the time left |
 | ![Vault Prism](docs/screenshots/boss_prism.png) | ![Enemies](docs/screenshots/enemies.png) |
 | The Vault Prism behind its mirror shards, lashing the crew with arcs | The station's guards and vault bosses, under **EXTRAS** in the main menu |
+| ![Conductor](docs/screenshots/conductor.png) | ![Conductor fields](docs/screenshots/conductor_fields.png) |
+| A Conductor wading into the crew: every jolt is small, but they keep coming for as long as you stay in the circle | Its field in blue for the station, orange when enraged and green when hacked, zapping guards instead of the crew |
 
 ## Run
 
