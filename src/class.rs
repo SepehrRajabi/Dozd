@@ -25,7 +25,7 @@ use crate::abilities::{Active, LIFESTEAL_CHANCE, LIFESTEAL_SHARE, Passive, RICOC
 use crate::boss::Keeper;
 use crate::challenge::Rewards;
 use crate::combat::{CrewHit, Fade, FxKind, Health, Hurtbox, Knockback, Noise, Projectile, ProjectileLook, SentryShot, Shake, Team, fx, spawn_projectile};
-use crate::enemies::{EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
+use crate::enemies::{ARC_CHARGE, EMPOWERED_COLOR, Enemy, WAR_CRY_POWER};
 use crate::guns::{GunKind, muzzle};
 use crate::hud::{self, HudSlot, Meter};
 use crate::mission::Alarm;
@@ -552,6 +552,9 @@ pub struct Boons {
     /// Heard a hacked Herald's war cry: hits `WAR_CRY_POWER` harder for the
     /// rest of the run.
     pub empowered: bool,
+    /// Inside a hacked Conductor's field: their shield comes back `ARC_CHARGE`
+    /// times as fast (see `shield_rate`).
+    pub charged: bool,
 }
 
 impl Boons {
@@ -562,10 +565,14 @@ impl Boons {
         rally * cry
     }
 
-    /// How many seconds of cooldown their ability and dash shed, and how
-    /// many seconds of shield recharge pass, each second.
+    /// How many seconds of cooldown their ability and dash shed each second.
     pub fn cooldown_rate(self) -> f32 {
         if self.overclocked { 1.0 / (1.0 - OVERCLOCK_CUT) } else { 1.0 }
+    }
+
+    /// How many seconds of shield recharge pass each second.
+    pub fn shield_rate(self) -> f32 {
+        self.cooldown_rate() * if self.charged { ARC_CHARGE } else { 1.0 }
     }
 }
 
@@ -592,6 +599,9 @@ pub fn effects(health: &Health, boons: &Boons) -> Vec<(String, Color)> {
     }
     if boons.empowered {
         effects.push((format!("WAR CRY +{:.0}%", (WAR_CRY_POWER - 1.0) * 100.0), EMPOWERED_COLOR));
+    }
+    if boons.charged {
+        effects.push((format!("SHIELD CHARGE x{ARC_CHARGE:.0}"), HACK_COLOR));
     }
     effects
 }
@@ -1817,6 +1827,16 @@ mod tests {
         // A cooldown takes 65% as long.
         let secs = 20.0 / overclocked.cooldown_rate();
         assert!((secs - 20.0 * (1.0 - OVERCLOCK_CUT)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_charged_shield_stacks_with_overclock_but_cooldowns_dont_charge() {
+        let plain = Boons::default();
+        let charged = Boons { charged: true, ..plain };
+        let both = Boons { overclocked: true, ..charged };
+        assert_eq!(charged.shield_rate(), ARC_CHARGE);
+        assert_eq!(charged.cooldown_rate(), 1.0, "only the shield");
+        assert_eq!(both.shield_rate(), ARC_CHARGE * both.cooldown_rate());
     }
 
     /// A host running a solo session with an overclocking Engineer and a

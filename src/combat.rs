@@ -549,8 +549,9 @@ fn tick_health(time: Res<Time>, mut health: Query<(&mut Health, Option<&Boons>)>
             h.warded = (h.warded - dt).max(0.0);
         }
         h.bypass_change_detection().since_hit += dt;
-        // Overclocked, the shield starts back sooner and fills faster.
-        let rate = boons.map_or(1.0, |b| b.cooldown_rate());
+        // Overclocked or in a hacked Conductor's field, the shield starts back
+        // sooner and fills faster.
+        let rate = boons.map_or(1.0, |b| b.shield_rate());
         if h.since_hit * rate >= SHIELD_DELAY && !h.is_dead() && h.shield < h.max_shield {
             h.shield = (h.shield + SHIELD_REGEN * rate * dt).min(h.max_shield);
         }

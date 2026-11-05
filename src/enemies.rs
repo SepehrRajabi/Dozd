@@ -33,6 +33,10 @@ const HERALD_DAMAGE: f32 = 10.0;
 pub const ARC_RADIUS: f32 = 44.0;
 const ARC_DAMAGE: f32 = 3.0;
 const ARC_TICK: f32 = 0.5;
+/// How many times faster a pirate's shield comes back inside a hacked
+/// Conductor's field: the wait after a hit and the refill alike. Several
+/// fields don't stack.
+pub const ARC_CHARGE: f32 = 2.0;
 /// A Conductor's arc field, when it's the station's. A hacked one's is
 /// `HACK_COLOR`, an empowered one's `EMPOWERED_COLOR`.
 pub const ARC_COLOR: Color = Color::srgb(0.42, 0.72, 1.0);
@@ -68,7 +72,7 @@ impl Plugin for EnemiesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (think, move_enemies, enemy_deaths)
+            (think, charge_shields, move_enemies, enemy_deaths)
                 .chain()
                 .run_if(in_state(GameState::Playing))
                 .run_if(authority),
@@ -255,7 +259,7 @@ impl EnemyKind {
             Self::Warden => "Slow armoured tank. Holds its ground and fires wide spreads.",
             Self::Brute => "Hulking bruiser. Plods after you and punches hard up close.",
             Self::Herald => "Rallies on sight: a war cry that empowers guards nearby for good, or alone, a frenzy. Stun it to stop it.",
-            Self::Conductor => "Wades in inside a crackling field. Each jolt is small, but they keep coming. Stun it to cut the power.",
+            Self::Conductor => "A crackling field of small, constant jolts. Stun it to cut the power. Hacked, it refills shields faster.",
         }
     }
 
@@ -511,6 +515,23 @@ fn enemy_shot(
         look,
         pos,
     );
+}
+
+/// Marks the pirates inside a hacked Conductor's field, on the same terms it
+/// jolts the station's guards: while it's `arcing`, with walls blocking it.
+fn charge_shields(grid: Res<RoomGrid>, conductors: Query<(&Enemy, &Transform)>, mut pirates: Query<(&Transform, &Health, &mut Boons)>) {
+    let fields: Vec<Vec2> = conductors
+        .iter()
+        .filter(|(enemy, _)| enemy.hacked && enemy.look().arcing())
+        .map(|(_, transform)| transform.translation.truncate())
+        .collect();
+    for (transform, health, mut boons) in &mut pirates {
+        let at = transform.translation.truncate();
+        let charged = !health.is_dead() && fields.iter().any(|f| f.distance(at) <= ARC_RADIUS && grid.line_of_sight(*f, at));
+        if boons.charged != charged {
+            boons.charged = charged;
+        }
+    }
 }
 
 fn think(
@@ -1404,6 +1425,58 @@ mod tests {
         arena.run(40);
         assert_eq!(arena.lost(warden), 2.0 * ARC_DAMAGE, "two ticks");
         assert_eq!(arena.lost(arena.inside), 0.0);
+    }
+
+    /// Empties both pirates' shields, as if each was just hit.
+    fn drain_shields(arena: &mut Arena) {
+        for pirate in [arena.inside, arena.outside] {
+            let mut health = arena.health(pirate);
+            health.shield = 0.0;
+            health.since_hit = 0.0;
+        }
+    }
+
+    #[test]
+    fn a_hacked_conductors_field_refills_shields_twice_as_fast() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        arena.enemy(guard).hack();
+        arena.run(1);
+        assert!(arena.app.world().get::<Boons>(arena.inside).unwrap().charged);
+        assert!(!arena.app.world().get::<Boons>(arena.outside).unwrap().charged, "only inside the circle");
+        drain_shields(&mut arena);
+        // Half `SHIELD_DELAY` and a little: back already in the field, not out of it.
+        arena.run(((1.5 + 0.2) / DT) as usize);
+        let (inside, outside) = (arena.inside, arena.outside);
+        assert!(arena.health(inside).shield > 0.0, "the wait is cut");
+        assert_eq!(arena.health(outside).shield, 0.0);
+        assert_eq!(arena.lost(inside), 0.0, "and the field doesn't touch the crew");
+    }
+
+    #[test]
+    fn only_a_hacked_conductors_live_field_charges_shields() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        arena.run(1);
+        assert!(!arena.app.world().get::<Boons>(arena.inside).unwrap().charged, "the station's field just hurts");
+        arena.enemy(guard).hack();
+        arena.run(1);
+        assert!(arena.app.world().get::<Boons>(arena.inside).unwrap().charged);
+        arena.enemy(guard).stun(1.0);
+        arena.run(1);
+        assert!(!arena.app.world().get::<Boons>(arena.inside).unwrap().charged, "stunned, the power's cut");
+    }
+
+    #[test]
+    fn walls_stop_a_hacked_conductors_charge() {
+        let mut arena = Arena::new();
+        let (a, b) = walled_off(&arena.app);
+        let guard = arena.conductor(a, true);
+        arena.enemy(guard).hack();
+        let inside = arena.inside;
+        arena.put(inside, b);
+        arena.run(1);
+        assert!(!arena.app.world().get::<Boons>(inside).unwrap().charged);
     }
 
     #[test]

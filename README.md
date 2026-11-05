@@ -153,7 +153,7 @@ Built with Rust and [Bevy](https://bevyengine.org/); LAN multiplayer uses
 | ![Vault Prism](docs/screenshots/boss_prism.png) | ![Enemies](docs/screenshots/enemies.png) |
 | The Vault Prism behind its mirror shards, lashing the crew with arcs | The station's guards and vault bosses, under **EXTRAS** in the main menu |
 | ![Conductor](docs/screenshots/conductor.png) | ![Conductor fields](docs/screenshots/conductor_fields.png) |
-| A Conductor wading into the crew: every jolt is small, but they keep coming for as long as you stay in the circle | Its field in blue for the station, orange when enraged and green when hacked, zapping guards instead of the crew |
+| A Conductor wading into the crew: every jolt is small, but they keep coming for as long as you stay in the circle | Its field in blue for the station, orange when enraged and green when hacked, zapping guards instead of the crew and refilling the shields of pirates inside it twice as fast |
 
 ## Run
 
