@@ -70,9 +70,9 @@ const BEAM_CLEAR: f32 = 22.0;
 /// are dry and keep switching until one bites (the pistol never runs out).
 const STALL_TIME: f32 = 2.5;
 /// Fighting the Vault Brute, bots keep about this far from it, out of its reach.
-const BRUTE_RANGE: f32 = 120.0;
+const BRUTE_RANGE: f32 = 136.0;
 /// Closer than this to a Vault Brute, bots back straight off rather than circle.
-const BRUTE_TOO_CLOSE: f32 = 70.0;
+const BRUTE_TOO_CLOSE: f32 = 86.0;
 /// A bot this much past `BRUTE_SLAM_RADIUS` from a raised slam's spot still
 /// steps further away.
 const SLAM_CLEAR: f32 = 20.0;

@@ -111,9 +111,9 @@ const PROWL_SPEED: f32 = 48.0;
 const PROWL_NEAR: f32 = 40.0;
 const PROWL_FAR: f32 = 80.0;
 /// Seconds it prowls between lunges, plus up to `PROWL_JITTER` more.
-const PROWL_TIME: f32 = 1.4;
-const ENRAGED_PROWL_TIME: f32 = 0.9;
-const PROWL_JITTER: f32 = 0.6;
+const PROWL_TIME: f32 = 1.6;
+const ENRAGED_PROWL_TIME: f32 = 1.1;
+const PROWL_JITTER: f32 = 0.2;
 /// Seconds crouched with its routes showing before it goes.
 const WIND_UP: f32 = 0.95;
 const ENRAGED_WIND_UP: f32 = 0.75;
@@ -124,10 +124,10 @@ const ENRAGED_REVEAL: f32 = 0.35;
 /// How many straight lunges it threatens while winding up, a fresh random
 /// count each time, fanned out evenly all round it like the roots of unity
 /// (see `plan_spokes`); it takes one of them (see `pick_spoke`).
-const SPOKES: (usize, usize) = (3, 5);
-const ENRAGED_SPOKES: (usize, usize) = (4, 7);
+const SPOKES: (usize, usize) = (4, 5);
+const ENRAGED_SPOKES: (usize, usize) = (5, 6);
 /// Odds it goes down the spoke closest to a pirate; otherwise it takes any.
-const HUNT_PICK: f32 = 0.65;
+const HUNT_PICK: f32 = 0.9;
 /// The farthest a lunge reaches from its body (the vault room is 384 by 256).
 const SPOKE_REACH: f32 = 165.0;
 /// A lunge cut shorter than this by a wall doesn't read as a direction, and
@@ -173,11 +173,11 @@ const DASH_TIME: f32 = 0.8;
 /// Seconds braced at the wall between dashes, the next lane showing.
 const BRACE: f32 = 0.45;
 const ENRAGED_BRACE: f32 = 0.35;
-/// A rampage dash only roughly heads for the crew: it sets off toward a
+/// A rampage dash heads close to the crew: it sets off toward a
 /// pirate it can see swung up to `LANE_SWING` radians either way, or, with
 /// odds `WILD_LANE`, any way at all.
-const LANE_SWING: f32 = 55.0 * std::f32::consts::PI / 180.0;
-const WILD_LANE: f32 = 0.35;
+const LANE_SWING: f32 = 30.0 * std::f32::consts::PI / 180.0;
+const WILD_LANE: f32 = 0.15;
 /// A lane shorter than this ahead of it isn't worth dashing: it heads for the
 /// middle of the room instead.
 const MIN_DASH: f32 = 64.0;
@@ -192,8 +192,8 @@ const PLOD_NEAR: f32 = 26.0;
 /// It starts a flurry of `SLAMS` once a pirate it can see is this close, each
 /// landing `SLAM_AHEAD` from it in a random direction, at least `SLAM_TURN`
 /// radians round from the one before.
-const SLAM_TRIGGER: f32 = 40.0;
-const SLAM_AHEAD: f32 = 20.0;
+const SLAM_TRIGGER: f32 = 56.0;
+const SLAM_AHEAD: f32 = 28.0;
 pub const SLAMS: u8 = 3;
 const SLAM_TURN: f32 = 1.0;
 /// Seconds its fists are raised before the first slam comes down, and before
@@ -560,7 +560,7 @@ pub enum BruteState {
 }
 
 /// How far from `BruteLook::at` a Vault Brute's slam reaches.
-pub const BRUTE_SLAM_RADIUS: f32 = 32.0;
+pub const BRUTE_SLAM_RADIUS: f32 = 44.0;
 
 /// Seconds a Vault Brute stays hardened (`BruteState::Harden`): immune and healing.
 pub fn brute_harden_time(enraged: bool) -> f32 {
@@ -986,9 +986,9 @@ fn line_distance(from: Vec2, to: Vec2, at: Vec2) -> f32 {
 }
 
 /// Which of `routes` from `pos` it settles on, with pirates at `crew` right
-/// now: usually (`HUNT_PICK`) the one that passes closest to any of them, so
+/// now: nearly always (`HUNT_PICK`) the one that passes closest to any of them, so
 /// standing on a spoke is what gets you hit, right up to the reveal; else any
-/// at all, to keep it from being read. `routes` mustn't be empty.
+/// at all, so it can't be read perfectly. `routes` mustn't be empty.
 fn pick_spoke(rng: &mut Rng, pos: Vec2, routes: &[Vec<Vec2>], crew: &[Vec2]) -> usize {
     let near = |route: &[Vec2]| {
         let end = route.last().copied().unwrap_or(pos);
@@ -1028,7 +1028,7 @@ fn edge_reach(floor: Rect, p: Vec2, dir: Vec2) -> f32 {
 }
 
 /// Which way a rampage dash from `from` sets off, given a pirate at `target`:
-/// roughly their way, swung up to `LANE_SWING` either side, or now and then
+/// close to their way, swung up to `LANE_SWING` either side, or once in a while
 /// (`WILD_LANE`) any way at all.
 fn rampage_dir(rng: &mut Rng, from: Vec2, target: Vec2) -> Vec2 {
     if rng.unit() < WILD_LANE {
@@ -2492,7 +2492,7 @@ mod tests {
         let share = picks(&mut rng, &[Vec2::new(-30.0, 70.0), Vec2::new(300.0, 300.0)]);
         let want = HUNT_PICK + (1.0 - HUNT_PICK) / 3.0;
         assert!((share[1] - want).abs() < 0.03, "{share:?}");
-        assert!(share[0] > 0.05 && share[2] > 0.05, "the others still come up: {share:?}");
+        assert!(share[0] > 0.01 && share[2] > 0.01, "the others still come up: {share:?}");
         // Nobody in sight: any of them, evenly.
         let share = picks(&mut rng, &[]);
         assert!(share.iter().all(|s| (s - 1.0 / 3.0).abs() < 0.04), "{share:?}");
@@ -2508,17 +2508,17 @@ mod tests {
     }
 
     #[test]
-    fn rampage_dashes_only_roughly_head_for_the_crew() {
+    fn rampage_dashes_head_close_to_the_crew() {
         let mut rng = Rng::new(11);
         let (from, target) = (Vec2::ZERO, Vec2::new(100.0, 0.0));
         let offs: Vec<f32> = (0..2000).map(|_| rampage_dir(&mut rng, from, target).to_angle().abs()).collect();
         assert!(offs.iter().all(|a| a.is_finite()));
         let share = |test: &dyn Fn(f32) -> bool| offs.iter().filter(|a| test(**a)).count() as f32 / offs.len() as f32;
-        // Rarely dead on them, often well off, and now and then any way at all.
-        assert!(share(&|a| a < 0.05) < 0.15, "too often straight at them");
-        assert!(share(&|a| a > 0.5) > 0.4, "too rarely well off");
+        // Rarely dead on them, but mostly within the swing, and once in a while any way at all.
+        assert!(share(&|a| a < 0.05) < 0.2, "too often straight at them");
+        assert!(share(&|a| a > LANE_SWING / 2.0) > 0.3, "too rarely off to the side");
         let past = share(&|a| a > LANE_SWING + 0.01);
-        assert!(past > 0.1 && past < WILD_LANE, "wild dashes: {past}");
+        assert!(past > 0.05 && past < WILD_LANE, "wild dashes: {past}");
     }
 
     #[test]
