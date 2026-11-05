@@ -111,8 +111,8 @@ const PROWL_SPEED: f32 = 48.0;
 const PROWL_NEAR: f32 = 40.0;
 const PROWL_FAR: f32 = 80.0;
 /// Seconds it prowls between lunges, plus up to `PROWL_JITTER` more.
-const PROWL_TIME: f32 = 2.6;
-const ENRAGED_PROWL_TIME: f32 = 1.8;
+const PROWL_TIME: f32 = 1.4;
+const ENRAGED_PROWL_TIME: f32 = 0.9;
 const PROWL_JITTER: f32 = 0.6;
 /// Seconds crouched with its routes showing before it goes.
 const WIND_UP: f32 = 0.95;
@@ -1120,11 +1120,11 @@ fn summon_count(enraged: bool, alive: usize, crew: usize) -> usize {
 }
 
 /// Every kind of guard a roar can call in.
-const SUMMON_KINDS: [EnemyKind; 5] =
-    [EnemyKind::SentryDrone, EnemyKind::Stalker, EnemyKind::Warden, EnemyKind::Brute, EnemyKind::Herald];
+const SUMMON_KINDS: [EnemyKind; 6] =
+    [EnemyKind::SentryDrone, EnemyKind::Stalker, EnemyKind::Warden, EnemyKind::Brute, EnemyKind::Herald, EnemyKind::Conductor];
 
 /// Which guards a roar of `count` calls in: every kind in turn, in a random
-/// order, so a roar of five or more brings one of each.
+/// order, so a roar of six or more brings one of each.
 fn summon_kinds(rng: &mut Rng, count: usize) -> Vec<EnemyKind> {
     let mut kinds = SUMMON_KINDS;
     for i in (1..kinds.len()).rev() {
@@ -2538,7 +2538,8 @@ mod tests {
             assert_eq!(kinds.len(), count);
             for kind in SUMMON_KINDS {
                 let n = kinds.iter().filter(|k| **k == kind).count();
-                assert!(n == count / 5 || n == count / 5 + 1, "{count} guards bring {n} of {kind:?}");
+                let even = count / SUMMON_KINDS.len();
+                assert!(n == even || n == even + 1, "{count} guards bring {n} of {kind:?}");
             }
         }
     }

@@ -122,6 +122,14 @@ impl Health {
     /// Like `hurt`, but says how much shield and hull the hit actually took:
     /// never more than was left, so overkill doesn't count. `None` if ignored.
     pub fn hurt_for(&mut self, damage: f32) -> Option<f32> {
+        let dealt = self.jolt(damage)?;
+        self.invulnerable = self.grace;
+        Some(dealt)
+    }
+
+    /// Like `hurt_for`, for damage that keeps coming: it opens no grace period,
+    /// or standing in it would make a pirate immune to every bullet and lunge.
+    pub fn jolt(&mut self, damage: f32) -> Option<f32> {
         if self.invulnerable > 0.0 || self.warded > 0.0 || self.is_dead() {
             return None;
         }
@@ -137,7 +145,6 @@ impl Health {
         self.shield_hit = absorbed >= damage;
         self.since_hit = 0.0;
         self.flash = 0.12;
-        self.invulnerable = self.grace;
         self.taken += dealt;
         Some(dealt)
     }
@@ -1019,6 +1026,16 @@ fn float_popups(
 
 /// Shakes the camera whenever this machine's pirate loses shield or hull,
 /// however the damage arrived (locally or via replication).
+/// A hit this big, or bigger, jars the screen fully.
+const FULL_JAR_DAMAGE: f32 = 8.0;
+
+/// How hard a hit of `damage` jars the screen, 0..1. The small ones are felt,
+/// but a Conductor's jolts mustn't rattle and flash it like gunfire for as
+/// long as you stand in its field.
+pub fn hit_weight(damage: f32) -> f32 {
+    (damage / FULL_JAR_DAMAGE).clamp(0.0, 1.0)
+}
+
 fn shake_on_local_damage(
     mut shake: ResMut<Shake>,
     player: Option<Single<&Health, With<LocalPlayer>>>,
@@ -1032,7 +1049,7 @@ fn shake_on_local_damage(
     if let Some(previous) = *last
         && total < previous - 0.5
     {
-        shake.add(0.45);
+        shake.add(0.45 * hit_weight(previous - total));
     }
     *last = Some(total);
 }
@@ -1074,6 +1091,43 @@ mod tests {
             let health = app.world().entity(entity).get_ref::<Health>().expect("still there");
             assert_eq!(health.last_changed(), tick, "an unhurt guard's health was marked changed");
         }
+    }
+
+    #[test]
+    fn a_jolt_hurts_like_a_hit_but_opens_no_grace() {
+        let mut health = Health::new(100.0, 0.5).with_shield(4.0);
+        health.since_hit = 2.0;
+        assert_eq!(health.jolt(3.0), Some(3.0));
+        assert_eq!((health.shield, health.current, health.taken), (1.0, 100.0, 3.0), "shield first");
+        assert!(health.shield_hit);
+        assert_eq!(health.since_hit, 0.0, "staying in it keeps the shield from refilling");
+        assert_eq!(health.flash, 0.12);
+        assert_eq!(health.invulnerable, 0.0);
+        assert_eq!(health.jolt(3.0), Some(3.0));
+        assert_eq!((health.shield, health.current, health.taken), (0.0, 98.0, 6.0));
+        assert_eq!(health.jolt(5000.0), Some(98.0), "only what was left, not the overkill");
+        assert_eq!(health.taken, 104.0);
+        assert_eq!(health.jolt(3.0), None, "dead");
+        assert_eq!(health.taken, 104.0);
+
+        let ignored: [fn(&mut Health); 3] = [|h| h.warded = 1.0, |h| h.invulnerable = 1.0, |h| h.negating = true];
+        for ignore in ignored {
+            let mut health = Health::new(100.0, 0.0);
+            ignore(&mut health);
+            assert_eq!(health.jolt(10.0), None);
+            assert_eq!((health.current, health.taken), (100.0, 0.0));
+        }
+        let mut aegis = Health::new(100.0, 0.5);
+        aegis.negating = true;
+        aegis.jolt(10.0);
+        assert_eq!(aegis.flash, 0.12, "shrugged off, but seen to land");
+        assert_eq!(aegis.invulnerable, 0.0);
+
+        // A real hit still opens its grace, and a jolt doesn't cut through it.
+        let mut health = Health::new(100.0, 0.5);
+        assert_eq!(health.hurt_for(10.0), Some(10.0));
+        assert_eq!(health.invulnerable, 0.5);
+        assert_eq!(health.jolt(3.0), None);
     }
 
     #[test]

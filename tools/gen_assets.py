@@ -604,6 +604,34 @@ ENEMIES = {
             "M": rgb(160, 165, 180),
         },
     ),
+    # Walking generator: twin prongs off its shoulders and a coil in its chest.
+    "conductor": (
+        [
+            "..kWk......kWk..",
+            "..kBk.kkkk.kBk..",
+            "..kbkkSSSSkkbk..",
+            "..kSkSBWWBSkSk..",
+            "..kSkkDDDDkkSk..",
+            ".kSSSkkkkkkSSSk.",
+            "kSDDDkbBBbkDDDSk",
+            "kDDDkBWWWWBkDDDk",
+            "kDDdkbBBBBbkdDDk",
+            "kDdkkkkkkkkkkdDk",
+            "kSSk.kDddDk.kSSk",
+            "kkkk.kDddDk.kkkk",
+            "....kDDkkDDk....",
+            "....kDDkkDDk....",
+            "...kkkkkkkkkk...",
+        ],
+        {
+            "D": rgb(62, 70, 92),
+            "d": rgb(38, 44, 62),
+            "S": rgb(118, 128, 150),
+            "b": rgb(58, 112, 190),
+            "B": rgb(107, 184, 255),
+            "W": rgb(225, 242, 255),
+        },
+    ),
 }
 
 

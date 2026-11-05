@@ -1,8 +1,8 @@
-//! The soft rings drawn on the floor around a pirate: how far a class aura
-//! reaches, or a perk's field. Each is a thin pixel line with a faint glow
-//! rising toward it from inside, drawn by `shaders/aura_ring.wgsl`. Rings of
-//! a pirate's that share a radius split the circle into equal arcs, one each,
-//! and spin together so every one of them still shows.
+//! The soft rings drawn on the floor around someone: how far a class aura
+//! reaches, a perk's field, or a Conductor's. Each is a thin pixel line with a
+//! faint glow rising toward it from inside, drawn by `shaders/aura_ring.wgsl`.
+//! Rings of a pirate's that share a radius split the circle into equal arcs,
+//! one each, and spin together so every one of them still shows.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};

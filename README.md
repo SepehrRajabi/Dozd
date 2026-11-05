@@ -40,7 +40,7 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   gathers a nova orb in its palm and hurls it, arcing at whoever it passes and
   bursting on impact. Enraged, both hands attack at once and faster, lasers
   sweep wider and novas come in threes.
-- **Vault Stalker:** a hulking stalker. Every 2-3 s it crouches and fans out
+- **Vault Stalker:** a hulking stalker. Every 1-2 s it crouches and fans out
   its possible lunges evenly all around it, like the spokes of a wheel: three
   to five of them (four to seven enraged), one always aimed at a pirate. Each
   spoke shows as a corridor exactly as wide as the lunge hits, with a fuse

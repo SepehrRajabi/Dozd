@@ -28,6 +28,14 @@ const BRUTE_DAMAGE: f32 = 20.0;
 const STALKER_DAMAGE: f32 = 25.0;
 /// A Herald's rifle shot.
 const HERALD_DAMAGE: f32 = 10.0;
+/// How far a Conductor's arc field reaches, walls blocking it, and how much it
+/// hurts everyone inside it each `ARC_TICK` seconds.
+pub const ARC_RADIUS: f32 = 44.0;
+const ARC_DAMAGE: f32 = 3.0;
+const ARC_TICK: f32 = 0.5;
+/// A Conductor's arc field, when it's the station's. A hacked one's is
+/// `HACK_COLOR`, an empowered one's `EMPOWERED_COLOR`.
+pub const ARC_COLOR: Color = Color::srgb(0.42, 0.72, 1.0);
 /// A hacked guard fights only what comes this close to the pirate nearest it,
 /// heads back once it's `LEASH` from them, and with nothing to fight keeps
 /// within `FOLLOW` of them.
@@ -90,6 +98,9 @@ pub enum EnemyKind {
     /// Station officer with a rifle. Meeting the crew, it rallies: a war cry
     /// that empowers the guards around it for good, or, alone, a frenzy.
     Herald,
+    /// Walking generator: wades into the crew inside a field of electricity
+    /// that keeps hurting whoever stays in it.
+    Conductor,
 }
 
 /// Which way a Herald's rally went.
@@ -176,6 +187,18 @@ const HERALD: EnemyStats = EnemyStats {
     bounty: (35, 60),
 };
 
+const CONDUCTOR: EnemyStats = EnemyStats {
+    sprite: "sprites/enemies/conductor.png",
+    health: 130.0,
+    speed: 32.0,
+    hurtbox: 7.0,
+    half: 4.5,
+    sight: 110.0,
+    knockback_taken: 0.3,
+    death_color: Color::srgb(0.42, 0.72, 1.0),
+    bounty: (35, 60),
+};
+
 impl EnemyKind {
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
@@ -184,6 +207,7 @@ impl EnemyKind {
             'h' => Self::Warden,
             'b' => Self::Brute,
             'g' => Self::Herald,
+            'z' => Self::Conductor,
             _ => return None,
         })
     }
@@ -195,10 +219,11 @@ impl EnemyKind {
             Self::Warden => &WARDEN,
             Self::Brute => &BRUTE,
             Self::Herald => &HERALD,
+            Self::Conductor => &CONDUCTOR,
         }
     }
 
-    pub const ALL: [EnemyKind; 5] = [Self::SentryDrone, Self::Stalker, Self::Warden, Self::Brute, Self::Herald];
+    pub const ALL: [EnemyKind; 6] = [Self::SentryDrone, Self::Stalker, Self::Warden, Self::Brute, Self::Herald, Self::Conductor];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -207,6 +232,7 @@ impl EnemyKind {
             Self::Warden => "WARDEN",
             Self::Brute => "BRUTE",
             Self::Herald => "HERALD",
+            Self::Conductor => "CONDUCTOR",
         }
     }
 
@@ -217,6 +243,7 @@ impl EnemyKind {
             Self::Stalker | Self::Brute => "MELEE",
             Self::Warden => "HEAVY",
             Self::Herald => "SUPPORT",
+            Self::Conductor => "AREA",
         }
     }
 
@@ -228,6 +255,7 @@ impl EnemyKind {
             Self::Warden => "Slow armoured tank. Holds its ground and fires wide spreads.",
             Self::Brute => "Hulking bruiser. Plods after you and punches hard up close.",
             Self::Herald => "Rallies on sight: a war cry that empowers guards nearby for good, or alone, a frenzy. Stun it to stop it.",
+            Self::Conductor => "Wades in inside a crackling field. Each jolt is small, but they keep coming. Stun it to cut the power.",
         }
     }
 
@@ -271,6 +299,13 @@ pub struct EnemyLook {
     pub frenzied: bool,
     /// A Hacker nearby is jamming it.
     pub jammed: bool,
+}
+
+impl EnemyLook {
+    /// A Conductor whose arc field is up: awake and not stunned.
+    pub fn arcing(&self) -> bool {
+        self.kind == EnemyKind::Conductor && self.state != AiState::Idle && !self.stunned
+    }
 }
 
 /// Host-only AI state.
@@ -641,6 +676,38 @@ fn think(
                 .copied()
         };
         let foes = if hacked { &station } else { &crew };
+        // A Conductor's field runs whatever it's doing, a hacked one's too with
+        // nothing in reach to fight or the crew to catch up to: no target, no
+        // matter. `EnemyLook::arcing` draws it on the same terms.
+        if enemy.kind == EnemyKind::Conductor && enemy.state == AiState::Hunt && enemy.attack_cooldown <= 0.0 {
+            enemy.attack_cooldown = ARC_TICK;
+            let color = if hacked {
+                HACK_COLOR
+            } else if enemy.empowered {
+                EMPOWERED_COLOR
+            } else {
+                ARC_COLOR
+            };
+            let inside = foes
+                .iter()
+                .filter(|(e, at)| *e != entity && at.distance(pos) <= ARC_RADIUS && grid.line_of_sight(pos, *at));
+            for &(foe, at) in inside {
+                if whiffs(&mut rng, jammed) {
+                    fx(&mut commands, FxKind::Spark, at, 0.0, HACK_COLOR);
+                    continue;
+                }
+                let landed = match victims.get_mut(foe) {
+                    Ok((_, _, mut health, ..)) => health.jolt(ARC_DAMAGE * power).is_some(),
+                    Err(_) => {
+                        bites.push((foe, ARC_DAMAGE * power));
+                        true
+                    }
+                };
+                if landed {
+                    fx(&mut commands, FxKind::Zap(at), pos, 0.0, color);
+                }
+            }
+        }
         let Some((target_entity, target)) = nearest(foes).filter(|_| !strayed) else {
             enemy.velocity = match leader.filter(|_| hacked) {
                 // A hacked enemy with nothing near to fight tags along with the crew.
@@ -851,6 +918,11 @@ fn think(
                     enemy.state = AiState::Hunt;
                     enemy.attack_cooldown = 0.4;
                 }
+            }
+
+            // Its field does the rest; it only has to press in close, not shove.
+            (EnemyKind::Conductor, AiState::Hunt) => {
+                enemy.velocity = if los && dist < ARC_RADIUS * 0.5 { Vec2::ZERO } else { chase * stats.speed };
             }
 
             (_, state) => {
@@ -1068,17 +1140,326 @@ pub fn roll_reinforcement(rng: &mut Rng, alarm_level: f32) -> EnemyKind {
     let r = rng.unit();
     let warden = 0.08 * alarm_level;
     let brute = 0.06 * alarm_level;
-    // Heralds come with the reinforcements, to rally them.
+    // Heralds come with the reinforcements, to rally them, Conductors to pin the
+    // crew down for them.
     let herald = 0.05 + 0.03 * alarm_level;
+    let conductor = 0.04 + 0.02 * alarm_level;
     if r < warden {
         EnemyKind::Warden
     } else if r < warden + brute {
         EnemyKind::Brute
     } else if r < warden + brute + herald {
         EnemyKind::Herald
-    } else if r < warden + brute + herald + 0.4 {
+    } else if r < warden + brute + herald + conductor {
+        EnemyKind::Conductor
+    } else if r < warden + brute + herald + conductor + 0.4 {
         EnemyKind::Stalker
     } else {
         EnemyKind::SentryDrone
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+    use crate::GamePlugins;
+    use crate::class::{Loadout, Loadouts, PirateClass};
+    use crate::combat::Fx;
+    use crate::deckgen::{COLS, ROWS};
+    use crate::net::{HOST_ID, NetMode, StartSession};
+    use crate::player::CrewSize;
+    use crate::room::NextSeed;
+
+    const DT: f32 = 1.0 / 60.0;
+    /// Room for a guard or a pirate.
+    const CLEAR: Vec2 = Vec2::splat(6.0);
+
+    /// Arcs shown so far.
+    #[derive(Resource, Default)]
+    struct Zaps(u32);
+
+    /// A solo heist with the deck's guards cleared out, and two pirates either
+    /// side of `centre`, on open floor in the arrival room, where no perks lie
+    /// around to change the sums: `inside` a Conductor's reach of it, `outside`
+    /// beyond it. The first wave comes 8 s after a guard spots them, well after
+    /// any test here is done.
+    struct Arena {
+        app: App,
+        centre: Vec2,
+        inside: Entity,
+        outside: Entity,
+    }
+
+    impl Arena {
+        fn new() -> Self {
+            let mut app = App::new();
+            let loadouts = [HOST_ID, HOST_ID + 1].map(|id| (id, Loadout::new(PirateClass::Gunner)));
+            app.add_plugins((MinimalPlugins, StatesPlugin))
+                .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(DT)))
+                .add_plugins(GamePlugins)
+                .insert_resource(CrewSize(2))
+                .insert_resource(Loadouts(loadouts.into_iter().collect()))
+                .insert_resource(NextSeed(7))
+                .insert_resource(Rng::new(7))
+                .init_resource::<Zaps>()
+                .add_observer(|fx: On<Fx>, mut zaps: ResMut<Zaps>| {
+                    if matches!(fx.kind, FxKind::Zap(_)) {
+                        zaps.0 += 1;
+                    }
+                });
+            // Only a real run does this, and it's what wires up effects like `Fx`.
+            app.finish();
+            app.world_mut().trigger(StartSession(NetMode::Solo));
+            for _ in 0..5 {
+                app.update();
+            }
+            assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+
+            let mut guards = app.world_mut().query_filtered::<Entity, With<Enemy>>();
+            for guard in guards.iter(app.world()).collect::<Vec<_>>() {
+                app.world_mut().despawn(guard);
+            }
+            let grid = app.world().resource::<RoomGrid>();
+            let centre = floor(grid)
+                .into_iter()
+                .find(|c| {
+                    [-60.0, -40.0, -20.0, 20.0, 30.0].iter().all(|x| {
+                        let spot = *c + Vec2::X * *x;
+                        !grid.collides(spot, CLEAR) && grid.line_of_sight(*c, spot)
+                    })
+                })
+                .expect("a clear run of floor");
+            let mut pirates = app.world_mut().query::<(Entity, &Player)>();
+            let (mut inside, mut outside) = (None, None);
+            for (entity, player) in pirates.iter(app.world()) {
+                *(if player.owner == HOST_ID { &mut inside } else { &mut outside }) = Some(entity);
+            }
+            let (inside, outside) = (inside.expect("a pirate"), outside.expect("a pirate"));
+            let mut arena = Self { app, centre, inside, outside };
+            arena.put(inside, centre + Vec2::X * 30.0);
+            arena.put(outside, centre - Vec2::X * 60.0);
+            arena
+        }
+
+        fn put(&mut self, entity: Entity, at: Vec2) {
+            let mut transform = self.app.world_mut().get_mut::<Transform>(entity).unwrap();
+            transform.translation.x = at.x;
+            transform.translation.y = at.y;
+        }
+
+        /// A Conductor at `at`, its field due to go off the first frame it's up.
+        fn conductor(&mut self, at: Vec2, alerted: bool) -> Entity {
+            let guard = spawn_enemy(&mut self.app.world_mut().commands(), EnemyKind::Conductor, at, alerted);
+            self.app.world_mut().flush();
+            self.enemy(guard).attack_cooldown = 0.0;
+            guard
+        }
+
+        /// A Warden frozen at `at`, to be hit and hit nothing back.
+        fn target(&mut self, at: Vec2) -> Entity {
+            let guard = spawn_enemy(&mut self.app.world_mut().commands(), EnemyKind::Warden, at, true);
+            self.app.world_mut().flush();
+            self.enemy(guard).stun(1000.0);
+            guard
+        }
+
+        fn enemy(&mut self, guard: Entity) -> Mut<'_, Enemy> {
+            self.app.world_mut().get_mut::<Enemy>(guard).unwrap()
+        }
+
+        fn health(&mut self, entity: Entity) -> Mut<'_, Health> {
+            self.app.world_mut().get_mut::<Health>(entity).unwrap()
+        }
+
+        fn lost(&mut self, entity: Entity) -> f32 {
+            self.health(entity).taken
+        }
+
+        fn run(&mut self, frames: usize) {
+            for _ in 0..frames {
+                self.app.update();
+            }
+        }
+    }
+
+    /// Open tiles, nearest the crew's arrival first.
+    fn floor(grid: &RoomGrid) -> Vec<Vec2> {
+        let mut tiles: Vec<Vec2> = (0..ROWS)
+            .flat_map(|row| (0..COLS).map(move |col| (col, row)))
+            .map(|(col, row)| grid.tile_center(col, row))
+            .filter(|p| !grid.collides(*p, CLEAR))
+            .collect();
+        tiles.sort_by(|a, b| a.distance(grid.crew_spawn).total_cmp(&b.distance(grid.crew_spawn)));
+        tiles
+    }
+
+    /// Two open spots in reach of each other but for a wall between them.
+    fn walled_off(app: &App) -> (Vec2, Vec2) {
+        let grid = app.world().resource::<RoomGrid>();
+        let tiles = floor(grid);
+        tiles
+            .iter()
+            .flat_map(|a| tiles.iter().map(move |b| (*a, *b)))
+            .find(|(a, b)| a.distance(*b) <= ARC_RADIUS && !grid.line_of_sight(*a, *b))
+            .expect("a wall on the deck")
+    }
+
+    #[test]
+    fn the_field_keeps_hurting_whoever_stays_inside() {
+        let mut arena = Arena::new();
+        arena.conductor(arena.centre, true);
+        let (inside, outside) = (arena.inside, arena.outside);
+        let health = |arena: &mut Arena| {
+            let h = arena.health(inside);
+            h.current + h.shield
+        };
+        let start = health(&mut arena);
+        let mut jolts = 0;
+        // Past `SHIELD_DELAY`, so a shield refilling under it would show.
+        for _ in 0..240 {
+            let before = arena.lost(inside);
+            arena.run(1);
+            let dealt = arena.lost(inside) - before;
+            if dealt > 0.0 {
+                assert_eq!(dealt, ARC_DAMAGE);
+                jolts += 1;
+            }
+        }
+        // One at once, then one every half a second, give or take a frame.
+        assert_eq!(jolts, 8);
+        assert_eq!(start - health(&mut arena), 8.0 * ARC_DAMAGE, "and the shield never got back");
+        assert_eq!(arena.lost(outside), 0.0, "out of reach");
+    }
+
+    #[test]
+    fn a_jolt_leaves_a_pirate_open_to_other_hits() {
+        let mut arena = Arena::new();
+        arena.conductor(arena.centre, true);
+        let inside = arena.inside;
+        for _ in 0..90 {
+            arena.run(1);
+            assert_eq!(arena.health(inside).invulnerable, 0.0, "jolts must grant no grace");
+        }
+        assert!(arena.lost(inside) > 0.0);
+        assert!(arena.health(inside).hurt(10.0), "a bullet still lands");
+    }
+
+    #[test]
+    fn a_stunned_conductor_cuts_the_power() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        arena.enemy(guard).stun(1000.0);
+        let inside = arena.inside;
+        arena.run(120);
+        assert_eq!(arena.lost(inside), 0.0);
+        assert!(!arena.app.world().get::<EnemyLook>(guard).unwrap().arcing(), "and it looks it");
+        arena.enemy(guard).stun = 0.0;
+        arena.run(2);
+        assert_eq!(arena.lost(inside), ARC_DAMAGE, "back on");
+        assert!(arena.app.world().get::<EnemyLook>(guard).unwrap().arcing());
+    }
+
+    #[test]
+    fn a_sleeping_conductor_has_no_field() {
+        let mut arena = Arena::new();
+        // Anyone it can see wakes it, so nobody sits unseen in the open: only
+        // a timer left overdue shows the field isn't ticking.
+        let (near, far) = walled_off(&arena.app);
+        let guard = arena.conductor(near, false);
+        arena.enemy(guard).attack_cooldown = -1.0;
+        let (inside, outside) = (arena.inside, arena.outside);
+        arena.put(inside, far);
+        arena.put(outside, far);
+        arena.run(10);
+        assert_eq!(arena.enemy(guard).state, AiState::Idle);
+        assert!(arena.enemy(guard).attack_cooldown < 0.0, "no tick while it sleeps");
+        assert!(!arena.app.world().get::<EnemyLook>(guard).unwrap().arcing());
+    }
+
+    #[test]
+    fn walls_block_the_field() {
+        let mut arena = Arena::new();
+        let (near, far) = walled_off(&arena.app);
+        let guard = arena.conductor(near, true);
+        let (inside, outside) = (arena.inside, arena.outside);
+        arena.put(inside, far);
+        arena.put(outside, far);
+        arena.run(1);
+        assert!(arena.enemy(guard).attack_cooldown > 0.0, "it did tick");
+        assert_eq!(arena.lost(inside) + arena.lost(outside), 0.0);
+    }
+
+    #[test]
+    fn a_hacked_conductor_hurts_the_station_and_not_the_crew() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        arena.enemy(guard).hack();
+        arena.enemy(guard).attack_cooldown = 0.0;
+        let warden = arena.target(arena.centre - Vec2::X * 30.0);
+        arena.run(40);
+        assert_eq!(arena.lost(warden), 2.0 * ARC_DAMAGE, "two ticks");
+        assert_eq!(arena.lost(arena.inside), 0.0);
+    }
+
+    #[test]
+    fn a_hacked_conductor_catching_up_with_the_crew_still_arcs() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        arena.enemy(guard).hack();
+        arena.enemy(guard).attack_cooldown = 0.0;
+        let warden = arena.target(arena.centre - Vec2::X * 30.0);
+        // Past `LEASH`, so it has no target: the circle on screen still counts.
+        let (inside, outside) = (arena.inside, arena.outside);
+        arena.put(inside, arena.centre + Vec2::Y * 2000.0);
+        arena.put(outside, arena.centre + Vec2::Y * 2000.0);
+        arena.run(1);
+        assert_eq!(arena.lost(warden), ARC_DAMAGE);
+    }
+
+    #[test]
+    fn a_station_conductor_spares_its_own() {
+        let mut arena = Arena::new();
+        arena.conductor(arena.centre, true);
+        // Close enough that it stands its ground.
+        let inside = arena.inside;
+        arena.put(inside, arena.centre + Vec2::X * 20.0);
+        let ally = arena.target(arena.centre - Vec2::X * 20.0);
+        let turned = arena.target(arena.centre - Vec2::X * 40.0);
+        arena.enemy(turned).hack();
+        arena.run(40);
+        assert_eq!(arena.lost(inside), 2.0 * ARC_DAMAGE);
+        assert_eq!(arena.lost(ally), 0.0, "no friendly fire");
+        assert_eq!(arena.lost(turned), 2.0 * ARC_DAMAGE, "a turned guard is fair game");
+    }
+
+    #[test]
+    fn a_warded_pirate_draws_no_arc() {
+        let mut arena = Arena::new();
+        let guard = arena.conductor(arena.centre, true);
+        let inside = arena.inside;
+        arena.health(inside).warded = 1000.0;
+        // The arc reaches this machine a frame after it's sent.
+        arena.run(2);
+        assert_eq!(arena.lost(inside), 0.0);
+        assert_eq!(arena.app.world().resource::<Zaps>().0, 0);
+        arena.health(inside).warded = 0.0;
+        arena.enemy(guard).attack_cooldown = 0.0;
+        arena.run(2);
+        assert_eq!(arena.lost(inside), ARC_DAMAGE);
+        assert_eq!(arena.app.world().resource::<Zaps>().0, 1);
+    }
+
+    #[test]
+    fn conductors_come_with_the_reinforcements() {
+        let mut rng = Rng::new(9);
+        let rolls = 10_000;
+        let conductors = (0..rolls).filter(|_| roll_reinforcement(&mut rng, 2.0) == EnemyKind::Conductor).count();
+        // 0.04 + 0.02 * 2 of them.
+        assert!((700..900).contains(&conductors), "{conductors} of {rolls}");
     }
 }

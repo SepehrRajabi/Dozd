@@ -113,8 +113,8 @@ fn loot_table(deck: u8) -> &'static [(char, u32)] {
     }
 }
 
-/// Drones thin out and wardens, brutes and heralds take over the deeper you go.
-fn guard_table(deck: u8) -> [(char, u32); 5] {
+/// Drones thin out and wardens, brutes, heralds and conductors take over the deeper you go.
+fn guard_table(deck: u8) -> [(char, u32); 6] {
     let deck = deck as u32;
     [
         ('d', 5u32.saturating_sub(deck).max(1)),
@@ -122,6 +122,7 @@ fn guard_table(deck: u8) -> [(char, u32); 5] {
         ('h', 1 + 3 * deck / 2),
         ('b', 1 + deck),
         ('g', 1 + deck),
+        ('z', 1 + deck),
     ]
 }
 

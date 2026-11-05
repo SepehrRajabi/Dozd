@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 
-use crate::combat::Health;
+use crate::combat::{Health, hit_weight};
 use crate::net::LocalPlayer;
 use crate::{GameState, Hud};
 
@@ -538,9 +538,10 @@ fn draw_vignette(
     mut flash: Local<f32>,
 ) {
     let dt = time.delta_secs();
+    let max = player.as_ref().map_or(1.0, |h| h.max);
     let hull = player.map_or(1.0, |h| if h.is_dead() { 1.0 } else { (h.current / h.max).clamp(0.0, 1.0) });
     if hull < *last_hull {
-        *flash = 1.0;
+        *flash = flash.max(hit_weight((*last_hull - hull) * max));
     }
     *last_hull = hull;
     *flash = (*flash - 2.5 * dt).max(0.0);

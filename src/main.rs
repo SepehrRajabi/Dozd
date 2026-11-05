@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod abilities;
+mod arc_view;
 mod boss;
 mod boss_view;
 mod breach;
@@ -200,6 +201,7 @@ impl Plugin for ViewPlugins {
                 boss_view::BossViewPlugin,
                 mine_view::MineViewPlugin,
                 ring_view::RingViewPlugin,
+                arc_view::ArcViewPlugin,
             ),
         ));
     }
