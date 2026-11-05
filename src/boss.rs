@@ -123,9 +123,11 @@ const REVEAL: f32 = 0.45;
 const ENRAGED_REVEAL: f32 = 0.35;
 /// How many straight lunges it threatens while winding up, a fresh random
 /// count each time, fanned out evenly all round it like the roots of unity
-/// (see `plan_spokes`); it takes one at random.
+/// (see `plan_spokes`); it takes one of them (see `pick_spoke`).
 const SPOKES: (usize, usize) = (3, 5);
 const ENRAGED_SPOKES: (usize, usize) = (4, 7);
+/// Odds it goes down the spoke closest to a pirate; otherwise it takes any.
+const HUNT_PICK: f32 = 0.65;
 /// The farthest a lunge reaches from its body (the vault room is 384 by 256).
 const SPOKE_REACH: f32 = 165.0;
 /// A lunge cut shorter than this by a wall doesn't read as a direction, and
@@ -147,7 +149,7 @@ const LUNGE_REACH: f32 = 4.0;
 /// stays outside this is missed.
 pub const LUNGE_SWEEP: f32 = KEEPER_HALF + LUNGE_REACH;
 /// A lunge's damage to each pirate it goes through (once each), and how hard it throws them.
-const LUNGE_HIT: f32 = 48.0;
+const LUNGE_HIT: f32 = 54.0;
 const LUNGE_KNOCKBACK: f32 = 200.0;
 /// Seconds spent after a lunge, open to punishment; longer after a rampage,
 /// and longer still if a riot shield stopped it, throwing it back `REBOUND` pixels.
@@ -180,7 +182,7 @@ const WILD_LANE: f32 = 0.35;
 /// middle of the room instead.
 const MIN_DASH: f32 = 64.0;
 /// A dash's damage to each pirate it touches (once each per dash), and how hard it throws them.
-const DASH_HIT: f32 = 75.0;
+const DASH_HIT: f32 = 85.0;
 const DASH_KNOCKBACK: f32 = 330.0;
 
 /// The vault brute's plodding pace: slower than the stalker prowls, faster
@@ -977,6 +979,28 @@ fn plan_spokes(room: Rect, half: Vec2, pos: Vec2, crew: &[Vec2], count: usize, b
         .collect()
 }
 
+/// How near `at` comes to the straight line from `from` to `to`.
+fn line_distance(from: Vec2, to: Vec2, at: Vec2) -> f32 {
+    let along = (at - from).dot(to - from) / (to - from).length_squared().max(1e-6);
+    at.distance(from.lerp(to, along.clamp(0.0, 1.0)))
+}
+
+/// Which of `routes` from `pos` it settles on, with pirates at `crew` right
+/// now: usually (`HUNT_PICK`) the one that passes closest to any of them, so
+/// standing on a spoke is what gets you hit, right up to the reveal; else any
+/// at all, to keep it from being read. `routes` mustn't be empty.
+fn pick_spoke(rng: &mut Rng, pos: Vec2, routes: &[Vec<Vec2>], crew: &[Vec2]) -> usize {
+    let near = |route: &[Vec2]| {
+        let end = route.last().copied().unwrap_or(pos);
+        crew.iter().map(|at| line_distance(pos, end, *at)).fold(f32::INFINITY, f32::min)
+    };
+    if !crew.is_empty() && rng.unit() < HUNT_PICK {
+        let closest = (0..routes.len()).min_by(|a, b| near(&routes[*a]).total_cmp(&near(&routes[*b])));
+        return closest.unwrap_or(0);
+    }
+    roll(rng, routes.len())
+}
+
 /// How many spokes a wind-up shows: a fresh random count in `SPOKES` (or
 /// `ENRAGED_SPOKES`), both ends included.
 fn spoke_count(rng: &mut Rng, enraged: bool) -> usize {
@@ -1622,7 +1646,7 @@ fn drive_stalker(
                 state = StalkerState::Prowl;
             } else if chosen.is_none() && brain.timer >= wind_up - stalker_reveal(enraged) {
                 // Only now does anyone find out which way it's going, with a moment to get clear.
-                chosen = Some(roll(&mut rng, routes.len()) as u8);
+                chosen = Some(pick_spoke(&mut rng, pos, &routes, &spots) as u8);
             }
             if !routes.is_empty() && brain.timer >= wind_up {
                 let pick = chosen.map_or(0, usize::from).min(routes.len() - 1);
@@ -2450,6 +2474,37 @@ mod tests {
             }
         }
         assert_eq!(MAX_LUNGES, 2, "one more at most");
+    }
+
+    #[test]
+    fn it_usually_takes_the_spoke_nearest_the_crew_but_not_always() {
+        let pos = Vec2::ZERO;
+        let routes = vec![vec![Vec2::new(100.0, 0.0)], vec![Vec2::new(-50.0, 87.0)], vec![Vec2::new(-50.0, -87.0)]];
+        let mut rng = Rng::new(5);
+        let picks = |rng: &mut Rng, crew: &[Vec2]| {
+            let mut counts = [0usize; 3];
+            for _ in 0..3000 {
+                counts[pick_spoke(rng, pos, &routes, crew)] += 1;
+            }
+            counts.map(|c| c as f32 / 3000.0)
+        };
+        // Beside the second spoke, a little off it: that's the one it hunts.
+        let share = picks(&mut rng, &[Vec2::new(-30.0, 70.0), Vec2::new(300.0, 300.0)]);
+        let want = HUNT_PICK + (1.0 - HUNT_PICK) / 3.0;
+        assert!((share[1] - want).abs() < 0.03, "{share:?}");
+        assert!(share[0] > 0.05 && share[2] > 0.05, "the others still come up: {share:?}");
+        // Nobody in sight: any of them, evenly.
+        let share = picks(&mut rng, &[]);
+        assert!(share.iter().all(|s| (s - 1.0 / 3.0).abs() < 0.04), "{share:?}");
+    }
+
+    #[test]
+    fn line_distance_stops_at_the_ends() {
+        let (from, to) = (Vec2::ZERO, Vec2::new(10.0, 0.0));
+        assert_eq!(line_distance(from, to, Vec2::new(5.0, 3.0)), 3.0);
+        assert_eq!(line_distance(from, to, Vec2::new(14.0, 3.0)), 5.0);
+        assert_eq!(line_distance(from, to, Vec2::new(-3.0, 4.0)), 5.0);
+        assert_eq!(line_distance(from, from, Vec2::new(0.0, 2.0)), 2.0, "a stub is a point");
     }
 
     #[test]

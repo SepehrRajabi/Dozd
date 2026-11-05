@@ -45,8 +45,9 @@ Four kinds of boss take turns down the decks, so a heist meets three of them:
   to five of them (four to seven enraged), one always aimed at a pirate. Each
   spoke shows as a corridor exactly as wide as the lunge hits, with a fuse
   burning along it that reaches the far end the moment it goes. About half a
-  second before it goes (a third enraged) it picks one at random: that spoke
-  turns white-hot and the rest fade. Then it lunges along it, hitting hard and
+  second before it goes (a third enraged) it picks one, usually whichever
+  passes closest to a pirate right then: that spoke turns white-hot and the
+  rest fade. Then it lunges along it, hitting hard and
   throwing pirates aside, and half the time (three in four enraged) it
   crouches and fans out again from where it landed for a second lunge. Now and
   then it rampages instead: it rears up, then dashes wall to wall across the
