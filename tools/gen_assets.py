@@ -5,12 +5,14 @@ Run from the repo root:  python3 tools/gen_assets.py
 """
 
 import math
-import os
 import struct
 import zlib
+from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = os.path.join(os.path.dirname(__file__), "..", "assets", "sprites")
+REPO = Path(__file__).resolve().parent.parent
+ROOT = REPO / "assets" / "sprites"
+PREVIEW = REPO / "docs" / "preview"
 SIZE = 16
 
 OUTLINE = (20, 18, 30, 255)
@@ -36,9 +38,8 @@ def write_png(path, pixels):
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(png)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
 
 
 def from_ascii(name, rows, palette, width=SIZE, height=SIZE):
@@ -3354,26 +3355,26 @@ def main():
     for name, (rows, pal) in LOOT.items():
         px = from_ascii(name, rows, pal)
         loot[name] = px
-        write_png(os.path.join(ROOT, "loot", f"{name}.png"), px)
+        write_png(ROOT / "loot" / f"{name}.png", px)
 
     player = from_ascii("player", *PLAYER)
-    write_png(os.path.join(ROOT, "player.png"), player)
+    write_png(ROOT / "player.png", player)
     engineer = from_ascii("player_engineer", PLAYER[0], ENGINEER_PALETTE)
-    write_png(os.path.join(ROOT, "player_engineer.png"), engineer)
+    write_png(ROOT / "player_engineer.png", engineer)
     bulwark = from_ascii("player_bulwark", PLAYER[0], BULWARK_PALETTE)
-    write_png(os.path.join(ROOT, "player_bulwark.png"), bulwark)
+    write_png(ROOT / "player_bulwark.png", bulwark)
     hacker = from_ascii("player_hacker", PLAYER[0], HACKER_PALETTE)
-    write_png(os.path.join(ROOT, "player_hacker.png"), hacker)
+    write_png(ROOT / "player_hacker.png", hacker)
     doctor = from_ascii("player_doctor", PLAYER[0], DOCTOR_PALETTE)
-    write_png(os.path.join(ROOT, "player_doctor.png"), doctor)
+    write_png(ROOT / "player_doctor.png", doctor)
     sentry = from_ascii("sentry", SENTRY, SENTRY_METAL)
-    write_png(os.path.join(ROOT, "sentry.png"), sentry)
+    write_png(ROOT / "sentry.png", sentry)
     sentry_gun = from_ascii("sentry_gun", SENTRY_GUN, SENTRY_METAL, width=12, height=6)
-    write_png(os.path.join(ROOT, "sentry_gun.png"), sentry_gun)
+    write_png(ROOT / "sentry_gun.png", sentry_gun)
     mine = from_ascii("mine", MINE, MINE_METAL, width=12, height=12)
-    write_png(os.path.join(ROOT, "mine.png"), mine)
+    write_png(ROOT / "mine.png", mine)
     mine_light = from_ascii("mine_light", MINE_LIGHT, MINE_GLOW, width=6, height=6)
-    write_png(os.path.join(ROOT, "mine_light.png"), mine_light)
+    write_png(ROOT / "mine_light.png", mine_light)
 
     sets = []
     for deck, theme in enumerate(DECK_THEMES):
@@ -3381,103 +3382,102 @@ def main():
         tiles.update(strongroom_tiles(theme, 1 + deck, deck))
         sets.append(tiles)
         for name, px in tiles.items():
-            write_png(os.path.join(ROOT, "tiles", f"deck_{deck}", f"{name}.png"), px)
+            write_png(ROOT / "tiles" / f"deck_{deck}" / f"{name}.png", px)
     shared = floor_shadows()
     shared.update(floor_lips())
     shared.update({f"decal_{name}": px for name, px in floor_decals().items()})
     for name, px in shared.items():
-        write_png(os.path.join(ROOT, "tiles", f"{name}.png"), px)
+        write_png(ROOT / "tiles" / f"{name}.png", px)
 
-    write_png(os.path.join(ROOT, "shadow.png"), shadow())
-    write_png(os.path.join(ROOT, "vault.png"), vault_floor())
-    write_png(os.path.join(ROOT, "vault_bar.png"), from_ascii("vault_bar", *VAULT_BAR, width=6, height=5))
-    write_png(os.path.join(ROOT, "vault_bar_plain.png"), from_ascii("vault_bar_plain", *VAULT_BAR_PLAIN, width=6, height=5))
+    write_png(ROOT / "shadow.png", shadow())
+    write_png(ROOT / "vault.png", vault_floor())
+    write_png(ROOT / "vault_bar.png", from_ascii("vault_bar", *VAULT_BAR, width=6, height=5))
+    write_png(ROOT / "vault_bar_plain.png", from_ascii("vault_bar_plain", *VAULT_BAR_PLAIN, width=6, height=5))
 
     guns = {}
     for name, (rows, pal) in GUNS.items():
         px = from_ascii(name, rows, pal, height=8)
         guns[name] = px
-        write_png(os.path.join(ROOT, "guns", f"{name}.png"), px)
+        write_png(ROOT / "guns" / f"{name}.png", px)
 
     PROJECTILES["explosion"] = explosion()
     for name, px in PROJECTILES.items():
-        write_png(os.path.join(ROOT, "fx", f"{name}.png"), px)
+        write_png(ROOT / "fx" / f"{name}.png", px)
     fx = {}
     for name, (rows, size) in FX.items():
         px = from_ascii(name, rows, {}, width=size, height=size)
         fx[name] = px
-        write_png(os.path.join(ROOT, "fx", f"{name}.png"), px)
+        write_png(ROOT / "fx" / f"{name}.png", px)
 
     enemies = {}
     for name, (rows, pal) in ENEMIES.items():
         px = from_ascii(name, rows, pal)
         enemies[name] = px
-        write_png(os.path.join(ROOT, "enemies", f"{name}.png"), px)
+        write_png(ROOT / "enemies" / f"{name}.png", px)
 
     drops = {}
     for name, (rows, pal) in DROPS.items():
         px = from_ascii(name, rows, pal)
         drops[name] = px
-        write_png(os.path.join(ROOT, "drops", f"{name}.png"), px)
+        write_png(ROOT / "drops" / f"{name}.png", px)
 
     perks = {}
     for name in PERK_SYMBOLS:
         px = perk_badge(name)
         perks[name] = px
-        write_png(os.path.join(ROOT, "perks", f"{name}.png"), px)
-    write_png(os.path.join(ROOT, "fx", "shock_ring.png"), shock_ring())
+        write_png(ROOT / "perks" / f"{name}.png", px)
+    write_png(ROOT / "fx" / "shock_ring.png", shock_ring())
     # Each drawn 1:1 in src/class.rs: at HACK_RADIUS and round the ward bubble.
-    write_png(os.path.join(ROOT, "fx", "hack_ring.png"), aura_ring(40, fill=0.1))
-    write_png(os.path.join(ROOT, "fx", "ward_ring.png"), aura_ring(11, fill=0.2))
+    write_png(ROOT / "fx" / "hack_ring.png", aura_ring(40, fill=0.1))
+    write_png(ROOT / "fx" / "ward_ring.png", aura_ring(11, fill=0.2))
 
     keeper = keeper_body()
-    write_png(os.path.join(ROOT, "boss", "keeper.png"), keeper)
+    write_png(ROOT / "boss" / "keeper.png", keeper)
     hand = from_ascii("hand", *KEEPER_HAND)
-    write_png(os.path.join(ROOT, "boss", "hand.png"), hand)
+    write_png(ROOT / "boss" / "hand.png", hand)
     stalker = stalker_boss()
-    write_png(os.path.join(ROOT, "boss", "stalker.png"), stalker)
+    write_png(ROOT / "boss" / "stalker.png", stalker)
     brute, brute_sheet, brute_glow, brute_frames = brute_boss()
-    write_png(os.path.join(ROOT, "boss", "brute.png"), brute)
-    write_png(os.path.join(ROOT, "boss", "brute_sheet.png"), brute_sheet)
-    write_png(os.path.join(ROOT, "boss", "brute_glow.png"), brute_glow)
+    write_png(ROOT / "boss" / "brute.png", brute)
+    write_png(ROOT / "boss" / "brute_sheet.png", brute_sheet)
+    write_png(ROOT / "boss" / "brute_glow.png", brute_glow)
     prism, prism_left, prism_right, prism_core, prism_open = prism_boss()
-    write_png(os.path.join(ROOT, "boss", "prism.png"), prism)
-    write_png(os.path.join(ROOT, "boss", "prism_left.png"), prism_left)
-    write_png(os.path.join(ROOT, "boss", "prism_right.png"), prism_right)
-    write_png(os.path.join(ROOT, "boss", "prism_core.png"), prism_core)
+    write_png(ROOT / "boss" / "prism.png", prism)
+    write_png(ROOT / "boss" / "prism_left.png", prism_left)
+    write_png(ROOT / "boss" / "prism_right.png", prism_right)
+    write_png(ROOT / "boss" / "prism_core.png", prism_core)
     aegis = prism_aegis()
-    write_png(os.path.join(ROOT, "boss", "prism_aegis.png"), aegis)
+    write_png(ROOT / "boss" / "prism_aegis.png", aegis)
     shard = prism_shard()
-    write_png(os.path.join(ROOT, "boss", "prism_shard.png"), shard)
+    write_png(ROOT / "boss" / "prism_shard.png", shard)
     gate, gate_open = gate_tiles()
-    write_png(os.path.join(ROOT, "tiles", "gate.png"), gate)
-    write_png(os.path.join(ROOT, "tiles", "gate_open.png"), gate_open)
+    write_png(ROOT / "tiles" / "gate.png", gate)
+    write_png(ROOT / "tiles" / "gate_open.png", gate_open)
 
     title = logo()
-    write_png(os.path.join(ROOT, "ui", "logo.png"), title)
+    write_png(ROOT / "ui" / "logo.png", title)
 
     crosshair = from_ascii("crosshair", CROSSHAIR, {}, width=11, height=11)
-    write_png(os.path.join(ROOT, "ui", "crosshair.png"), crosshair)
+    write_png(ROOT / "ui" / "crosshair.png", crosshair)
 
-    preview = os.path.join(os.path.dirname(__file__), "..", "docs", "preview")
-    write_png(os.path.join(preview, "loot.png"), contact_sheet(list(loot.values())))
+    write_png(PREVIEW / "loot.png", contact_sheet(list(loot.values())))
     write_png(
-        os.path.join(preview, "player_tiles.png"),
+        PREVIEW / "player_tiles.png",
         contact_sheet([player, engineer, bulwark, hacker, doctor, sentry, mine, mine_light]),
     )
-    write_png(os.path.join(preview, "station.png"), contact_sheet(station_preview(sets, shared), scale=2))
-    write_png(os.path.join(preview, "logo.png"), contact_sheet([title], scale=8))
-    write_png(os.path.join(preview, "enemies.png"), contact_sheet(list(enemies.values())))
-    write_png(os.path.join(preview, "boss.png"), contact_sheet([keeper, hand, stalker, gate, gate_open]))
-    write_png(os.path.join(preview, "brute.png"), contact_sheet(brute_frames, scale=4))
-    write_png(os.path.join(preview, "prism.png"), contact_sheet([prism, prism_open, prism_core, aegis, shard], scale=4))
-    write_png(os.path.join(preview, "perks.png"), contact_sheet(list(perks.values()) + list(drops.values())))
-    write_png(os.path.join(preview, "guns.png"), contact_sheet(list(guns.values())))
+    write_png(PREVIEW / "station.png", contact_sheet(station_preview(sets, shared), scale=2))
+    write_png(PREVIEW / "logo.png", contact_sheet([title], scale=8))
+    write_png(PREVIEW / "enemies.png", contact_sheet(list(enemies.values())))
+    write_png(PREVIEW / "boss.png", contact_sheet([keeper, hand, stalker, gate, gate_open]))
+    write_png(PREVIEW / "brute.png", contact_sheet(brute_frames, scale=4))
+    write_png(PREVIEW / "prism.png", contact_sheet([prism, prism_open, prism_core, aegis, shard], scale=4))
+    write_png(PREVIEW / "perks.png", contact_sheet(list(perks.values()) + list(drops.values())))
+    write_png(PREVIEW / "guns.png", contact_sheet(list(guns.values())))
     write_png(
-        os.path.join(preview, "fx.png"),
+        PREVIEW / "fx.png",
         contact_sheet(list(PROJECTILES.values()) + list(fx.values()) + [crosshair]),
     )
-    print("assets written to", os.path.normpath(ROOT))
+    print("assets written to", ROOT)
 
 
 if __name__ == "__main__":

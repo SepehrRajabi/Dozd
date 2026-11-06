@@ -1585,12 +1585,16 @@ fn drive_stalker(
     let room = grid.vault_room;
     let shields = shield_outlines(&riot_shields);
 
-    // The pirates it can see.
+    // The pirates it can see, anywhere in its room: the far wall is past `SIGHT`,
+    // and it would stop dead there, rampage over, with the crew at the other end.
     let spots: Vec<Vec2> = crew
         .iter()
         .filter(|(_, team, _, t, health, player, _)| {
             let at = t.translation.truncate();
-            player.is_some() && in_play(team, health, *player) && at.distance(pos) <= SIGHT && grid.line_of_sight(pos, at)
+            player.is_some()
+                && in_play(team, health, *player)
+                && (at.distance(pos) <= SIGHT || grid.in_vault_room(at))
+                && grid.line_of_sight(pos, at)
         })
         .map(|(_, _, _, t, ..)| t.translation.truncate())
         .collect();
@@ -3007,6 +3011,39 @@ mod tests {
                 }
             }
             panic!("it never lunged");
+        }
+
+        #[test]
+        fn a_stalker_at_the_far_wall_of_its_room_keeps_fighting() {
+            let (mut app, stalker, pirate) = keeper_in(KeeperKind::Stalker);
+            app.world_mut().get_mut::<Health>(pirate).unwrap().negating = true;
+            let room = app.world().resource::<RoomGrid>().vault_room;
+            let half = Vec2::splat(KEEPER_HALF);
+            let y = room.center().y;
+            let far = Vec2::new(room.min.x + half.x + 8.0, y);
+            let wall = Vec2::new(room.max.x - half.x, y);
+            assert!(far.distance(wall) > SIGHT, "the room's wider than it sees");
+            // Mid-room, about to dash for the wall, with the pirate at the other one.
+            let start = far + Vec2::X * 150.0;
+            place(&mut app, stalker, start);
+            {
+                let mut look = app.world_mut().get_mut::<StalkerLook>(stalker).unwrap();
+                look.state = StalkerState::Rampage { dash: 0, total: 4, moving: false };
+                look.lane = Some([start, wall]);
+            }
+            let (mut last_dash, mut rampaged, mut fought_on) = (0, false, false);
+            for _ in 0..(15.0 / DT) as usize {
+                place(&mut app, pirate, far);
+                app.update();
+                match app.world().get::<StalkerLook>(stalker).unwrap().state {
+                    StalkerState::Rampage { dash, .. } => last_dash = last_dash.max(dash),
+                    StalkerState::Recover => rampaged = true,
+                    StalkerState::WindUp if rampaged => fought_on = true,
+                    _ => {}
+                }
+            }
+            assert_eq!(last_dash, 3, "every dash of the rampage");
+            assert!(fought_on, "and it comes back for more, not standing at the wall");
         }
 
         #[test]
