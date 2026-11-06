@@ -7,19 +7,42 @@ Run from the repo root:  python3 tools/gen_assets.py
 import math
 import struct
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 ROOT = REPO / "assets" / "sprites"
 PREVIEW = REPO / "docs" / "preview"
 SIZE = 16
 
+# An RGBA pixel, and an image as rows of them.
+Color = tuple[int, ...]
+Pixels = list[list[Color]]
+
 OUTLINE = (20, 18, 30, 255)
 WHITE = (255, 255, 255, 255)
 
 
-def write_png(path, pixels):
+@dataclass(frozen=True)
+class DeckTheme:
+    """One deck's colours (see `DECK_THEMES`)."""
+
+    steel: Color
+    cap: Color
+    rim: Color
+    face: Color
+    light: Color
+    screen: Color
+    led: Color
+    paint: Color
+    pipe: Color
+    grime: Color
+    under: Color
+    hull: Color
+    core: Color
+
+
+def write_png(path: Path, pixels: Pixels) -> None:
     h = len(pixels)
     w = len(pixels[0])
     raw = b"".join(b"\x00" + bytes(c for px in row for c in px) for row in pixels)
@@ -42,7 +65,7 @@ def write_png(path, pixels):
     path.write_bytes(png)
 
 
-def from_ascii(name, rows, palette, width=SIZE, height=SIZE):
+def from_ascii(name: str, rows: list[str], palette: dict[str, Color], width: int = SIZE, height: int = SIZE) -> Pixels:
     pal = {".": (0, 0, 0, 0), "k": OUTLINE, "w": WHITE, **palette}
     rows = rows + ["." * width] * (height - len(rows))
     for i, r in enumerate(rows):
@@ -51,7 +74,7 @@ def from_ascii(name, rows, palette, width=SIZE, height=SIZE):
     return [[pal[ch] for ch in r] for r in rows]
 
 
-def rgb(r, g, b, a=255):
+def rgb(r: int, g: int, b: int, a: int = 255) -> Color:
     return (r, g, b, a)
 
 
@@ -636,11 +659,11 @@ ENEMIES = {
 }
 
 
-def bolt(w, h, glow):
+def energy_bolt(w: int, h: int, glow: Color) -> Pixels:
     """Capsule-shaped energy bolt pointing right with a hot white core."""
     core = tuple(int(c + (255 - c) * 0.7) for c in glow[:3]) + (255,)
     cx, cy = (w - 1) / 2, (h - 1) / 2
-    px = [[(0, 0, 0, 0)] * w for _ in range(h)]
+    px: Pixels = [[(0, 0, 0, 0)] * w for _ in range(h)]
     for y in range(h):
         for x in range(w):
             d = ((x - cx) / (w / 2)) ** 2 + ((y - cy) / (h / 2)) ** 2
@@ -652,13 +675,13 @@ def bolt(w, h, glow):
 
 
 PROJECTILES = {
-    "bolt_cyan": bolt(7, 3, rgb(70, 215, 255)),
-    "pellet_orange": bolt(3, 3, rgb(255, 150, 50)),
-    "bolt_green": bolt(6, 3, rgb(90, 245, 110)),
-    "rail_purple": bolt(16, 3, rgb(190, 100, 255)),
-    "enemy_bolt": bolt(5, 3, rgb(255, 70, 60)),
-    "enemy_orb": bolt(4, 4, rgb(255, 130, 40)),
-    "nova_orb": bolt(9, 9, rgb(110, 255, 90)),
+    "bolt_cyan": energy_bolt(7, 3, rgb(70, 215, 255)),
+    "pellet_orange": energy_bolt(3, 3, rgb(255, 150, 50)),
+    "bolt_green": energy_bolt(6, 3, rgb(90, 245, 110)),
+    "rail_purple": energy_bolt(16, 3, rgb(190, 100, 255)),
+    "enemy_bolt": energy_bolt(5, 3, rgb(255, 70, 60)),
+    "enemy_orb": energy_bolt(4, 4, rgb(255, 130, 40)),
+    "nova_orb": energy_bolt(9, 9, rgb(110, 255, 90)),
     "grenade": [
         [(0, 0, 0, 0), OUTLINE, OUTLINE, OUTLINE, (0, 0, 0, 0)],
         [OUTLINE, rgb(120, 150, 60), rgb(150, 190, 70), rgb(120, 150, 60), OUTLINE],
@@ -1131,17 +1154,17 @@ def aura_ring(radius, fill=0.06, edge=1.0):
     return px
 
 
-def noise(x, y, seed):
+def noise(x: int, y: int, seed: int) -> float:
     n = (x * 374761393 + y * 668265263 + seed * 144269504) & 0xFFFFFFFF
     n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
     return ((n >> 16) & 0xFF) / 255.0
 
 
-def shade(c, amount):
+def shade(c: Color, amount: float) -> Color:
     return tuple(max(0, min(255, int(v + amount))) for v in c[:3]) + (255,)
 
 
-def blank(color):
+def blank(color: Color) -> Pixels:
     return [[color for _ in range(SIZE)] for _ in range(SIZE)]
 
 
@@ -1246,23 +1269,23 @@ def floor_shadows():
 # `core` is the light of the vault room's power (see the strongroom below).
 # --------------------------------------------------------------------------
 
-DECK_THEMES = [
+DECK_THEMES: list[DeckTheme] = [
     # Deck 1, the cargo hold: cold blue steel, cyan lamps, yellow hazard paint.
-    SimpleNamespace(
+    DeckTheme(
         steel=rgb(58, 64, 82), cap=rgb(30, 34, 47), rim=rgb(104, 114, 142), face=rgb(52, 58, 76),
         light=rgb(80, 230, 255), screen=rgb(70, 220, 130), led=rgb(255, 176, 50), paint=rgb(232, 190, 40),
         pipe=rgb(92, 98, 116), grime=rgb(22, 24, 32), under=rgb(13, 14, 21), hull=rgb(15, 17, 25),
         core=rgb(80, 230, 255),
     ),
     # Deck 2, the engine works: warm gunmetal, copper pipe, orange lamps, rust.
-    SimpleNamespace(
+    DeckTheme(
         steel=rgb(68, 63, 58), cap=rgb(35, 32, 30), rim=rgb(140, 122, 100), face=rgb(62, 56, 51),
         light=rgb(255, 156, 64), screen=rgb(255, 190, 80), led=rgb(120, 230, 110), paint=rgb(232, 118, 40),
         pipe=rgb(156, 102, 66), grime=rgb(52, 32, 20), under=rgb(17, 13, 12), hull=rgb(20, 17, 16),
         core=rgb(96, 214, 255),
     ),
     # Deck 3, the treasury: dark teal slate, brass trim, mint lamps, gold paint.
-    SimpleNamespace(
+    DeckTheme(
         steel=rgb(46, 56, 60), cap=rgb(22, 27, 31), rim=rgb(178, 148, 86), face=rgb(40, 49, 54),
         light=rgb(120, 255, 196), screen=rgb(120, 255, 196), led=rgb(255, 210, 90), paint=rgb(214, 172, 60),
         pipe=rgb(156, 134, 86), grime=rgb(16, 22, 24), under=rgb(9, 13, 15), hull=rgb(12, 16, 18),
@@ -1282,12 +1305,12 @@ DIGITS = {
 }
 
 
-def mix(a, b, t):
+def mix(a: Color, b: Color, t: float) -> Color:
     t = max(0.0, min(1.0, t))
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3)) + (255,)
 
 
-def quarters(px):
+def quarters(px: Pixels) -> list[Pixels]:
     """A 2x2 panel cut into its top-left, top-right, bottom-left and
     bottom-right tiles, the order the game picks them in."""
     return [[row[x : x + SIZE] for row in px[y : y + SIZE]] for y in (0, SIZE) for x in (0, SIZE)]
@@ -1309,7 +1332,7 @@ def brushed(base, w, h, seed):
     ]
 
 
-def plate_rim(px, x0, y0, x1, y1, T):
+def plate_rim(px, x0, y0, x1, y1, T: DeckTheme):
     """Frames a plate: a dark seam on its top and left (the plates beside it
     close the other two sides), a lit inner edge and a shaded far edge."""
     seam, hi, lo = shade(T.steel, -28), shade(T.steel, 13), shade(T.steel, -11)
@@ -1327,7 +1350,7 @@ def plate_rim(px, x0, y0, x1, y1, T):
         px[y][x0] = seam
 
 
-def recess(px, x0, y0, x1, y1, T, depth=-8):
+def recess(px, x0, y0, x1, y1, T: DeckTheme, depth=-8):
     """Sinks a box into a plate: shaded top and left, lit bottom and right."""
     for y in range(y0 + 1, y1):
         for x in range(x0 + 1, x1):
@@ -1335,14 +1358,14 @@ def recess(px, x0, y0, x1, y1, T, depth=-8):
     bevel(px, x0, y0, x1, y1, shade(T.steel, -26), shade(T.steel, 12))
 
 
-def bolt(px, x, y, T):
+def bolt(px, x, y, T: DeckTheme):
     px[y][x] = shade(T.steel, 44)
     px[y][x + 1] = shade(T.steel, 20)
     px[y + 1][x] = shade(T.steel, 12)
     px[y + 1][x + 1] = shade(T.steel, -26)
 
 
-def weather(px, T, seed, grime=1.0, scratches=2):
+def weather(px, T: DeckTheme, seed, grime=1.0, scratches=2):
     """Grime gathered in patches, and a few bright scratches."""
     h, w = len(px), len(px[0])
     for y in range(h):
@@ -1369,7 +1392,7 @@ def stencil(px, text, x0, y0, color, seed, keep=0.3):
                     px[y][x] = mix(px[y][x], color, 0.55)
 
 
-def floor_panels(T, seed):
+def floor_panels(T: DeckTheme, seed):
     """Heavy plate, four small plates, tread plate, a service hatch, staggered
     planks, and a plate with loading-bay paint. Each 32x32."""
     n = PANEL
@@ -1459,7 +1482,7 @@ def pipe_run(px, at, thick, color, vertical, span=None):
             px[y][x] = shade(color, tone)
 
 
-def grate_panels(T, seed):
+def grate_panels(T: DeckTheme, seed):
     """Catwalk grating over the deck's guts: pipes running across, pipes
     running down past a cable bundle, a lit service trench, and plain dark."""
     n = PANEL
@@ -1499,7 +1522,7 @@ def grate_panels(T, seed):
             dark[i][15 + d] = shade(beam, -6)
             dark[15 + d][i] = shade(beam, -6)
 
-    out = []
+    out: list[Pixels] = []
     for px in [across, down, lit, dark]:
         top = shade(T.steel, 10)
         for y in range(n):
@@ -1525,7 +1548,7 @@ def grate_panels(T, seed):
     return out
 
 
-def hull_panel(T, seed):
+def hull_panel(T: DeckTheme, seed):
     """The hull between rooms: big, faint plates, barely lighter than space."""
     n = PANEL
     px = [[shade(T.hull, (noise(x // 4, y // 4, seed) - 0.5) * 3) for x in range(n)] for y in range(n)]
@@ -1541,7 +1564,7 @@ def hull_panel(T, seed):
     return px
 
 
-def wall_cap(T, mask):
+def wall_cap(T: DeckTheme, mask):
     """The top of a wall. `mask` bits (N=1, E=2, S=4, W=8) mark open floor
     beside it; those edges get a lit, bolted rim."""
     px = [
@@ -1569,7 +1592,7 @@ def wall_cap(T, mask):
     return px
 
 
-def face_base(T, seed):
+def face_base(T: DeckTheme, seed):
     """A wall's front face: a lit lip, a body lighter near the top, a painted
     band in the deck's colour, and a dark kickplate."""
     px = [[shade(T.face, (noise(x, y, seed) - 0.5) * 5 + 5 - y * 0.8) for x in range(SIZE)] for y in range(SIZE)]
@@ -1585,7 +1608,7 @@ def face_base(T, seed):
     return px
 
 
-def wall_faces(T):
+def wall_faces(T: DeckTheme):
     """Panels, a rib, pipes, a lamp, a terminal, lockers, a grille, a junction
     box and a warning plate. The lamp and terminal light the floor below."""
     hi, lo = shade(T.face, 16), shade(T.face, -18)
@@ -1693,7 +1716,7 @@ def wall_faces(T):
     return faces
 
 
-def door_tile(T):
+def door_tile(T: DeckTheme):
     """A blast door set into a wall face: two leaves striped at the foot, a
     seam, view slits and a red lamp over it."""
     px = face_base(T, 31)
@@ -1718,7 +1741,7 @@ def door_tile(T):
     return px
 
 
-def vent_tile(T):
+def vent_tile(T: DeckTheme):
     """Floor vent that reinforcements crawl out of, hot red inside."""
     px = brushed(T.steel, SIZE, SIZE, 61)
     plate_rim(px, 0, 0, SIZE - 1, SIZE - 1, T)
@@ -1740,7 +1763,7 @@ def vent_tile(T):
     return px
 
 
-def hazard_tile(T):
+def hazard_tile(T: DeckTheme):
     """The escape pad's paint. Seamless, so a pad reads as one marking."""
     px = blank(CLEAR)
     dark = shade(T.under, 14)
@@ -1757,7 +1780,7 @@ def hazard_tile(T):
     return px
 
 
-def lift_platform(T):
+def lift_platform(T: DeckTheme):
     """Cargo lift platform, 2x2 tiles: ride it down to the next deck. Returned
     as its four quarters: top-left, top-right, bottom-left, bottom-right."""
     n = PANEL
@@ -1803,7 +1826,7 @@ def spill(color, peak=58):
     return px
 
 
-def deck_tiles(T, seed):
+def deck_tiles(T: DeckTheme, seed):
     """Every tile one deck needs, by file name."""
     tiles = {}
     for kind, panels in [("floor", floor_panels(T, seed)), ("grate", grate_panels(T, seed))]:
@@ -1956,7 +1979,7 @@ def heavy_bolt(px, x, y, base):
         px[y + 3][x + 2] = px[y + 2][x + 3] = shade(base, -34)
 
 
-def armour_plate(T, seed):
+def armour_plate(T: DeckTheme, seed):
     """A raised armour plate, 32x32: chamfered corners, a lit bevel on its
     top and left, a heavy bolt in each corner."""
     n = PANEL
@@ -1985,7 +2008,7 @@ def armour_plate(T, seed):
     return px, base
 
 
-def strongroom_plates(T, seed):
+def strongroom_plates(T: DeckTheme, seed):
     """The strongroom's floor, 32x32 each: a plain armour plate, one locked by
     a bar across, one by a bar down, and one with a light set into it."""
     n = PANEL
@@ -2042,7 +2065,7 @@ def radial(size, color, peak, reach=1.0, power=1.6):
     return px
 
 
-def vault_seal(T, size=180):
+def vault_seal(T: DeckTheme, size=180):
     """The seal set into the strongroom floor round the vault's dais: inlaid
     rings, a dial of ticks and eight lit studs, all translucent so the plate
     shows through. The dais (32x32) sits in its middle."""
@@ -2107,7 +2130,7 @@ def vault_seal(T, size=180):
     return px
 
 
-def conduits(T):
+def conduits(T: DeckTheme):
     """A power conduit set into the floor, as 16x16 lengths running across
     and down, a junction node on it, the coupling it ends in at the wall,
     and the glow a node throws."""
@@ -2163,7 +2186,7 @@ def conduits(T):
     }
 
 
-def beacon(T):
+def beacon(T: DeckTheme):
     """A floor beacon in the strongroom's corners, and the light it throws."""
     px = [[CLEAR for _ in range(SIZE)] for _ in range(SIZE)]
     c = 7.5
@@ -2190,7 +2213,7 @@ def beacon(T):
     return px
 
 
-def threshold(T):
+def threshold(T: DeckTheme):
     """Paint just inside the vault's gate, 32x32: worn stripes in the deck's
     paint, translucent so the grating shows through."""
     px = [[CLEAR for _ in range(PANEL)] for _ in range(PANEL)]
@@ -2226,7 +2249,7 @@ def stencil_word(text, color, seed, scale=2):
     return px
 
 
-def strongroom_faces(T):
+def strongroom_faces(T: DeckTheme):
     """The strongroom's walls, seen from the front: armour plate, a light
     strip that lights the floor, a grille with the vault's power glowing
     behind it, and a pilaster."""
@@ -2278,7 +2301,7 @@ def strongroom_faces(T):
     return faces
 
 
-def strongroom_trims(T):
+def strongroom_trims(T: DeckTheme):
     """A running light along the top of the strongroom's side and far walls,
     on each tile's lit rim between its bolts (see `wall_cap`)."""
     trims = {}
@@ -2296,7 +2319,7 @@ def strongroom_trims(T):
     return trims
 
 
-def strongroom_tiles(T, seed, deck):
+def strongroom_tiles(T: DeckTheme, seed, deck):
     """Every piece of the strongroom one deck needs, by file name."""
     tiles = {}
     for i, px in enumerate(strongroom_plates(T, seed)):
@@ -2451,7 +2474,7 @@ def station_preview(sets, shared):
 # the game can tint it by the vault's tier; only its eye and core are coloured.
 # --------------------------------------------------------------------------
 
-CLEAR = (0, 0, 0, 0)
+CLEAR: Color = (0, 0, 0, 0)
 KEEPER_METAL = rgb(150, 156, 172)
 KEEPER_EYE = rgb(235, 70, 255)
 KEEPER_CORE = rgb(255, 120, 255)
