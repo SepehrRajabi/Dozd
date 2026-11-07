@@ -930,6 +930,13 @@ fn prowl_dir(pos: Vec2, crew: &[Vec2], strafe: f32) -> Vec2 {
     want.clamp_length_max(1.0)
 }
 
+/// Whether a vault boss at `pos` sees a pirate at `at`: in clear sight anywhere
+/// in its own room, which is wider than `SIGHT` (it mustn't stand idle while
+/// shot from the far wall), or within `SIGHT` beyond it, through the open gate.
+fn sees(grid: &RoomGrid, pos: Vec2, at: Vec2) -> bool {
+    (at.distance(pos) <= SIGHT || grid.in_vault_room(at)) && grid.line_of_sight(pos, at)
+}
+
 /// Keeps a body of half-extent `half` on the vault room's floor, `room`.
 fn in_room(room: Rect, half: Vec2, p: Vec2) -> Vec2 {
     if room.width() <= half.x * 2.0 || room.height() <= half.y * 2.0 {
@@ -1339,7 +1346,7 @@ fn drive_keeper(
         .iter()
         .filter(|(_, team, _, t, health, player)| {
             let at = t.translation.truncate();
-            player.is_some() && in_play(team, health, *player) && at.distance(pos) <= SIGHT && grid.line_of_sight(pos, at)
+            player.is_some() && in_play(team, health, *player) && sees(&grid, pos, at)
         })
         .map(|(e, _, _, t, ..)| (e, t.translation.truncate()))
         .collect();
@@ -1585,16 +1592,12 @@ fn drive_stalker(
     let room = grid.vault_room;
     let shields = shield_outlines(&riot_shields);
 
-    // The pirates it can see, anywhere in its room: the far wall is past `SIGHT`,
-    // and it would stop dead there, rampage over, with the crew at the other end.
+    // The pirates it can see.
     let spots: Vec<Vec2> = crew
         .iter()
         .filter(|(_, team, _, t, health, player, _)| {
             let at = t.translation.truncate();
-            player.is_some()
-                && in_play(team, health, *player)
-                && (at.distance(pos) <= SIGHT || grid.in_vault_room(at))
-                && grid.line_of_sight(pos, at)
+            player.is_some() && in_play(team, health, *player) && sees(&grid, pos, at)
         })
         .map(|(_, _, _, t, ..)| t.translation.truncate())
         .collect();
@@ -1827,7 +1830,7 @@ fn drive_brute(
         .collect();
     let nearest = pirates
         .iter()
-        .filter(|at| at.distance(pos) <= SIGHT && grid.line_of_sight(pos, **at))
+        .filter(|at| sees(&grid, pos, **at))
         .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
         .copied();
 
@@ -2081,7 +2084,7 @@ fn drive_prism(
     if warp.is_none()
         && let Some(target) = pirates
             .iter()
-            .filter(|at| at.distance(pos) <= SIGHT && grid.line_of_sight(pos, **at))
+            .filter(|at| sees(&grid, pos, **at))
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
         && target.distance(pos) > PRISM_DRIFT_FROM * PRISM_ARC_RANGE
     {
@@ -3044,6 +3047,47 @@ mod tests {
             }
             assert_eq!(last_dash, 3, "every dash of the rampage");
             assert!(fought_on, "and it comes back for more, not standing at the wall");
+        }
+
+        /// A vault boss of `kind` at one end of its room and its pirate,
+        /// unhurt by anything, at the other, out past `SIGHT`.
+        fn across_the_room(kind: KeeperKind) -> (App, Entity, Entity, Vec2) {
+            let (mut app, keeper, pirate) = keeper_in(kind);
+            app.world_mut().get_mut::<Health>(pirate).unwrap().negating = true;
+            let room = app.world().resource::<RoomGrid>().vault_room;
+            let half = Vec2::splat(KEEPER_HALF);
+            let y = room.center().y;
+            let (far, start) = (Vec2::new(room.min.x + half.x + 8.0, y), Vec2::new(room.max.x - half.x - 8.0, y));
+            assert!(far.distance(start) > SIGHT && app.world().resource::<RoomGrid>().line_of_sight(start, far));
+            place(&mut app, keeper, start);
+            place(&mut app, pirate, far);
+            (app, keeper, pirate, far)
+        }
+
+        #[test]
+        fn the_brute_comes_for_a_pirate_at_the_far_wall() {
+            let (mut app, brute, pirate, far) = across_the_room(KeeperKind::Brute);
+            let gap = at(&app, brute).distance(far);
+            // Long enough to plod over, roar for guards on the way included.
+            for _ in 0..(8.0 / DT) as usize {
+                place(&mut app, pirate, far);
+                app.update();
+            }
+            assert!(at(&app, brute).distance(far) < gap - 200.0, "it plods over, not stand there being shot");
+        }
+
+        #[test]
+        fn the_keeper_fires_on_a_pirate_at_the_far_wall() {
+            let (mut app, keeper, pirate, far) = across_the_room(KeeperKind::Hands);
+            let mut attacked = false;
+            for _ in 0..(8.0 / DT) as usize {
+                place(&mut app, pirate, far);
+                app.update();
+                let mut hands = app.world_mut().query::<&KeeperHand>();
+                attacked |= hands.iter(app.world()).any(|h| h.action != HandAction::Idle);
+            }
+            let _ = keeper;
+            assert!(attacked, "its hands go for them");
         }
 
         #[test]

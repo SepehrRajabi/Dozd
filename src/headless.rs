@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bevy::app::AppExit;
 use bevy::ecs::schedule::SingleThreadedExecutor;
-use bevy::log::{Level, LogPlugin};
+use bevy::log::{DEFAULT_FILTER, Level, LogPlugin};
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
@@ -436,6 +436,10 @@ pub fn run(config: Config) {
         StatesPlugin,
         LogPlugin {
             level: Level::WARN,
+            // Bevy's own filter (which ends in a comma), plus quiet from the systems headless never
+            // runs (the menu's, the lobby's): a long batch outlives their change
+            // ticks, and Bevy says so for each of them, harmlessly.
+            filter: format!("{DEFAULT_FILTER}bevy_ecs::system::system=error"),
             ..default()
         },
     ))

@@ -71,10 +71,18 @@ pub const CODE_LEN: usize = 8;
 
 /// A fresh random room code for a host to hand its crew, e.g. `K7QF29XA`.
 pub fn room_code() -> String {
-    generate_random_bytes::<CODE_LEN>()
-        .iter()
-        .map(|b| CODE_ALPHABET[*b as usize % CODE_ALPHABET.len()] as char)
-        .collect()
+    // Bytes past the last whole run of the alphabet are thrown away, so every
+    // letter is equally likely (a plain `%` would favour the first few).
+    let fair = u8::MAX as usize + 1 - (u8::MAX as usize + 1) % CODE_ALPHABET.len();
+    let mut code = String::with_capacity(CODE_LEN);
+    while code.len() < CODE_LEN {
+        for b in generate_random_bytes::<CODE_LEN>() {
+            if (b as usize) < fair && code.len() < CODE_LEN {
+                code.push(CODE_ALPHABET[b as usize % CODE_ALPHABET.len()] as char);
+            }
+        }
+    }
+    code
 }
 
 /// A room code as typed: any case, with or without dashes and spaces.
@@ -229,6 +237,36 @@ pub struct StartSession(pub NetMode);
 #[derive(Event)]
 pub struct EndSession(pub Option<String>);
 
+/// A `Transform` as it goes to joiners. Everything in this 2D game sits flat,
+/// turned only about Z and scaled evenly, so that's all that's sent: 20 bytes
+/// a move where the whole transform takes 40, and moves are most of the traffic.
+#[derive(Serialize, Deserialize)]
+struct NetTransform {
+    translation: Vec3,
+    angle: f32,
+    scale: f32,
+}
+
+impl From<Transform> for NetTransform {
+    fn from(transform: Transform) -> Self {
+        Self {
+            translation: transform.translation,
+            angle: transform.rotation.to_euler(EulerRot::ZYX).0,
+            scale: transform.scale.x,
+        }
+    }
+}
+
+impl From<NetTransform> for Transform {
+    fn from(net: NetTransform) -> Self {
+        Self {
+            translation: net.translation,
+            rotation: Quat::from_rotation_z(net.angle),
+            scale: Vec3::splat(net.scale),
+        }
+    }
+}
+
 /// Everything a pirate can do in one frame, sent from each machine to the host.
 #[derive(Message, Serialize, Deserialize, Clone, Default, Debug)]
 pub struct PlayerInput {
@@ -268,7 +306,7 @@ impl Plugin for NetPlugin {
             .init_resource::<Notice>()
             .init_resource::<Connection>()
             // Registration order must match on every machine; keep it all here.
-            .replicate::<Transform>()
+            .replicate_as::<Transform, NetTransform>()
             .replicate::<Player>()
             .replicate::<RunStats>()
             .replicate::<Aim>()
@@ -649,5 +687,89 @@ mod tests {
         assert!(parse_code("ABCD-EFG0").is_err(), "0 isn't in a code");
         assert_eq!(room_key(&code), room_key(&code), "every machine derives the same key");
         assert_ne!(room_key("ABCDEFGH"), room_key("ABCDEFGJ"), "one letter off is another key");
+    }
+
+    /// Whether `transform` comes through `NetTransform` as it went in.
+    fn survives_the_wire(transform: Transform) -> bool {
+        let back = Transform::from(NetTransform::from(transform));
+        back.translation == transform.translation
+            && (back.rotation * Vec3::X).abs_diff_eq(transform.rotation * Vec3::X, 1e-5)
+            && (back.rotation * Vec3::Z).abs_diff_eq(transform.rotation * Vec3::Z, 1e-5)
+            && back.scale.abs_diff_eq(transform.scale, 1e-6)
+    }
+
+    #[test]
+    fn flat_transforms_survive_the_wire() {
+        for angle in [0.0, 0.5, -2.0, std::f32::consts::PI, 3.0] {
+            let turned = Transform::from_xyz(-120.5, 33.25, 15.0).with_rotation(Quat::from_rotation_z(angle));
+            assert!(survives_the_wire(turned), "{angle}");
+            assert!(survives_the_wire(turned.with_scale(Vec3::splat(1.3))));
+        }
+        assert!(!survives_the_wire(Transform::from_scale(Vec3::new(2.0, 1.0, 1.0))), "uneven scale is lost");
+    }
+
+    #[test]
+    fn transforms_reach_joiners_through_the_compact_form() {
+        use bevy_replicon::test_app::ServerTestAppExt;
+
+        let (mut host, mut joiner) = (App::new(), App::new());
+        for app in [&mut host, &mut joiner] {
+            app.add_plugins((MinimalPlugins, StatesPlugin, RepliconPlugins.set(ServerPlugin::new(PostUpdate))))
+                .replicate_as::<Transform, NetTransform>()
+                .finish();
+        }
+        host.connect_client(&mut joiner);
+        let at = Transform::from_xyz(-40.5, 120.25, 15.0)
+            .with_rotation(Quat::from_rotation_z(2.5))
+            .with_scale(Vec3::splat(1.3));
+        let shot = host.world_mut().spawn((Replicated, at)).id();
+        let mirrored = |joiner: &mut App| {
+            let mut remote = joiner.world_mut().query_filtered::<&Transform, With<Remote>>();
+            remote.single(joiner.world()).copied().expect("one entity across")
+        };
+        host.update();
+        host.exchange_with_client(&mut joiner);
+        joiner.update();
+        let seen = mirrored(&mut joiner);
+        assert_eq!(seen.translation, at.translation);
+        assert!(survives_the_wire(seen) && seen.scale.abs_diff_eq(at.scale, 1e-6));
+        assert!((seen.rotation * Vec3::X).abs_diff_eq(at.rotation * Vec3::X, 1e-5));
+
+        // And as it moves.
+        host.world_mut().get_mut::<Transform>(shot).unwrap().translation.x += 9.0;
+        host.update();
+        host.exchange_with_client(&mut joiner);
+        joiner.update();
+        assert_eq!(mirrored(&mut joiner).translation.x, at.translation.x + 9.0);
+    }
+
+    #[test]
+    fn everything_replicated_in_a_run_is_flat() {
+        let mut app = game();
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        for _ in 0..120 {
+            app.update();
+        }
+        let mut replicated = app.world_mut().query_filtered::<&Transform, With<Replicated>>();
+        let transforms: Vec<Transform> = replicated.iter(app.world()).copied().collect();
+        assert!(transforms.len() > 10, "a deck's worth");
+        assert!(transforms.into_iter().all(survives_the_wire));
+    }
+
+    #[test]
+    fn every_letter_of_a_room_code_is_as_likely() {
+        let mut counts = [0u32; CODE_ALPHABET.len()];
+        let codes = 20_000;
+        for _ in 0..codes {
+            let code = room_code();
+            assert_eq!(code.len(), CODE_LEN);
+            for b in code.bytes() {
+                counts[CODE_ALPHABET.iter().position(|&a| a == b).unwrap()] += 1;
+            }
+        }
+        // About 5161 each, give or take 72: a plain `%` over bytes would put
+        // about 5625 on each of the first eight, well past this.
+        let each = (codes * CODE_LEN) as f32 / CODE_ALPHABET.len() as f32;
+        assert!(counts.iter().all(|&n| (n as f32 - each).abs() < each * 0.07), "{counts:?}");
     }
 }

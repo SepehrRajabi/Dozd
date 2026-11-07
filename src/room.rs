@@ -1,5 +1,3 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::time::SystemTime;
 
 use bevy::asset::RenderAssetUsages;
@@ -241,51 +239,89 @@ impl RoomGrid {
 }
 
 /// Path distance from every tile to the nearest living pirate, so any number of
-/// enemies can navigate around walls with one Dijkstra pass per crew move.
+/// enemies can navigate around walls with one pass per crew move.
 #[derive(Resource, Default)]
 pub struct FlowField {
-    dist: Vec<Vec<u16>>,
+    /// Path cost from each tile, row by row, to the nearest target
+    /// (`u16::MAX` where none can be reached).
+    dist: Vec<u16>,
+    cols: usize,
     targets: Vec<(usize, usize)>,
     /// Whether the vault gate was open when this was worked out.
     gate_open: bool,
 }
+
+/// One more than the dearest step between tiles (a diagonal, 14): enough
+/// buckets in `FlowField::rebuild`'s ring that a step never lands back in the
+/// bucket being worked through.
+const RING: usize = 15;
 
 impl FlowField {
     /// Direction toward the next tile on the shortest path, or `None` if already
     /// in the target tile or unreachable.
     pub fn step(&self, grid: &RoomGrid, from: Vec2) -> Option<Vec2> {
         let (col, row) = grid.tile_of(from)?;
-        let here = *self.dist.get(row)?.get(col)?;
+        let here = *self.dist.get(row * self.cols + col)?;
         if here == 0 || here == u16::MAX {
             return None;
         }
         let (c, r, _) = grid
             .neighbors(col, row)
-            .min_by_key(|&(c, r, _)| self.dist[r][c])?;
+            .min_by_key(|&(c, r, _)| self.dist[r * self.cols + c])?;
         (grid.tile_center(c, r) - from).try_normalize()
     }
 
     /// Paths to the nearest of `targets` (tiles), over the whole deck.
     pub fn toward(grid: &RoomGrid, targets: Vec<(usize, usize)>) -> Self {
-        let mut dist = vec![vec![u16::MAX; grid.cols()]; grid.rows()];
-        let mut queue = BinaryHeap::new();
+        let mut field = Self::default();
+        field.rebuild(grid, targets);
+        field
+    }
+
+    /// Works the paths out afresh for `targets`, in this field's own memory.
+    ///
+    /// Dijkstra's shortest paths, with the queue a ring of buckets, one per
+    /// path cost (Dial's algorithm): steps cost only 10 or 14, so the next
+    /// tile to settle is always in the bucket for the cost being worked on.
+    /// The same distances as a heap would give, for a good deal less work.
+    fn rebuild(&mut self, grid: &RoomGrid, targets: Vec<(usize, usize)>) {
+        let cols = grid.cols();
+        self.cols = cols;
+        self.dist.clear();
+        self.dist.resize(cols * grid.rows(), u16::MAX);
+        let mut ring: [Vec<(usize, usize)>; RING] = Default::default();
+        let mut pending = 0;
         for &(col, row) in &targets {
-            dist[row][col] = 0;
-            queue.push(Reverse((0u16, col, row)));
+            self.dist[row * cols + col] = 0;
+            ring[0].push((col, row));
+            pending += 1;
         }
-        while let Some(Reverse((d, col, row))) = queue.pop() {
-            if d > dist[row][col] {
-                continue;
-            }
-            for (c, r, cost) in grid.neighbors(col, row) {
-                let nd = d + cost;
-                if nd < dist[r][c] {
-                    dist[r][c] = nd;
-                    queue.push(Reverse((nd, c, r)));
+        let mut cost = 0;
+        while pending > 0 {
+            let mut bucket = std::mem::take(&mut ring[cost % RING]);
+            pending -= bucket.len();
+            for &(col, row) in &bucket {
+                // Already settled at a lower cost: this entry is out of date.
+                if usize::from(self.dist[row * cols + col]) != cost {
+                    continue;
+                }
+                for (c, r, step) in grid.neighbors(col, row) {
+                    let next = cost + usize::from(step);
+                    let slot = &mut self.dist[r * cols + c];
+                    if next < usize::from(*slot) {
+                        *slot = next as u16;
+                        ring[next % RING].push((c, r));
+                        pending += 1;
+                    }
                 }
             }
+            // Nothing lands back in this bucket, so its memory goes back for reuse.
+            bucket.clear();
+            ring[cost % RING] = bucket;
+            cost += 1;
         }
-        Self { dist, targets, gate_open: grid.gate_open }
+        self.targets = targets;
+        self.gate_open = grid.gate_open;
     }
 }
 
@@ -302,14 +338,15 @@ fn update_flow_field(
     targets.sort_unstable();
     targets.dedup();
     if field.targets != targets || field.gate_open != grid.gate_open {
-        *field = FlowField::toward(&grid, targets);
+        field.rebuild(&grid, targets);
     }
 }
 
 fn clear_level(mut commands: Commands, level: Query<Entity, With<Level>>, mut built: ResMut<BuiltDeck>) {
     built.0 = None;
+    // `try_`: a shot or effect may already be going this frame on its own.
     for entity in &level {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
 }
 
@@ -356,8 +393,9 @@ fn sync_deck(
     // deck: the host resolves deck-span ones itself. Guards a Hacker turned
     // ride down with the crew.
     let rides = |entity| hacked.get(entity).is_ok_and(|(enemy, health, _)| enemy.is_hacked() && !health.is_dead());
+    // `try_`: a shot or effect may already be going this frame on its own.
     for entity in stale.iter().filter(|e| !rides(*e)) {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
     *field = FlowField::default();
     noise.0.clear();
@@ -919,4 +957,63 @@ pub fn starfield(center: Vec2) -> Vec<(Sprite, Transform)> {
             )
         })
         .collect()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    use super::*;
+
+    /// The plain Dijkstra over a heap that `FlowField::rebuild` must agree with.
+    fn heap_paths(grid: &RoomGrid, targets: &[(usize, usize)]) -> Vec<u16> {
+        let cols = grid.cols();
+        let mut dist = vec![u16::MAX; cols * grid.rows()];
+        let mut queue = BinaryHeap::new();
+        for &(col, row) in targets {
+            dist[row * cols + col] = 0;
+            queue.push(Reverse((0u16, col, row)));
+        }
+        while let Some(Reverse((d, col, row))) = queue.pop() {
+            if d > dist[row * cols + col] {
+                continue;
+            }
+            for (c, r, cost) in grid.neighbors(col, row) {
+                let nd = d + cost;
+                if nd < dist[r * cols + c] {
+                    dist[r * cols + c] = nd;
+                    queue.push(Reverse((nd, c, r)));
+                }
+            }
+        }
+        dist
+    }
+
+    #[test]
+    fn flow_fields_find_the_shortest_paths() {
+        let mut field = FlowField::default();
+        let mut rng = crate::Rng::new(5);
+        for seed in 1..=12 {
+            for deck in 0..3 {
+                let mut grid = build_grid(deckgen::generate(seed, deck, 3));
+                for gate in [false, true] {
+                    grid.set_gate_open(gate);
+                    let open: Vec<(usize, usize)> = (0..grid.rows())
+                        .flat_map(|r| (0..grid.cols()).map(move |c| (c, r)))
+                        .filter(|&(c, r)| grid.is_open(c, r))
+                        .collect();
+                    // None, one, or a crew's worth scattered about.
+                    for count in [0, 1, 4] {
+                        let mut targets: Vec<_> = (0..count).map(|_| open[(rng.unit() * open.len() as f32) as usize % open.len()]).collect();
+                        targets.sort_unstable();
+                        targets.dedup();
+                        field.rebuild(&grid, targets.clone());
+                        assert_eq!(field.dist, heap_paths(&grid, &targets), "seed {seed} deck {deck} gate {gate} targets {targets:?}");
+                    }
+                }
+            }
+        }
+    }
 }

@@ -2,6 +2,8 @@
 # Builds a release of DOZD for one platform and packs it into `dist/`, ready to
 # hand out: a zip with `DOZD.exe` on Windows, a zip with `DOZD.app` on macOS
 # (one app for Apple Silicon and Intel), and a tarball with `dozd` on Linux.
+# It's the `dist` profile (see Cargo.toml): fully link-time optimised, so it
+# takes a while.
 #
 # usage: tools/package.sh windows|macos|linux
 #
@@ -20,8 +22,8 @@ rm -rf "$stage" && mkdir -p "$stage" dist
 case $platform in
 windows)
     target=x86_64-pc-windows-msvc
-    $build --release --target $target
-    cp target/$target/release/dozd.exe "$stage/DOZD.exe"
+    $build --profile dist --target $target
+    cp target/$target/dist/dozd.exe "$stage/DOZD.exe"
     out=dist/dozd-$version-windows-x86_64.zip
     rm -f "$out"
     # Macs and Linux have zip; Windows has PowerShell.
@@ -35,12 +37,12 @@ macos)
     # Older Macs can run it too, not just the one that built it.
     export MACOSX_DEPLOYMENT_TARGET=11.0
     for target in aarch64-apple-darwin x86_64-apple-darwin; do
-        $build --release --target $target
+        $build --profile dist --target $target
     done
     app=$stage/DOZD.app
     mkdir -p "$app/Contents/MacOS"
     lipo -create -output "$app/Contents/MacOS/dozd" \
-        target/aarch64-apple-darwin/release/dozd target/x86_64-apple-darwin/release/dozd
+        target/aarch64-apple-darwin/dist/dozd target/x86_64-apple-darwin/dist/dozd
     sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
     # Ad-hoc signed, so Apple Silicon runs it; it isn't notarized, so the
     # first launch still needs allowing in System Settings.
@@ -51,8 +53,8 @@ macos)
     ;;
 linux)
     target=x86_64-unknown-linux-gnu
-    $build --release --target $target
-    cp target/$target/release/dozd "$stage/dozd"
+    $build --profile dist --target $target
+    cp target/$target/dist/dozd "$stage/dozd"
     out=dist/dozd-$version-linux-x86_64.tar.gz
     tar -czf "$out" -C "$stage" dozd
     ;;

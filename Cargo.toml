@@ -32,3 +32,11 @@ type_complexity = "allow"
 # Smaller single-file binary to share (drops debug symbols).
 [profile.release]
 strip = true
+
+# What `tools/package.sh` ships: release with whole-program link-time
+# optimisation, about a third smaller and a tenth faster. Not on `release`
+# itself, as it turns a one-minute rebuild into a quarter of an hour.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

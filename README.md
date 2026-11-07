@@ -173,7 +173,9 @@ after an edit are much faster. Leave it off for builds you share.
 ## Builds
 
 `tools/package.sh windows|macos|linux` builds a release for that platform and
-packs it into `dist/`:
+packs it into `dist/`. It uses the `dist` profile, a release with full
+link-time optimisation: about a third smaller and a tenth faster, but slow to
+build, so everyday `--release` builds leave it off.
 
 | Platform | Package | Holds |
 | --- | --- | --- |
