@@ -1,6 +1,7 @@
 //! The HUD's shared look and layout: where each piece sits on screen, and the
 //! panels, meters and key caps every module builds its piece from.
 
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
 use crate::combat::{Health, hit_weight};
@@ -33,8 +34,77 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         // Before `Startup`, so every module's HUD piece finds its slot.
-        app.add_systems(PreStartup, spawn_layout)
-            .add_systems(Update, (draw_meters, draw_vignette, retire_controls_hint));
+        app.init_resource::<LastDevice>()
+            .add_systems(PreStartup, spawn_layout)
+            .add_systems(Update, (draw_meters, draw_vignette, retire_controls_hint, (track_device, show_key_caps).chain()));
+    }
+}
+
+/// What this machine last played with, so the key hints name its buttons.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LastDevice {
+    #[default]
+    Keys,
+    Pad,
+}
+
+impl LastDevice {
+    /// How the control bound to `key` (as the keyboard hints name it) reads
+    /// on this device: on a gamepad, its button (see `PadInput` in `player.rs`).
+    pub fn glyph(self, key: &'static str) -> &'static str {
+        if self == Self::Keys {
+            return key;
+        }
+        match key {
+            "WASD" => "L-STICK",
+            "SPACE" => "A",
+            "LMB" => "RT",
+            "R" => "X",
+            "1-4" => "LB/RB",
+            "Q" => "LT",
+            "E" => "Y",
+            "ESC" => "SELECT",
+            "Y" => "D-UP",
+            "N" => "D-DOWN",
+            "ENTER" => "START",
+            other => other,
+        }
+    }
+}
+
+/// A key cap's label, as the keyboard names it; `show_key_caps` swaps in the
+/// gamepad's button while one is in use.
+#[derive(Component)]
+pub struct KeyCapText(pub &'static str);
+
+/// Notices a switch between keyboard and mouse and a gamepad: whichever was
+/// pressed, or moved, last.
+fn track_device(
+    mut last: ResMut<LastDevice>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
+    pads: Query<&Gamepad>,
+) {
+    let pad = pads
+        .iter()
+        .any(|p| p.digital().get_just_pressed().next().is_some() || p.left_stick().length() > 0.5 || p.right_stick().length() > 0.5);
+    let keyboard = keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some() || motion.delta.length() > 2.0;
+    if pad {
+        last.set_if_neq(LastDevice::Pad);
+    } else if keyboard {
+        last.set_if_neq(LastDevice::Keys);
+    }
+}
+
+fn show_key_caps(last: Res<LastDevice>, mut caps: Query<(Ref<KeyCapText>, &mut Text)>) {
+    for (cap, mut text) in &mut caps {
+        if last.is_changed() || cap.is_added() {
+            let glyph = last.glyph(cap.0);
+            if text.0 != glyph {
+                text.0 = glyph.into();
+            }
+        }
     }
 }
 
@@ -188,7 +258,7 @@ pub fn wash(color: Color) -> BackgroundGradient {
 }
 
 /// A keyboard key, drawn as a little cap.
-pub fn key_cap(key: &str) -> impl Bundle {
+pub fn key_cap(key: &'static str) -> impl Bundle {
     (
         Node {
             padding: UiRect::axes(Val::Px(5.0), Val::Px(1.0)),
@@ -197,12 +267,12 @@ pub fn key_cap(key: &str) -> impl Bundle {
         },
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
         BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.35)),
-        children![text(key, 12.0, TEXT)],
+        children![(KeyCapText(key), text(key, 12.0, TEXT))],
     )
 }
 
 /// A key cap followed by what it does.
-pub fn key_hint(key: &str, action: &str) -> impl Bundle {
+pub fn key_hint(key: &'static str, action: &str) -> impl Bundle {
     (
         Node {
             column_gap: Val::Px(5.0),
@@ -584,6 +654,14 @@ fn retire_controls_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_hint_has_a_gamepad_button() {
+        for key in ["WASD", "SPACE", "LMB", "R", "1-4", "Q", "E", "ESC", "Y", "N", "ENTER"] {
+            assert_eq!(LastDevice::Keys.glyph(key), key);
+            assert_ne!(LastDevice::Pad.glyph(key), key, "{key} has no gamepad button");
+        }
+    }
 
     #[test]
     fn credits_are_grouped_in_thousands() {

@@ -3,14 +3,13 @@
 //! client's link and shares it on their pirate, so every machine sees the same.
 //!
 //! Also the roster: a crew has at most one of each class. The host shares who
-//! holds which, and a joiner whose class is taken picks another from it.
+//! holds which, and a joiner whose class is taken picks another in the lobby.
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use serde::{Deserialize, Serialize};
 
-use crate::GameState;
 use crate::challenge::Rewards;
 use crate::challenge_hud::reward_chips;
 use crate::abilities::Passive;
@@ -18,7 +17,7 @@ use crate::class::{Ability, Boons, CrewNames, LocalLoadout, Loadouts, PirateClas
 use crate::combat::Health;
 use crate::hud::{self, HudSlot, Meter, PirateCard, PirateHeader};
 use crate::mission::MissionStatus;
-use crate::net::{ChooseLoadout, LocalId, LocalPlayer, NetMode, authority};
+use crate::net::{LocalId, LocalPlayer, NetMode, authority};
 use crate::player::{PirateStatus, Player, slot_color};
 
 /// Seconds between link measurements; sooner just churns replication.
@@ -49,9 +48,8 @@ pub struct CrewViewPlugin;
 
 impl Plugin for CrewViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PickedClass>()
-            .add_systems(Startup, (spawn_class_picker, spawn_local_card, spawn_local_effects))
-            .add_systems(Update, (update_crew_panel, update_local_card, update_local_effects, update_class_picker));
+        app.add_systems(Startup, (spawn_local_card, spawn_local_effects))
+            .add_systems(Update, (update_crew_panel, update_local_card, update_local_effects));
     }
 }
 
@@ -575,173 +573,4 @@ fn set_text(texts: &mut Query<(&mut Text, &mut TextColor)>, entity: Entity, cont
         text.0 = content.into();
     }
     text_color.set_if_neq(TextColor(color));
-}
-
-/// The class this machine last asked the host for from the picker.
-#[derive(Resource, Default)]
-struct PickedClass(Option<PirateClass>);
-
-#[derive(Component)]
-struct ClassPicker;
-
-#[derive(Component)]
-struct PickerHint;
-
-/// A class on the picker; free ones are buttons.
-#[derive(Component)]
-struct ClassCard(PirateClass);
-
-#[derive(Component)]
-struct CardImage;
-
-/// Who holds a card's class, or that it's free.
-#[derive(Component)]
-struct CardNote;
-
-fn spawn_class_picker(mut commands: Commands, assets: Res<AssetServer>) {
-    commands
-        .spawn((
-            ClassPicker,
-            ZIndex(10),
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                display: Display::None,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-        ))
-        .with_children(|root| {
-            root.spawn(hud::panel_accent(
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(10.0),
-                    padding: UiRect::all(Val::Px(24.0)),
-                    ..default()
-                },
-                hud::GOLD,
-            ))
-            .with_children(|panel| {
-                panel.spawn(hud::text("CLASS TAKEN", 28.0, hud::GOLD));
-                panel.spawn((PickerHint, hud::text("", 15.0, hud::DIM)));
-                panel
-                    .spawn(Node { column_gap: Val::Px(12.0), margin: UiRect::top(Val::Px(8.0)), ..default() })
-                    .with_children(|row| {
-                        for class in PirateClass::ALL {
-                            row.spawn((
-                                Button,
-                                ClassCard(class),
-                                Node {
-                                    width: Val::Px(150.0),
-                                    height: Val::Px(150.0),
-                                    flex_direction: FlexDirection::Column,
-                                    align_items: AlignItems::Center,
-                                    justify_content: JustifyContent::Center,
-                                    row_gap: Val::Px(4.0),
-                                    border: UiRect::all(Val::Px(2.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(hud::PANEL),
-                                BorderColor::all(hud::EDGE),
-                            ))
-                            .with_children(|card| {
-                                card.spawn((
-                                    CardImage,
-                                    ImageNode::new(assets.load(class.sprite())),
-                                    Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
-                                ));
-                                card.spawn(hud::text(class.name(), 18.0, class.color()));
-                                card.spawn((CardNote, hud::text("", 12.0, hud::DIM), TextLayout::no_wrap()));
-                            });
-                        }
-                    });
-            });
-        });
-}
-
-/// Shows the picker to a joiner whose class someone else holds, marks each
-/// taken class with who took it, and asks the host for the one they click.
-fn update_class_picker(
-    mode: Res<NetMode>,
-    state: Res<State<GameState>>,
-    local: Res<LocalId>,
-    loadout: Res<LocalLoadout>,
-    mut picked: ResMut<PickedClass>,
-    roster: Option<Single<&Roster>>,
-    players: Query<&Player>,
-    mut picker: Single<&mut Node, With<ClassPicker>>,
-    mut hint: Single<&mut Text, (With<PickerHint>, Without<CardNote>)>,
-    mut cards: Query<(&ClassCard, &Interaction, &Children, &mut BackgroundColor, &mut BorderColor)>,
-    mut images: Query<&mut ImageNode, With<CardImage>>,
-    mut notes: Query<(&mut Text, &mut TextColor), With<CardNote>>,
-    mut messages: MessageWriter<ChooseLoadout>,
-) {
-    // The lobby has its own class cards; this is for joining mid-run.
-    let joining = matches!(*mode, NetMode::Join { .. })
-        && matches!(state.get(), GameState::Playing | GameState::Over);
-    if !joining {
-        picked.0 = None;
-    }
-    let wanted = picked.0.unwrap_or(loadout.0.class);
-    let roster = roster.filter(|_| joining);
-    let show = roster.as_ref().is_some_and(|roster| {
-        !players.iter().any(|p| p.owner == local.0)
-            && roster.holder(wanted).is_some_and(|owner| owner != local.0)
-            && roster.class_of(local.0).is_none()
-    });
-    let display = if show { Display::Flex } else { Display::None };
-    if picker.display != display {
-        picker.display = display;
-    }
-    let Some(roster) = roster.filter(|_| show) else { return };
-
-    let hint_text = format!("Someone already plays the {}. Pick another pirate.", wanted.name());
-    if hint.0 != hint_text {
-        hint.0 = hint_text;
-    }
-    for (card, interaction, children, mut background, mut border) in &mut cards {
-        let class = card.0;
-        let holder = roster.holder(class).filter(|owner| *owner != local.0);
-        let (note, note_color) = match holder {
-            None => ("FREE".to_string(), class.color()),
-            Some(owner) => match roster.slot(owner).and_then(|slot| roster.label(slot)) {
-                Some(label) => (format!("TAKEN  {label}"), hud::DIM),
-                None => ("TAKEN".to_string(), hud::DIM),
-            },
-        };
-        for child in children.iter() {
-            if let Ok((mut text, mut color)) = notes.get_mut(child) {
-                if text.0 != note {
-                    text.0.clone_from(&note);
-                }
-                color.set_if_neq(TextColor(note_color));
-            }
-            if let Ok(mut image) = images.get_mut(child) {
-                let tint = Color::WHITE.with_alpha(if holder.is_some() { 0.3 } else { 1.0 });
-                if image.color != tint {
-                    image.color = tint;
-                }
-            }
-        }
-
-        let free = holder.is_none();
-        let (bg, edge) = match (free, interaction) {
-            (false, _) => (hud::PANEL, hud::EDGE),
-            (true, Interaction::None) => (hud::PANEL, class.color().with_alpha(0.4)),
-            (true, _) => (Color::srgb(0.14, 0.15, 0.25), class.color()),
-        };
-        background.set_if_neq(BackgroundColor(bg));
-        border.set_if_neq(BorderColor::all(edge));
-
-        if free && *interaction == Interaction::Pressed && picked.0 != Some(class) {
-            picked.0 = Some(class);
-            let mut choice = loadout.0.clone();
-            choice.set_class(class);
-            messages.write(ChooseLoadout(choice));
-        }
-    }
 }

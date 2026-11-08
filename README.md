@@ -172,23 +172,36 @@ after an edit are much faster. Leave it off for builds you share.
 
 ## Builds
 
-`tools/package.sh windows|macos|linux` builds a release for that platform and
-packs it into `dist/`. It uses the `dist` profile, a release with full
+`tools/package.sh <platform>` builds a release for that platform and packs it
+into `dist/`. It uses the `dist` profile, a release with full
 link-time optimisation: about a third smaller and a tenth faster, but slow to
 build, so everyday `--release` builds leave it off.
 
 | Platform | Package | Holds |
 | --- | --- | --- |
-| Windows | `dozd-<version>-windows-x86_64.zip` | `DOZD.exe` |
-| macOS | `dozd-<version>-macos.zip` | `DOZD.app`, one app for Apple Silicon and Intel, macOS 11+ |
-| Linux | `dozd-<version>-linux-x86_64.tar.gz` | `dozd` |
+| `windows` | `dozd-<version>-windows-x86_64.zip` | `DOZD.exe` |
+| `macos` | `dozd-<version>-macos.zip` | `DOZD.app`, one app for Apple Silicon and Intel, macOS 11+ |
+| `linux` | `dozd-<version>-linux-x86_64.tar.gz` | `dozd`, for glibc distros |
+| `linux-musl` | `dozd-<version>-linux-musl-x86_64.tar.gz` | `dozd`, for musl distros: Alpine, Void (musl), Chimera |
+| `linux-riscv64` | `dozd-<version>-linux-riscv64.tar.gz` | `dozd`, for RISC-V glibc distros (glibc 2.30+) |
+| `linux-riscv64-musl` | `dozd-<version>-linux-musl-riscv64.tar.gz` | `dozd`, for RISC-V musl distros |
 
 The macOS app needs both Rust targets (`rustup target add aarch64-apple-darwin
 x86_64-apple-darwin`). From a Mac, Windows builds cross-compile with
 [cargo-xwin](https://github.com/rust-cross/cargo-xwin):
-`CARGO_BUILD="cargo xwin build" tools/package.sh windows`.
+`CARGO_BUILD="cargo xwin build" tools/package.sh windows`. From a Mac or any
+Linux, every Linux build cross-compiles with
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) and
+[Zig](https://ziglang.org): add the target with `rustup target add` (e.g.
+`riscv64gc-unknown-linux-musl`), then `CARGO_BUILD="cargo zigbuild"
+tools/package.sh linux-riscv64-musl`. Cross-builds link against a stand-in
+libudev (`packaging/linux/udev-stub.c`), and load Vulkan or GL and X11 or
+Wayland when the game starts. The musl ones link musl dynamically for that
+(`.cargo/config.toml`), so they run on musl distros rather than everywhere.
+Every Linux build needs `libudev.so.1` for gamepads: nearly every distro has
+it, and on Alpine it's `apk add eudev-libs` (or `libudev-zero`).
 
-GitHub Actions builds all three: run **Release** from the Actions tab to get
+GitHub Actions builds them all: run **Release** from the Actions tab to get
 them as artifacts, or push a version tag (`git tag v0.2.0 && git push origin
 v0.2.0`) to also publish them as a GitHub release.
 
@@ -210,12 +223,27 @@ a Doctor's ward.
 Online, a crew holds at most one of each class, so up to 5 pirates. Host or
 join one under **MULTIPLAYER**. Hosting opens a lobby where everyone picks a
 free class, their abilities and their guns, then the host starts the run;
-after each run the crew returns to the lobby. Someone joining mid-run picks
-from the classes still free. Every time you host you get a fresh room code,
-shown with your address: friends need both to join, and the session is
-encrypted with it, so strangers who stumble on your port can't get in or
-listen in. It's an 8-character code, so treat it as a lock against
-passers-by rather than serious security.
+after each run the crew returns to the lobby. Every time you host you get a
+fresh room code, shown with your address: friends need both to join, and the
+session is encrypted with it, so strangers who stumble on your port can't get
+in or listen in. It's an 8-character code, so treat it as a lock against
+passers-by rather than serious security. Click the code, or **COPY** beside it,
+to put it on the clipboard, and paste it on the Join screen with Ctrl+V (Cmd+V
+on a Mac): the dash fills itself in, so `k7qf29xa` and `K7QF-29XA` are the
+same code. The text boxes take the arrow keys, Home and End too.
+
+To play over the internet, put everyone on the same [Tailscale](https://tailscale.com)
+tailnet. While Tailscale is up, the host screen and the lobby show the host's
+Tailscale address beside the LAN one, and friends on the tailnet join with it
+from anywhere.
+
+Esc (twice, mid-run) drops you out of a run without leaving the crew: a joiner
+waits in the crew lobby while the others play on, and joins back in for the
+next run; the host ending the run takes the whole crew back to the lobby.
+From the results screen one press does the same. In the lobby, Esc twice
+leaves the crew (for the host, it closes the room for everyone). Someone who
+joins mid-run lands in the lobby too: they pick a free class and press
+**JOIN RUN** to drop in.
 
 The Host and Join screens also take a display name of up to 12 characters,
 remembered for next time. It shows in the lobby, over your pirate, on crew
@@ -241,19 +269,25 @@ for nobody.
 
 ## Controls
 
-| Key | Action |
-| --- | --- |
-| WASD / arrows | Move |
-| Mouse | Aim |
-| Left click | Fire |
-| Space | Dash |
-| R | Reload |
-| 1-4 / wheel | Switch gun |
-| Q | Class ability (Hack: Q to aim, left click to hack) |
-| E | Take loot; hold at the vault to pull bars |
-| Y / N | Join / turn down a crewmate's call to breach the vault |
-| Enter | Play again (results screen) |
-| Esc | Leave / back |
+| Key | Gamepad | Action |
+| --- | --- | --- |
+| WASD / arrows | Left stick | Move |
+| Mouse | Right stick | Aim |
+| Left click | Right trigger | Fire |
+| Space | A (South) | Dash |
+| R | X (West) | Reload |
+| 1-4 / wheel | Bumpers | Switch gun |
+| Q | Left trigger | Class ability (Hack: Q or left trigger to aim, left click or right trigger to hack) |
+| Right click | B (East) | Call a hack off |
+| E | Y (North) | Take loot; hold at the vault to pull bars |
+| Y / N | D-pad up / down | Join / turn down a crewmate's call to breach the vault |
+| Enter | Start | Play again (results screen) |
+| Esc | Select | Back; twice mid-run to drop out to the crew lobby, twice in the lobby to leave the crew |
+
+In a run, keyboard and mouse and a gamepad work side by side: the crosshair
+follows whichever aimed last, and the on-screen key hints switch to the
+gamepad's buttons while it's the one in use. The menus and lobby still need
+the mouse and keyboard.
 
 ## Headless
 

@@ -4,11 +4,39 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Only the 2D and UI parts of Bevy: no 3D, glTF or audio to compile.
-bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui", "serialize"] }
+# Only the 2D and UI parts of Bevy: no 3D, glTF or audio to compile. This is
+# Bevy's "2d" and "ui" spelled out. On Linux, gamepads (`bevy_gilrs`) need
+# libudev to link: `tools/package.sh` stands one in for cross-builds.
+bevy = { version = "0.19.1", default-features = false, features = [
+    "default_app",
+    "bevy_gilrs",
+    "std",
+    "multi_threaded",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "bevy_clipboard",
+    "system_clipboard",
+    "custom_cursor",
+    "default_font",
+    "sysinfo_plugin",
+    "webgl2",
+    "2d_bevy_render",
+    "ui_api",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "scene",
+    "picking",
+    "serialize",
+] }
 bevy_replicon = "0.44.3"
 bevy_replicon_renet = "0.20"
 serde = { version = "1.0.229", features = ["derive"] }
+
+# Wayland's client library is found when the game starts, not linked in, so
+# Linux builds need nothing but libc to link and cross-build from anywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30.13", default-features = false, features = ["wayland-dlopen"] }
 
 # `cargo run --features dev` links Bevy dynamically for fast rebuilds.
 # Never for release: the binary would need Bevy's library beside it.

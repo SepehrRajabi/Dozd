@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -11,7 +13,7 @@ use crate::class::{Ability, Boons, CrewNames, LASER_SLOW, Laser, LocalLoadout, L
 use crate::crew::JoinOrder;
 use crate::combat::{Fade, Health, Hurtbox, Shake, Team};
 use crate::guns::Arsenal;
-use crate::net::{ChooseLoadout, HOST_ID, LocalId, LocalPlayer, NetMode, PlayerInput, authority};
+use crate::net::{ChooseLoadout, EndSession, HOST_ID, LocalId, LocalPlayer, NetMode, PlayerInput, StartSession, TakePart, authority};
 use crate::mission::MissionStatus;
 use crate::perks::{PerkKind, Perks};
 use crate::room::{Heist, RoomGrid, TILE};
@@ -46,12 +48,19 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CrewSize>()
+            .init_resource::<WantsIn>()
             .add_observer(refuse_impostors)
             .add_observer(on_client_joined)
             .add_observer(on_client_left)
+            // A new crew, or the same one back from a run: nobody's asked yet.
+            .add_observer(|_: On<StartSession>, mut wants_in: ResMut<WantsIn>| wants_in.0.clear())
+            .add_observer(|_: On<EndSession>, mut wants_in: ResMut<WantsIn>| wants_in.0.clear())
+            .add_systems(OnEnter(GameState::Lobby), |mut wants_in: ResMut<WantsIn>| wants_in.0.clear())
             .add_systems(
                 PreUpdate,
-                (receive_loadouts, receive_input).after(ServerSystems::Receive).run_if(authority),
+                ((receive_loadouts, receive_take_part).chain(), receive_input)
+                    .after(ServerSystems::Receive)
+                    .run_if(authority),
             )
             .add_systems(OnEnter(ClientState::Connected), send_loadout)
             .add_systems(
@@ -69,6 +78,7 @@ impl Plugin for PlayerViewPlugin {
         app.init_resource::<LocalAim>()
             .init_resource::<TriggerArmed>()
             .init_resource::<HackAiming>()
+            .init_resource::<PadAim>()
             .add_observer(dress_player)
             // The click that started the run is still held: it mustn't fire.
             .add_systems(OnEnter(GameState::Playing), |mut armed: ResMut<TriggerArmed>| armed.0 = false)
@@ -229,6 +239,81 @@ struct TriggerArmed(bool);
 #[derive(Resource, Default)]
 pub struct HackAiming(pub bool);
 
+/// How far ahead of their pirate a gamepad player's crosshair sits, the way
+/// the right stick points.
+const PAD_AIM_REACH: f32 = 110.0;
+/// How far a stick must be pushed before it counts: less is drift.
+const PAD_DEADZONE: f32 = 0.2;
+
+/// Whether the crosshair follows the mouse or a gamepad's right stick:
+/// whichever moved last. `dir` is where the stick last pointed, while it has
+/// the crosshair; `cursor` where the mouse was, to notice it moving.
+#[derive(Resource, Default)]
+struct PadAim {
+    dir: Option<Vec2>,
+    cursor: Option<Vec2>,
+}
+
+/// What this machine's gamepads ask for this frame, any of them. The same
+/// controls as the keyboard and mouse, laid out as twin-stick shooters do:
+///
+/// | Pad | Does | Keys |
+/// | --- | --- | --- |
+/// | left stick | move | WASD |
+/// | right stick | aim | mouse |
+/// | right trigger | fire (and lets a hack go) | left click |
+/// | left trigger | class ability | Q |
+/// | B / East | call a hack off | right click |
+/// | A / South | dash | Space |
+/// | X / West | reload | R |
+/// | Y / North | interact, held to pull bars | E |
+/// | bumpers | previous / next gun | wheel |
+/// | d-pad up / down | join / turn down a breach | Y / N |
+/// | Start | on from the results | Enter |
+#[derive(Default, Debug, PartialEq)]
+struct PadInput {
+    movement: Vec2,
+    /// Which way the right stick points, if it's pushed.
+    aim: Option<Vec2>,
+    fire: bool,
+    fire_pressed: bool,
+    ability: bool,
+    cancel: bool,
+    dash: bool,
+    reload: bool,
+    interact: bool,
+    interact_held: bool,
+    cycle: i8,
+    accept: bool,
+    decline: bool,
+    restart: bool,
+}
+
+fn read_pads<'a>(pads: impl IntoIterator<Item = &'a Gamepad>) -> PadInput {
+    use GamepadButton::*;
+    let stick = |v: Vec2| if v.length() > PAD_DEADZONE { v.clamp_length_max(1.0) } else { Vec2::ZERO };
+    let mut input = PadInput::default();
+    for pad in pads {
+        input.movement += stick(pad.left_stick());
+        input.aim = input.aim.or(stick(pad.right_stick()).try_normalize());
+        input.fire |= pad.pressed(RightTrigger2);
+        input.fire_pressed |= pad.just_pressed(RightTrigger2);
+        input.ability |= pad.just_pressed(LeftTrigger2);
+        input.cancel |= pad.just_pressed(East);
+        input.dash |= pad.just_pressed(South);
+        input.reload |= pad.just_pressed(West);
+        input.interact |= pad.just_pressed(North);
+        input.interact_held |= pad.pressed(North);
+        input.cycle += pad.just_pressed(RightTrigger) as i8 - pad.just_pressed(LeftTrigger) as i8;
+        input.accept |= pad.just_pressed(DPadUp);
+        input.decline |= pad.just_pressed(DPadDown);
+        input.restart |= pad.just_pressed(Start);
+    }
+    input.movement = input.movement.clamp_length_max(1.0);
+    input.cycle = input.cycle.clamp(-1, 1);
+    input
+}
+
 impl Default for LocalAim {
     fn default() -> Self {
         Self { target: Vec2::ZERO, dir: Vec2::X }
@@ -313,24 +398,37 @@ pub fn spawn_crew(
     }
 }
 
-/// Gives a client who joined mid-run a pirate, once they're authorized and their
-/// loadout has arrived (whichever comes last). Mid-results joiners get one when
-/// the next run starts.
+/// Host-side: clients who asked (`TakePart(true)`) to be dealt into the run
+/// under way. Only they get a pirate mid-run; everyone connected gets one when
+/// a run starts from the lobby, so it's emptied there.
+#[derive(Resource, Default)]
+pub struct WantsIn(pub HashSet<u64>);
+
+/// Who has a pirate, by owner and slot. Kept up to date by hand as pirates come
+/// and go within a frame, as commands only land after the system.
+fn aboard<'a>(players: impl IntoIterator<Item = &'a Player>) -> Vec<(u64, u8)> {
+    players.into_iter().map(|p| (p.owner, p.slot)).collect()
+}
+
+/// Gives a client who asked into the run a pirate, once they're authorized and
+/// their loadout has arrived (whichever comes last). Those who ask on the
+/// results screen get one when the next run starts.
 fn spawn_joiner(
     commands: &mut Commands,
     owner: u64,
     loadout: &Loadout,
-    players: &Query<&Player>,
+    aboard: &mut Vec<(u64, u8)>,
     grid: Option<&RoomGrid>,
     heist: &Heist,
     state: &State<GameState>,
 ) {
     let Some(grid) = grid else { return };
-    if *state.get() != GameState::Playing || players.iter().any(|p| p.owner == owner) {
+    if *state.get() != GameState::Playing || aboard.iter().any(|&(o, _)| o == owner) {
         return;
     }
-    let slot = players.iter().map(|p| p.slot + 1).max().unwrap_or(0);
+    let slot = aboard.iter().map(|&(_, slot)| slot + 1).max().unwrap_or(0);
     spawn_player(commands, owner, loadout, slot, crew_spot(grid.crew_spawn, slot as usize), heist.deck);
+    aboard.push((owner, slot));
 }
 
 /// Host-side: a client turned away by `refuse_impostors`. Its messages are
@@ -380,14 +478,19 @@ fn on_client_joined(
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
     state: Res<State<GameState>>,
+    wants_in: Res<WantsIn>,
     mut order: ResMut<JoinOrder>,
 ) {
     let Ok(id) = ids.get(add.entity) else { return };
     info!("client {} joined", id.get());
     order.0.retain(|o| *o != id.get());
     order.0.push(id.get());
-    if let Some(loadout) = loadouts.0.get(&id.get()) {
-        spawn_joiner(&mut commands, id.get(), loadout, &players, grid.as_deref(), &heist, &state);
+    // Someone connecting mid-run waits in the lobby until they ask in.
+    if wants_in.0.contains(&id.get())
+        && let Some(loadout) = loadouts.0.get(&id.get())
+    {
+        let mut aboard = aboard(players);
+        spawn_joiner(&mut commands, id.get(), loadout, &mut aboard, grid.as_deref(), &heist, &state);
     }
 }
 
@@ -407,12 +510,14 @@ fn receive_loadouts(
     grid: Option<Res<RoomGrid>>,
     heist: Res<Heist>,
     state: Res<State<GameState>>,
+    wants_in: Res<WantsIn>,
 ) {
+    let mut aboard = aboard(players);
     for FromClient { client_id, message } in messages.read() {
         let Some((id, authorized)) = client_id.entity().and_then(|e| clients.get(e).ok()) else { continue };
         let id = id.get();
         // Once aboard, a pirate keeps their class, guns and name until the lobby.
-        if *state.get() != GameState::Lobby && players.iter().any(|p| p.owner == id) {
+        if *state.get() != GameState::Lobby && aboard.iter().any(|&(o, _)| o == id) {
             continue;
         }
         let loadout = message.0.clone().sanitized();
@@ -429,10 +534,50 @@ fn receive_loadouts(
             info!("client {id} asked for {}, which is taken", loadout.class.name());
             continue;
         }
-        if authorized {
-            spawn_joiner(&mut commands, id, &loadout, &players, grid.as_deref(), &heist, &state);
+        if authorized && wants_in.0.contains(&id) {
+            spawn_joiner(&mut commands, id, &loadout, &mut aboard, grid.as_deref(), &heist, &state);
         }
         loadouts.0.insert(id, loadout);
+    }
+}
+
+/// A joiner asks into the run under way, or sits the rest of it out. Sitting
+/// out takes their pirate out of the run as leaving would, but keeps their
+/// seat: their loadout, name and place in the join order.
+#[allow(clippy::too_many_arguments)]
+fn receive_take_part(
+    mut commands: Commands,
+    mut messages: MessageReader<FromClient<TakePart>>,
+    clients: Query<(&NetworkId, Has<AuthorizedClient>), Without<Refused>>,
+    loadouts: Res<Loadouts>,
+    mut wants_in: ResMut<WantsIn>,
+    players: Query<(Entity, &Player)>,
+    grid: Option<Res<RoomGrid>>,
+    heist: Res<Heist>,
+    state: Res<State<GameState>>,
+) {
+    let mut aboard = aboard(players.iter().map(|(_, p)| p));
+    for FromClient { client_id, message } in messages.read() {
+        let Some((id, authorized)) = client_id.entity().and_then(|e| clients.get(e).ok()) else { continue };
+        let id = id.get();
+        if message.0 {
+            info!("client {id} asked into the run");
+            wants_in.0.insert(id);
+            // The loadout may still be on its way: `receive_loadouts` deals
+            // them in when it lands, `on_client_joined` once authorized.
+            if authorized && let Some(loadout) = loadouts.0.get(&id) {
+                spawn_joiner(&mut commands, id, loadout, &mut aboard, grid.as_deref(), &heist, &state);
+            }
+        } else {
+            info!("client {id} is sitting the run out");
+            wants_in.0.remove(&id);
+            aboard.retain(|&(owner, _)| owner != id);
+            for (entity, player) in &players {
+                if player.owner == id {
+                    commands.entity(entity).try_despawn();
+                }
+            }
+        }
     }
 }
 
@@ -443,10 +588,12 @@ fn on_client_left(
     mut loadouts: ResMut<Loadouts>,
     mut names: ResMut<CrewNames>,
     mut order: ResMut<JoinOrder>,
+    mut wants_in: ResMut<WantsIn>,
     players: Query<(Entity, &Player)>,
 ) {
     let Ok(id) = ids.get(remove.entity) else { return };
     info!("client {} left", id.get());
+    wants_in.0.remove(&id.get());
     loadouts.0.remove(&id.get());
     names.0.remove(&id.get());
     order.0.retain(|o| *o != id.get());
@@ -487,20 +634,23 @@ fn dress_player(
     }
 }
 
-/// Reads this machine's keyboard and mouse and sends them to the host.
+/// Reads this machine's keyboard, mouse and gamepads and sends them to the host.
 fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
+    pads: Query<&Gamepad>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     player: Option<Single<(&Transform, &Player, &Health, &Ability), With<LocalPlayer>>>,
     mut local_aim: ResMut<LocalAim>,
+    mut pad_aim: ResMut<PadAim>,
     mut armed: ResMut<TriggerArmed>,
     mut hack_aiming: ResMut<HackAiming>,
     mut inputs: MessageWriter<PlayerInput>,
 ) {
-    if !mouse.pressed(MouseButton::Left) {
+    let pad = read_pads(pads.iter());
+    if !mouse.pressed(MouseButton::Left) && !pad.fire {
         armed.0 = true;
     }
     // A hack goes off on the click after Q, not on Q itself.
@@ -511,14 +661,14 @@ fn gather_input(
             && !health.is_dead()
             && ability.cooldown <= 0.0
     });
-    let mut ability = keys.just_pressed(KeyCode::KeyQ);
+    let mut ability = keys.just_pressed(KeyCode::KeyQ) || pad.ability;
     let mut hack_released = false;
     if !hack_ready {
         hack_aiming.0 = false;
     } else if hack_aiming.0 {
-        if keys.just_pressed(KeyCode::KeyQ) || mouse.just_pressed(MouseButton::Right) {
+        if ability || mouse.just_pressed(MouseButton::Right) || pad.cancel {
             hack_aiming.0 = false;
-        } else if armed.0 && mouse.just_pressed(MouseButton::Left) {
+        } else if armed.0 && (mouse.just_pressed(MouseButton::Left) || pad.fire_pressed) {
             hack_aiming.0 = false;
             hack_released = true;
             // Holding the button on doesn't fire the gun after the hack.
@@ -530,11 +680,23 @@ fn gather_input(
         ability = false;
     }
     let trigger = armed.0 && !hack_aiming.0 && !hack_released;
+    // The mouse takes the crosshair back by moving; the stick, by being pushed.
+    let cursor = window.cursor_position();
+    if cursor != pad_aim.cursor {
+        pad_aim.cursor = cursor;
+        if cursor.is_some() {
+            pad_aim.dir = None;
+        }
+    }
+    if pad.aim.is_some() {
+        pad_aim.dir = pad.aim;
+    }
     let (camera, camera_transform) = *camera;
-    if let Some(target) = window
-        .cursor_position()
-        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
-    {
+    if let Some(dir) = pad_aim.dir {
+        if let Some(player) = &player {
+            local_aim.target = player.0.translation.truncate() + dir * PAD_AIM_REACH;
+        }
+    } else if let Some(target) = cursor.and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok()) {
         local_aim.target = target;
     }
     if let Some(player) = player
@@ -548,16 +710,17 @@ fn gather_input(
     };
     const SLOTS: [KeyCode; 4] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4];
 
+    let keyboard = Vec2::new(
+        axis([KeyCode::KeyA, KeyCode::ArrowLeft], [KeyCode::KeyD, KeyCode::ArrowRight]),
+        axis([KeyCode::KeyS, KeyCode::ArrowDown], [KeyCode::KeyW, KeyCode::ArrowUp]),
+    );
     inputs.write(PlayerInput {
-        movement: Vec2::new(
-            axis([KeyCode::KeyA, KeyCode::ArrowLeft], [KeyCode::KeyD, KeyCode::ArrowRight]),
-            axis([KeyCode::KeyS, KeyCode::ArrowDown], [KeyCode::KeyW, KeyCode::ArrowUp]),
-        ),
+        movement: (keyboard + pad.movement).clamp_length_max(1.0),
         aim: local_aim.target,
-        fire: trigger && mouse.pressed(MouseButton::Left),
-        fire_pressed: trigger && mouse.just_pressed(MouseButton::Left),
-        dash: keys.just_pressed(KeyCode::Space),
-        reload: keys.just_pressed(KeyCode::KeyR),
+        fire: trigger && (mouse.pressed(MouseButton::Left) || pad.fire),
+        fire_pressed: trigger && (mouse.just_pressed(MouseButton::Left) || pad.fire_pressed),
+        dash: keys.just_pressed(KeyCode::Space) || pad.dash,
+        reload: keys.just_pressed(KeyCode::KeyR) || pad.reload,
         slot: SLOTS.iter().position(|&k| keys.just_pressed(k)).map(|i| i as u8),
         // Wheel down cycles forward.
         cycle: if scroll.delta.y < 0.0 {
@@ -565,14 +728,14 @@ fn gather_input(
         } else if scroll.delta.y > 0.0 {
             -1
         } else {
-            0
+            pad.cycle
         },
-        interact: keys.just_pressed(KeyCode::KeyE),
-        interact_held: keys.pressed(KeyCode::KeyE),
+        interact: keys.just_pressed(KeyCode::KeyE) || pad.interact,
+        interact_held: keys.pressed(KeyCode::KeyE) || pad.interact_held,
         ability,
-        accept: keys.just_pressed(KeyCode::KeyY),
-        decline: keys.just_pressed(KeyCode::KeyN),
-        restart: keys.just_pressed(KeyCode::Enter),
+        accept: keys.just_pressed(KeyCode::KeyY) || pad.accept,
+        decline: keys.just_pressed(KeyCode::KeyN) || pad.decline,
+        restart: keys.just_pressed(KeyCode::Enter) || pad.restart,
     });
 }
 
@@ -805,9 +968,60 @@ mod tests {
 
     use super::*;
     use crate::crew::{Crewmate, Roster};
-    use crate::net::StartSession;
+    use crate::net::{DropOut, StartSession};
     use crate::room::NextSeed;
     use crate::GamePlugins;
+
+    /// A gamepad with `pressed` held down (pressed this frame) and its sticks at `left` and `right`.
+    fn pad(pressed: &[GamepadButton], left: Vec2, right: Vec2) -> Gamepad {
+        let mut pad = Gamepad::default();
+        for &button in pressed {
+            pad.digital_mut().press(button);
+        }
+        for (axis, value) in [
+            (GamepadAxis::LeftStickX, left.x),
+            (GamepadAxis::LeftStickY, left.y),
+            (GamepadAxis::RightStickX, right.x),
+            (GamepadAxis::RightStickY, right.y),
+        ] {
+            pad.analog_mut().set(axis, value);
+        }
+        pad
+    }
+
+    #[test]
+    fn a_gamepad_works_every_control() {
+        use GamepadButton::*;
+        let idle = read_pads([&pad(&[], Vec2::ZERO, Vec2::ZERO)]);
+        assert_eq!(idle, PadInput::default(), "nothing pressed, nothing asked");
+
+        let busy = read_pads([&pad(&[RightTrigger2, LeftTrigger2, South, West, North, RightTrigger, DPadUp, Start], Vec2::new(0.0, 1.0), Vec2::new(-0.8, 0.0))]);
+        assert_eq!(busy.movement, Vec2::Y);
+        assert_eq!(busy.aim, Some(Vec2::NEG_X));
+        assert!(busy.fire && busy.fire_pressed && busy.ability && busy.dash && busy.reload);
+        assert!(busy.interact && busy.interact_held && busy.accept && busy.restart);
+        assert_eq!(busy.cycle, 1);
+        assert!(!busy.cancel && !busy.decline);
+        let back = read_pads([&pad(&[LeftTrigger, East, DPadDown], Vec2::ZERO, Vec2::ZERO)]);
+        assert!(back.cancel && back.decline && back.cycle == -1);
+    }
+
+    #[test]
+    fn stick_drift_counts_for_nothing() {
+        let drifting = read_pads([&pad(&[], Vec2::new(0.1, -0.12), Vec2::new(0.15, 0.0))]);
+        assert_eq!((drifting.movement, drifting.aim), (Vec2::ZERO, None));
+        // A full push at an angle is still only full speed.
+        assert!(read_pads([&pad(&[], Vec2::ONE, Vec2::ZERO)]).movement.length() <= 1.0 + 1e-6);
+    }
+
+    #[test]
+    fn two_gamepads_share_one_pirate() {
+        use GamepadButton::*;
+        let both = read_pads([&pad(&[South], Vec2::X, Vec2::ZERO), &pad(&[RightTrigger2], Vec2::X, Vec2::Y)]);
+        assert!(both.dash && both.fire);
+        assert_eq!(both.movement, Vec2::X, "never faster than one");
+        assert_eq!(both.aim, Some(Vec2::Y));
+    }
 
     #[test]
     fn ids_already_aboard_are_impostors() {
@@ -914,6 +1128,13 @@ mod tests {
         app.update();
     }
 
+    /// The joiner asks into the run (`true`) or sits it out.
+    fn take_part(app: &mut App, client: Entity, wants: bool) {
+        app.world_mut().write_message(FromClient { client_id: ClientId::Client(client), message: TakePart(wants) });
+        app.update();
+        app.update();
+    }
+
     fn roster_entry(app: &mut App) -> Option<Crewmate> {
         let mut rosters = app.world_mut().query::<&Roster>();
         let roster = rosters.single(app.world()).expect("the host keeps a roster");
@@ -929,6 +1150,7 @@ mod tests {
     fn a_joiner_whose_class_is_taken_shows_their_name() {
         let mut app = host();
         let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
         // The host plays the Gunner.
         choose(&mut app, client, PirateClass::Gunner, "Mira");
         let entry = roster_entry(&mut app).expect("on the roster");
@@ -953,6 +1175,7 @@ mod tests {
     fn a_pirate_aboard_keeps_their_name_until_the_lobby() {
         let mut app = host();
         let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
         choose(&mut app, client, PirateClass::Engineer, "Mira");
         choose(&mut app, client, PirateClass::Engineer, "Zed");
         assert_eq!(roster_entry(&mut app).unwrap().name, "Mira");
@@ -963,6 +1186,7 @@ mod tests {
     fn a_blank_name_stays_the_slot_label() {
         let mut app = host();
         let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
         choose(&mut app, client, PirateClass::Engineer, "   ");
         let mut pirates = app.world_mut().query::<&Player>();
         let pirate = pirates.iter(app.world()).find(|p| p.owner == JOINER).expect("aboard");
@@ -995,5 +1219,160 @@ mod tests {
         app.update();
         assert!(app.world().resource::<CrewNames>().0.is_empty());
         assert!(roster_entry(&mut app).is_none());
+    }
+
+    fn has_pirate(app: &mut App) -> bool {
+        pirate_name(app).is_some()
+    }
+
+    fn state(app: &App) -> GameState {
+        *app.world().resource::<State<GameState>>().get()
+    }
+
+    #[test]
+    fn a_mid_run_joiner_gets_a_pirate_only_once_they_ask() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        assert!(!has_pirate(&mut app), "connecting mid-run lands them in the lobby");
+        assert_eq!(roster_entry(&mut app).unwrap().class, Some(PirateClass::Engineer), "but their class is held");
+        take_part(&mut app, client, true);
+        assert!(has_pirate(&mut app));
+        assert!(app.world().resource::<WantsIn>().0.contains(&JOINER));
+    }
+
+    #[test]
+    fn asking_in_before_the_loadout_lands_still_deals_them_in() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
+        assert!(!has_pirate(&mut app), "no loadout yet");
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        assert!(has_pirate(&mut app));
+    }
+
+    #[test]
+    fn asking_in_before_being_authorized_waits_for_it() {
+        let mut app = host();
+        app.insert_resource(NetMode::Host { port: 0, code: String::new() });
+        let client = app.world_mut().spawn((ConnectedClient { max_size: 1200 }, NetworkId::new(JOINER))).id();
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        take_part(&mut app, client, true);
+        assert!(!has_pirate(&mut app));
+        app.world_mut().entity_mut(client).insert(AuthorizedClient);
+        app.update();
+        assert!(has_pirate(&mut app));
+    }
+
+    #[test]
+    fn sitting_out_takes_the_pirate_out_but_keeps_the_seat() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        let mut pirates = app.world_mut().query::<&Player>();
+        let first_slot = pirates.iter(app.world()).find(|p| p.owner == JOINER).unwrap().slot;
+
+        take_part(&mut app, client, false);
+        assert!(!has_pirate(&mut app), "out of the run");
+        assert!(app.world().get_entity(client).is_ok(), "still connected");
+        assert!(!app.world().resource::<WantsIn>().0.contains(&JOINER));
+        assert_eq!(app.world().resource::<Loadouts>().0[&JOINER].class, PirateClass::Engineer);
+        assert_eq!(app.world().resource::<CrewNames>().0[&JOINER], "Mira");
+        assert!(app.world().resource::<JoinOrder>().0.contains(&JOINER));
+        assert_eq!(roster_entry(&mut app).unwrap().class, Some(PirateClass::Engineer));
+        let mut pirates = app.world_mut().query::<&Player>();
+        assert!(pirates.iter(app.world()).any(|p| p.owner == HOST_ID), "the host plays on");
+
+        // Their loadout no longer counts as a pirate aboard: they can change it.
+        choose(&mut app, client, PirateClass::Doctor, "Mira");
+        assert_eq!(app.world().resource::<Loadouts>().0[&JOINER].class, PirateClass::Doctor);
+        assert!(!has_pirate(&mut app), "changing class doesn't deal them back in");
+
+        take_part(&mut app, client, true);
+        let mut pirates = app.world_mut().query::<&Player>();
+        let back = pirates.iter(app.world()).find(|p| p.owner == JOINER).expect("a fresh pirate");
+        assert_eq!(back.class, PirateClass::Doctor);
+        assert_eq!(back.slot, first_slot, "the slot they left is free again");
+        assert_eq!(state(&app), GameState::Playing);
+    }
+
+    #[test]
+    fn sitting_out_and_back_in_the_same_frame_deals_a_fresh_pirate() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        take_part(&mut app, client, true);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        let mut pirates = app.world_mut().query::<(Entity, &Player)>();
+        let old = pirates.iter(app.world()).find(|(_, p)| p.owner == JOINER).unwrap().0;
+        for wants in [false, true] {
+            app.world_mut().write_message(FromClient { client_id: ClientId::Client(client), message: TakePart(wants) });
+        }
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(old).is_err());
+        let mut pirates = app.world_mut().query::<&Player>();
+        assert_eq!(pirates.iter(app.world()).filter(|p| p.owner == JOINER).count(), 1);
+    }
+
+    #[test]
+    fn asking_in_on_the_results_waits_for_the_next_run() {
+        let mut app = host();
+        let client = host_with_joiner(&mut app);
+        choose(&mut app, client, PirateClass::Engineer, "Mira");
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Over);
+        app.update();
+        take_part(&mut app, client, true);
+        assert!(!has_pirate(&mut app));
+        // Back in the lobby nobody's asked: the next run deals in everyone.
+        app.world_mut().trigger(DropOut);
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby);
+        assert!(app.world().resource::<WantsIn>().0.is_empty());
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Playing);
+        app.update();
+        app.update();
+        assert!(has_pirate(&mut app));
+    }
+
+    #[test]
+    fn the_host_dropping_out_takes_the_crew_to_the_lobby() {
+        for from in [GameState::Playing, GameState::Over] {
+            let mut app = host();
+            let client = host_with_joiner(&mut app);
+            take_part(&mut app, client, true);
+            choose(&mut app, client, PirateClass::Engineer, "Mira");
+            assert!(has_pirate(&mut app));
+            app.world_mut().resource_mut::<NextState<GameState>>().set(from);
+            app.update();
+            assert_eq!(state(&app), from);
+            app.world_mut().trigger(DropOut);
+            app.update();
+            app.update();
+            assert_eq!(state(&app), GameState::Lobby, "from {from:?}");
+            assert!(app.world().get_entity(client).is_ok(), "the crew stays together");
+            assert_eq!(*app.world().resource::<NetMode>(), NetMode::Host { port: 0, code: String::new() });
+            let mut status = app.world_mut().query::<&MissionStatus>();
+            assert_eq!(status.single(app.world()).unwrap().phase(), GameState::Lobby, "joiners follow");
+
+            // And a new run from there deals everyone in.
+            app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Playing);
+            app.update();
+            app.update();
+            assert_eq!(state(&app), GameState::Playing);
+            assert!(has_pirate(&mut app));
+        }
+    }
+
+    #[test]
+    fn dropping_out_solo_ends_the_session() {
+        let mut app = host();
+        app.world_mut().trigger(DropOut);
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Menu);
+        let mut pirates = app.world_mut().query::<&Player>();
+        assert_eq!(pirates.iter(app.world()).count(), 0);
     }
 }

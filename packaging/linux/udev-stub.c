@@ -1,0 +1,90 @@
+/*
+ * A stand-in libudev to link cross-builds against (see tools/package.sh).
+ * Gamepads (gilrs) need libudev on Linux, and a cross-build has none for its
+ * target. This gives the linker the same names and the same soname,
+ * libudev.so.1, and the player's own libudev.so.1 is what loads when the game
+ * starts. Nothing here ever runs. The names are every function libudev-sys
+ * binds, so a gilrs update that calls one more still links.
+ */
+void udev_device_get_action(void) {}
+void udev_device_get_devlinks_list_entry(void) {}
+void udev_device_get_devnode(void) {}
+void udev_device_get_devnum(void) {}
+void udev_device_get_devpath(void) {}
+void udev_device_get_devtype(void) {}
+void udev_device_get_driver(void) {}
+void udev_device_get_is_initialized(void) {}
+void udev_device_get_parent(void) {}
+void udev_device_get_parent_with_subsystem_devtype(void) {}
+void udev_device_get_properties_list_entry(void) {}
+void udev_device_get_property_value(void) {}
+void udev_device_get_seqnum(void) {}
+void udev_device_get_subsystem(void) {}
+void udev_device_get_sysattr_list_entry(void) {}
+void udev_device_get_sysattr_value(void) {}
+void udev_device_get_sysname(void) {}
+void udev_device_get_sysnum(void) {}
+void udev_device_get_syspath(void) {}
+void udev_device_get_tags_list_entry(void) {}
+void udev_device_get_udev(void) {}
+void udev_device_get_usec_since_initialized(void) {}
+void udev_device_has_tag(void) {}
+void udev_device_new_from_device_id(void) {}
+void udev_device_new_from_devnum(void) {}
+void udev_device_new_from_environment(void) {}
+void udev_device_new_from_subsystem_sysname(void) {}
+void udev_device_new_from_syspath(void) {}
+void udev_device_ref(void) {}
+void udev_device_set_sysattr_value(void) {}
+void udev_device_unref(void) {}
+void udev_enumerate_add_match_is_initialized(void) {}
+void udev_enumerate_add_match_parent(void) {}
+void udev_enumerate_add_match_property(void) {}
+void udev_enumerate_add_match_subsystem(void) {}
+void udev_enumerate_add_match_sysattr(void) {}
+void udev_enumerate_add_match_sysname(void) {}
+void udev_enumerate_add_match_tag(void) {}
+void udev_enumerate_add_nomatch_subsystem(void) {}
+void udev_enumerate_add_nomatch_sysattr(void) {}
+void udev_enumerate_add_syspath(void) {}
+void udev_enumerate_get_list_entry(void) {}
+void udev_enumerate_get_udev(void) {}
+void udev_enumerate_new(void) {}
+void udev_enumerate_ref(void) {}
+void udev_enumerate_scan_devices(void) {}
+void udev_enumerate_scan_subsystems(void) {}
+void udev_enumerate_unref(void) {}
+void udev_get_userdata(void) {}
+void udev_hwdb_get_properties_list_entry(void) {}
+void udev_hwdb_new(void) {}
+void udev_hwdb_ref(void) {}
+void udev_hwdb_unref(void) {}
+void udev_list_entry_get_by_name(void) {}
+void udev_list_entry_get_name(void) {}
+void udev_list_entry_get_next(void) {}
+void udev_list_entry_get_value(void) {}
+void udev_monitor_enable_receiving(void) {}
+void udev_monitor_filter_add_match_subsystem_devtype(void) {}
+void udev_monitor_filter_add_match_tag(void) {}
+void udev_monitor_filter_remove(void) {}
+void udev_monitor_filter_update(void) {}
+void udev_monitor_get_fd(void) {}
+void udev_monitor_get_udev(void) {}
+void udev_monitor_new_from_netlink(void) {}
+void udev_monitor_receive_device(void) {}
+void udev_monitor_ref(void) {}
+void udev_monitor_set_receive_buffer_size(void) {}
+void udev_monitor_unref(void) {}
+void udev_new(void) {}
+void udev_queue_flush(void) {}
+void udev_queue_get_fd(void) {}
+void udev_queue_get_queue_is_empty(void) {}
+void udev_queue_get_udev(void) {}
+void udev_queue_get_udev_is_active(void) {}
+void udev_queue_new(void) {}
+void udev_queue_ref(void) {}
+void udev_queue_unref(void) {}
+void udev_ref(void) {}
+void udev_set_userdata(void) {}
+void udev_unref(void) {}
+void udev_util_encode_string(void) {}

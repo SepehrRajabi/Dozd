@@ -205,6 +205,24 @@ pub fn local_ip() -> Option<IpAddr> {
     socket.local_addr().ok().map(|a| a.ip())
 }
 
+/// This machine's Tailscale address, while Tailscale is up. The route to
+/// Tailscale's own DNS server, 100.100.100.100, only leaves by the tailnet
+/// then, so the address it leaves from is this machine's on the tailnet.
+pub fn tailscale_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(100, 100, 100, 100), 53)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if is_tailnet(ip) => Some(IpAddr::V4(ip)),
+        _ => None,
+    }
+}
+
+/// Whether `ip` is in 100.64.0.0/10, the range Tailscale hands out.
+fn is_tailnet(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    a == 100 && b & 0xC0 == 64
+}
+
 /// Run condition: this app simulates the game (solo or host), rather than mirroring a host.
 pub fn authority(mode: Res<NetMode>) -> bool {
     mode.is_authority()
@@ -236,6 +254,23 @@ pub struct StartSession(pub NetMode);
 /// Leaves the current game and returns to the menu, optionally explaining why.
 #[derive(Event)]
 pub struct EndSession(pub Option<String>);
+
+/// Leaves the run in progress for the crew lobby without leaving the crew: a
+/// joiner sits the rest of the run out, while the host ends the run and takes
+/// the whole crew back to the lobby. Solo, it ends the session like
+/// `EndSession(None)`.
+#[derive(Event)]
+pub struct DropOut;
+
+/// A joiner waiting in the lobby while the crew is mid-run asks to drop in.
+#[derive(Event)]
+pub struct JoinRun;
+
+/// Client-side: this joiner chose to sit out the run in progress, so it waits
+/// in the lobby whatever the host's phase, until it joins back in or the crew
+/// returns to the lobby.
+#[derive(Resource, Default)]
+pub struct SittingOut(pub bool);
 
 /// A `Transform` as it goes to joiners. Everything in this 2D game sits flat,
 /// turned only about Z and scaled evenly, so that's all that's sent: 20 bytes
@@ -293,6 +328,12 @@ pub struct PlayerInput {
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
 pub struct ChooseLoadout(pub Loadout);
 
+/// A joiner asks the host to deal them into the run under way (`true`), or
+/// says they're sitting the rest of it out (`false`). Mid-run, only those who
+/// asked get a pirate; one who sits out keeps their seat in the crew.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct TakePart(pub bool);
+
 pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
@@ -305,6 +346,7 @@ impl Plugin for NetPlugin {
             .insert_resource(LocalId(HOST_ID))
             .init_resource::<Notice>()
             .init_resource::<Connection>()
+            .init_resource::<SittingOut>()
             // Registration order must match on every machine; keep it all here.
             .replicate_as::<Transform, NetTransform>()
             .replicate::<Player>()
@@ -342,9 +384,12 @@ impl Plugin for NetPlugin {
             .replicate::<PrismLook>()
             .add_client_message::<PlayerInput>(Channel::Ordered)
             .add_client_message::<ChooseLoadout>(Channel::Ordered)
+            .add_client_message::<TakePart>(Channel::Ordered)
             .add_server_event::<Fx>(Channel::Unordered)
             .add_observer(start_session)
             .add_observer(end_session)
+            .add_observer(drop_out)
+            .add_observer(join_run)
             .add_observer(on_protocol_mismatch)
             .add_systems(Update, watch_connection);
     }
@@ -356,6 +401,7 @@ fn start_session(
     channels: Res<RepliconChannels>,
     mut notice: ResMut<Notice>,
     mut connection: ResMut<Connection>,
+    mut sitting_out: ResMut<SittingOut>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     let mode = start.0.clone();
@@ -427,6 +473,7 @@ fn start_session(
         Ok(id) => {
             notice.0 = None;
             *connection = Connection::default();
+            sitting_out.0 = false;
             commands.insert_resource(LocalId(id));
             // A host gathers the crew in the lobby first. Joiners wait in the
             // menu until the host's world arrives, then follow it.
@@ -452,6 +499,7 @@ fn end_session(
     client_transport: Option<ResMut<NetcodeClientTransport>>,
     world: Query<Entity, Or<(With<Level>, With<Remote>, With<MissionStatus>)>>,
     mut notice: ResMut<Notice>,
+    mut sitting_out: ResMut<SittingOut>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     // Tell the other side right away instead of letting them time out.
@@ -471,12 +519,52 @@ fn end_session(
     }
     commands.insert_resource(NetMode::Solo);
     commands.insert_resource(LocalId(HOST_ID));
+    sitting_out.0 = false;
     if let Some(reason) = &end.0 {
         info!("session ended: {reason}");
     }
     notice.0.clone_from(&end.0);
     // `if_neq`: a failed join ends the session while already in the menu.
     NextState::set_if_neq(&mut *next_state, GameState::Menu);
+}
+
+/// Leaves the run for the lobby (see `DropOut`). Only from a run or its
+/// results: the host has nothing to end elsewhere, and a joiner still waiting
+/// in the menu has no seat to keep yet. A joiner may also drop out from the
+/// lobby, calling off a `JoinRun` the host hasn't answered yet.
+fn drop_out(
+    _: On<DropOut>,
+    mut commands: Commands,
+    mode: Res<NetMode>,
+    state: Res<State<GameState>>,
+    mut sitting_out: ResMut<SittingOut>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    let in_run = matches!(state.get(), GameState::Playing | GameState::Over);
+    match *mode {
+        NetMode::Solo => commands.trigger(EndSession(None)),
+        // The run isn't settled: an abandoned run pays nobody. Joiners follow
+        // the host's phase to the lobby.
+        NetMode::Host { .. } if in_run => next_state.set(GameState::Lobby),
+        NetMode::Host { .. } => {}
+        NetMode::Join { .. } if *state.get() == GameState::Menu => {}
+        NetMode::Join { .. } => {
+            // Set first, so `follow_host_state` holds this machine in the
+            // lobby even while the host hasn't taken its pirate out yet.
+            sitting_out.0 = true;
+            commands.write_message(TakePart(false));
+            NextState::set_if_neq(&mut *next_state, GameState::Lobby);
+        }
+    }
+}
+
+/// A joiner sitting in the lobby asks for a pirate in the run under way. It
+/// stays in the lobby until the pirate arrives (see `follow_host_state`).
+fn join_run(_: On<JoinRun>, mut commands: Commands, mode: Res<NetMode>, mut sitting_out: ResMut<SittingOut>) {
+    if matches!(*mode, NetMode::Join { .. }) {
+        sitting_out.0 = false;
+        commands.write_message(TakePart(true));
+    }
 }
 
 /// What a joiner is told when the host says it's running another build.
@@ -677,6 +765,54 @@ mod tests {
         assert!(!app.world().resource::<Loadouts>().0.contains_key(&ID));
         assert!(!app.world().resource::<CrewNames>().0.contains_key(&ID));
         assert!(!app.world().resource::<JoinOrder>().0.contains(&ID));
+    }
+
+    /// What this machine has asked the host about taking part, oldest first.
+    fn asked(app: &App) -> Vec<bool> {
+        app.world().resource::<Messages<TakePart>>().iter_current_update_messages().map(|m| m.0).collect()
+    }
+
+    #[test]
+    fn a_joiner_dropping_out_sits_out_in_the_lobby_and_can_ask_back_in() {
+        let mut app = dropped_joiner();
+        app.world_mut().resource_mut::<Connection>().connected = false;
+        app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Playing);
+        app.update();
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Playing);
+
+        app.world_mut().trigger(DropOut);
+        app.world_mut().flush();
+        assert!(app.world().resource::<SittingOut>().0);
+        assert_eq!(asked(&app), [false], "the host is told to take their pirate out");
+        app.update();
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Lobby);
+        assert!(matches!(*app.world().resource::<NetMode>(), NetMode::Join { .. }), "still in the crew");
+
+        app.world_mut().trigger(JoinRun);
+        app.world_mut().flush();
+        assert!(!app.world().resource::<SittingOut>().0);
+        assert!(asked(&app).ends_with(&[true]));
+    }
+
+    #[test]
+    fn a_joiner_still_waiting_in_the_menu_has_nothing_to_drop_out_of() {
+        let mut app = dropped_joiner();
+        app.world_mut().resource_mut::<Connection>().connected = false;
+        app.world_mut().trigger(DropOut);
+        app.update();
+        assert!(!app.world().resource::<SittingOut>().0);
+        assert!(asked(&app).is_empty());
+        assert_eq!(*app.world().resource::<State<GameState>>().get(), GameState::Menu);
+    }
+
+    #[test]
+    fn only_joiners_ask_into_a_run() {
+        let mut app = game();
+        app.world_mut().trigger(StartSession(NetMode::Solo));
+        app.update();
+        app.world_mut().trigger(JoinRun);
+        app.world_mut().flush();
+        assert!(asked(&app).is_empty());
     }
 
     #[test]

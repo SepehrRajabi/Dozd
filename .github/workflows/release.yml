@@ -1,4 +1,5 @@
-# Builds DOZD for Windows, macOS and Linux. Pushing a `v*` tag also publishes
+# Builds DOZD for Windows, macOS and Linux (x86-64 and RISC-V, glibc and
+# musl). Pushing a `v*` tag also publishes
 # the builds as a GitHub release; running it by hand from the Actions tab just
 # leaves them as downloadable artifacts on the run.
 name: Release
@@ -24,6 +25,19 @@ jobs:
           - platform: linux
             os: ubuntu-22.04
             targets: x86_64-unknown-linux-gnu
+          # Cross-built with Zig, as they need nothing but libc to link.
+          - platform: linux-musl
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-musl
+            zig: true
+          - platform: linux-riscv64
+            os: ubuntu-22.04
+            targets: riscv64gc-unknown-linux-gnu
+            zig: true
+          - platform: linux-riscv64-musl
+            os: ubuntu-22.04
+            targets: riscv64gc-unknown-linux-musl
+            zig: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -35,11 +49,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Install Zig and cargo-zigbuild
+        if: matrix.zig
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.platform }}
       - name: Build and package
         shell: bash
+        env:
+          CARGO_BUILD: ${{ matrix.zig && 'cargo zigbuild' || 'cargo build' }}
         run: tools/package.sh ${{ matrix.platform }}
       - uses: actions/upload-artifact@v7
         with:

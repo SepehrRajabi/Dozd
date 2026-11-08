@@ -2366,6 +2366,7 @@ dependencies = [
  "bevy_replicon",
  "bevy_replicon_renet",
  "serde",
+ "winit",
 ]
 
 [[package]]

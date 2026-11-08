@@ -1,0 +1,9 @@
+# musl builds link musl dynamically rather than statically, so the game can
+# load the system's graphics and windowing libraries (Vulkan or GL, X11 or
+# Wayland) when it starts: a static binary can't load anything. They run on
+# musl distros like Alpine and Void, then, which is who they're for.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[target.riscv64gc-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]

@@ -1716,6 +1716,7 @@ fn update_ability_hud(
     mut text: Single<(&mut Text, &mut TextColor), (With<AbilityText>, Without<AbilityKeyText>)>,
     mut key: Single<&mut BorderColor, With<AbilityKey>>,
     mut key_text: Single<(&mut Text, &mut TextColor), With<AbilityKeyText>>,
+    device: Res<hud::LastDevice>,
 ) {
     let active = player.as_ref().and_then(|p| p.0.active);
     let display = if active.is_some() { Display::Flex } else { Display::None };
@@ -1756,8 +1757,9 @@ fn update_ability_hud(
     }
     name_color.set_if_neq(TextColor(stats.color));
     let (key_text, key_color) = &mut *key_text;
-    if key_text.0 != "Q" {
-        key_text.0 = "Q".into();
+    let q = device.glyph("Q");
+    if key_text.0 != q {
+        key_text.0 = q.into();
     }
 
     // A sentry can be destroyed early, so ask it rather than the timer.
@@ -1780,10 +1782,11 @@ fn update_ability_hud(
             (frac, stats.color, "READY".into(), Color::WHITE, true)
         }
     } else if let Some(left) = running {
-        let label = if in_reach { "PICK UP  [Q]".into() } else { format!("ACTIVE {:.0}s", left.ceil()) };
+        let label = if in_reach { format!("PICK UP  [{}]", device.glyph("Q")) } else { format!("ACTIVE {:.0}s", left.ceil()) };
         (left / stats.life, stats.color, label, stats.color, in_reach)
     } else if hack_aiming.0 {
-        (1.0, stats.color, "CLICK TO HACK".into(), stats.color, true)
+        let release = if *device == hud::LastDevice::Pad { "RT TO HACK" } else { "CLICK TO HACK" };
+        (1.0, stats.color, release.into(), stats.color, true)
     } else if ability.cooldown > 0.0 {
         let ready = 1.0 - ability.cooldown / stats.cooldown;
         // Overclocked, the cooldown drains faster than the clock: show real seconds.

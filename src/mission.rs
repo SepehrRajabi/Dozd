@@ -7,7 +7,7 @@ use crate::combat::{FxKind, Health, fx};
 use crate::enemies::{EnemyLook, roll_reinforcement, spawn_enemy};
 use crate::hud::{self, HudSlot, Meter};
 use crate::loot::LootKind;
-use crate::net::{LocalPlayer, NetMode, authority};
+use crate::net::{LocalId, LocalPlayer, NetMode, SittingOut, authority};
 use crate::player::{DASH_COOLDOWN, Dash, OFF_DECK, PirateStatus, Player, slot_color};
 use crate::room::{DECKS, Heist, RoomGrid};
 use crate::settings::Settings;
@@ -393,9 +393,13 @@ fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>
     if !existing.is_empty() {
         return;
     }
-    commands.spawn((
-        Replicated,
-        MissionStatus {
+    commands.spawn((Replicated, MissionStatus::new()));
+}
+
+impl MissionStatus {
+    /// A fresh status, before `publish_status` first fills it in.
+    fn new() -> Self {
+        Self {
             phase: GameState::Playing,
             seed: 0,
             deck: 0,
@@ -415,8 +419,8 @@ fn spawn_status(mut commands: Commands, existing: Query<(), With<MissionStatus>>
             banner: String::new(),
             banner_color: Color::WHITE,
             banner_alpha: 0.0,
-        },
-    ));
+        }
+    }
 }
 
 fn reset_mission(
@@ -488,16 +492,39 @@ fn publish_status(
     });
 }
 
-/// Clients mirror the host's run state (playing vs. results screen).
+impl MissionStatus {
+    /// Where the host is: lobby, mid-run or on the results screen.
+    pub fn phase(&self) -> GameState {
+        self.phase
+    }
+}
+
+/// Clients mirror the host's phase (lobby, run, results), except that one
+/// without a pirate in the run waits in the lobby: it connected mid-run, or it
+/// sits the run out (`SittingOut`). It joins in once its pirate arrives, and
+/// the crew going back to the lobby ends any sitting out. Nothing happens until
+/// the host's world arrives: a joiner waits for it in the menu.
 fn follow_host_state(
     status: Option<Single<&MissionStatus>>,
     state: Res<State<GameState>>,
+    local: Res<LocalId>,
+    players: Query<&Player>,
+    mut sitting_out: ResMut<SittingOut>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    if let Some(status) = status
-        && status.phase != *state.get()
-    {
-        next_state.set(status.phase);
+    let Some(status) = status else { return };
+    let target = if status.phase == GameState::Lobby {
+        if sitting_out.0 {
+            sitting_out.0 = false;
+        }
+        GameState::Lobby
+    } else if sitting_out.0 || !players.iter().any(|p| p.owner == local.0) {
+        GameState::Lobby
+    } else {
+        status.phase
+    };
+    if target != *state.get() {
+        next_state.set(target);
     }
 }
 
@@ -1699,5 +1726,116 @@ mod tests {
         assert!(bottom.threat() > top.threat());
         let purge = Alarm { level: MAX_ALARM, deck: 2, ..default() };
         assert_eq!(purge.wave_interval(), 5.0, "waves bottom out");
+    }
+
+    const JOINER: u64 = 1 << 63 | 9;
+
+    /// A joiner's state following, with the host's world (its status) already here.
+    fn follower(phase: GameState) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .insert_resource(LocalId(JOINER))
+            .init_resource::<SittingOut>()
+            .add_systems(Update, follow_host_state);
+        let status = app.world_mut().spawn(MissionStatus { phase, ..MissionStatus::new() }).id();
+        (app, status)
+    }
+
+    fn state(app: &App) -> GameState {
+        *app.world().resource::<State<GameState>>().get()
+    }
+
+    fn host_goes(app: &mut App, status: Entity, phase: GameState) {
+        app.world_mut().get_mut::<MissionStatus>(status).unwrap().phase = phase;
+        app.update();
+        app.update();
+    }
+
+    #[test]
+    fn a_joiner_waits_for_the_hosts_world_in_the_menu() {
+        let (mut app, status) = follower(GameState::Playing);
+        app.world_mut().despawn(status);
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Menu);
+    }
+
+    #[test]
+    fn a_joiner_without_a_pirate_waits_in_the_lobby_until_one_arrives() {
+        let (mut app, status) = follower(GameState::Playing);
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby, "connected mid-run");
+        host_goes(&mut app, status, GameState::Over);
+        assert_eq!(state(&app), GameState::Lobby, "nothing to show them on the results");
+
+        host_goes(&mut app, status, GameState::Playing);
+        // Someone else's pirate doesn't count.
+        app.world_mut().spawn(own_pirate(JOINER + 1));
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby);
+        app.world_mut().spawn(own_pirate(JOINER));
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Playing, "dealt in");
+        host_goes(&mut app, status, GameState::Over);
+        assert_eq!(state(&app), GameState::Over);
+        host_goes(&mut app, status, GameState::Lobby);
+        assert_eq!(state(&app), GameState::Lobby);
+    }
+
+    /// A pirate played from `owner`'s machine.
+    fn own_pirate(owner: u64) -> (Player, Health) {
+        let (player, health) = crew_member(1, PirateClass::Doctor);
+        (Player { owner, ..player }, health)
+    }
+
+    #[test]
+    fn sitting_out_holds_a_joiner_in_the_lobby_until_the_crew_comes_back() {
+        let (mut app, status) = follower(GameState::Playing);
+        let pirate = app.world_mut().spawn(own_pirate(JOINER)).id();
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Playing);
+
+        // Their pirate is still here until the host takes it out.
+        app.world_mut().resource_mut::<SittingOut>().0 = true;
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby);
+        app.world_mut().despawn(pirate);
+        host_goes(&mut app, status, GameState::Over);
+        assert_eq!(state(&app), GameState::Lobby, "the results aren't theirs");
+        assert!(app.world().resource::<SittingOut>().0);
+
+        // The crew back in the lobby: the next run is everyone's.
+        host_goes(&mut app, status, GameState::Lobby);
+        assert_eq!(state(&app), GameState::Lobby);
+        assert!(!app.world().resource::<SittingOut>().0, "sitting out ends with the run");
+        host_goes(&mut app, status, GameState::Playing);
+        app.world_mut().spawn(own_pirate(JOINER));
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Playing);
+    }
+
+    #[test]
+    fn a_joiner_who_asks_back_in_plays_once_their_new_pirate_arrives() {
+        let (mut app, _) = follower(GameState::Playing);
+        app.world_mut().resource_mut::<SittingOut>().0 = true;
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby);
+        // `JoinRun`: no longer sitting out, but no pirate yet.
+        app.world_mut().resource_mut::<SittingOut>().0 = false;
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Lobby);
+        app.world_mut().spawn(own_pirate(JOINER));
+        app.update();
+        app.update();
+        assert_eq!(state(&app), GameState::Playing);
     }
 }

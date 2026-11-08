@@ -1,6 +1,8 @@
 use std::f32::consts::TAU;
+use std::net::{IpAddr, SocketAddr};
 
 use bevy::app::AppExit;
+use bevy::clipboard::Clipboard;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
@@ -9,11 +11,13 @@ use crate::abilities::{Active, Passive};
 use crate::boss::{KEEPER_COLOR, KeeperKind, PRISM_COLOR};
 use crate::class::{LocalLoadout, Loadout, NAME_LEN, PirateClass, clean_name, name_allows};
 use crate::guns::GunKind;
+use crate::hud::LastDevice;
 use crate::crew::Roster;
 use crate::enemies::EnemyKind;
+use crate::mission::MissionStatus;
 use crate::net::{
-    CODE_LEN, ChooseLoadout, Connection, DEFAULT_PORT, EndSession, LocalId, NetMode, Notice, StartSession, VERSION,
-    local_ip, parse_code, parse_port, resolve, room_code, show_code,
+    CODE_LEN, ChooseLoadout, Connection, DEFAULT_PORT, DropOut, EndSession, HOST_ID, JoinRun, LocalId, NetMode,
+    Notice, StartSession, VERSION, local_ip, parse_code, parse_port, resolve, room_code, show_code, tailscale_ip,
 };
 use crate::loot::LootKind;
 use crate::perks::PerkKind;
@@ -34,6 +38,12 @@ const DIM: Color = Color::srgba(0.8, 0.85, 1.0, 0.55);
 const ERROR: Color = Color::srgb(1.0, 0.45, 0.4);
 /// How long the "press ESC again" prompt stays armed.
 const LEAVE_WINDOW: f32 = 2.5;
+/// Seconds between looking up this machine's addresses, so Tailscale going up
+/// or down shows while a menu is open. Each lookup is only a UDP connect, which
+/// sends nothing.
+const ADDRESS_REFRESH: f32 = 2.0;
+/// How long COPY reads COPIED after a click.
+const COPIED_TIME: f32 = 1.5;
 
 pub struct MenuPlugin;
 
@@ -44,6 +54,8 @@ impl Plugin for MenuPlugin {
             .add_sub_state::<MenuScreen>()
             .init_resource::<MenuMemory>()
             .init_resource::<LeavePrompt>()
+            .init_resource::<HostAddresses>()
+            .init_resource::<CopyFeedback>()
             .add_observer(run_menu_command)
             .add_systems(Startup, spawn_session_hud)
             .add_systems(OnEnter(GameState::Menu), (spawn_backdrop, show_cursor))
@@ -81,6 +93,7 @@ impl Plugin for MenuPlugin {
                     hold_camera,
                     animate_backdrop,
                     fade_backdrop,
+                    update_copy_buttons,
                     dress_backdrop_pirate.run_if(resource_changed::<LocalLoadout>),
                     (choice_actions, style_choices, show_ability_choices, update_slot_count).chain(),
                 )
@@ -94,7 +107,8 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (leave_on_escape, update_session_hud).run_if(not(in_state(GameState::Menu))),
-            );
+            )
+            .add_systems(PreUpdate, refresh_addresses);
     }
 }
 
@@ -146,6 +160,10 @@ enum MenuCommand {
     StartRun,
     /// Back to the main menu from the lobby.
     Leave,
+    /// Puts the room code on the clipboard, from the host screen or the lobby.
+    CopyCode,
+    /// A joiner waiting in the lobby drops into the crew's run.
+    JoinRun,
 }
 
 /// What the player typed last time, so hosting or rejoining is one click,
@@ -187,7 +205,8 @@ impl MenuMemory {
 enum FieldKind {
     Port,
     Address,
-    /// Typed in capitals, however it's keyed.
+    /// Typed in capitals, however it's keyed, with the dash filled in (see
+    /// `dash_code`).
     Code,
     /// Last, so Tab still goes from the address straight to the code.
     Name,
@@ -198,37 +217,129 @@ impl FieldKind {
         match self {
             Self::Port => c.is_ascii_digit(),
             Self::Address => c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'),
-            Self::Code => c.is_ascii_alphanumeric() || c == '-',
+            // The dash comes by itself, so a typed one would only be in the way.
+            Self::Code => c.is_ascii_alphanumeric(),
             Self::Name => name_allows(c),
         }
     }
 }
 
+/// A room code's letters with the dash where `show_code` puts it, put in as
+/// soon as the first half is typed so it reads like the host's: `K7QF-`, then
+/// `K7QF-29XA`.
+fn dash_code(letters: &[char]) -> String {
+    let half = CODE_LEN / 2;
+    let mut code: String = letters.iter().take(half).collect();
+    if letters.len() >= half {
+        code.push('-');
+        code.extend(&letters[half..]);
+    }
+    code
+}
+
 #[derive(Component)]
 struct TextField {
     value: String,
+    /// The most it holds: characters, or a code's letters.
     max_len: usize,
     kind: FieldKind,
     /// Pressing Enter in the field runs this.
     submit: MenuCommand,
     /// Takes the typing. One field on a screen has it; Tab or a click moves it.
     focused: bool,
+    /// Where typing goes, as a byte offset into `value`.
+    caret: usize,
 }
 
 impl TextField {
-    /// Adds what was typed, as far as this field takes it.
-    fn type_in(&mut self, text: &str) {
+    fn new(kind: FieldKind, value: &str, max_len: usize, submit: MenuCommand, focused: bool) -> Self {
+        let mut field = Self { value: String::new(), max_len, kind, submit, focused, caret: 0 };
+        field.insert(value);
+        field
+    }
+
+    /// What's edited, one unit at a time, and how many units come before the
+    /// caret: a code's letters without the dash, so the dash is never in the
+    /// way of the caret or Backspace, or else every character.
+    fn units(&self) -> (Vec<char>, usize) {
+        let unit = |c: &char| self.kind != FieldKind::Code || *c != '-';
+        // A caret off a character boundary (never set so) counts from the end.
+        let before = self.value.get(..self.caret).unwrap_or(&self.value);
+        (self.value.chars().filter(unit).collect(), before.chars().filter(unit).count())
+    }
+
+    /// Writes the units back, with the caret after the first `at` of them.
+    fn set_units(&mut self, units: &[char], at: usize) {
+        let at = at.min(units.len());
+        if self.kind == FieldKind::Code {
+            self.value = dash_code(units);
+            self.caret = dash_code(&units[..at]).len();
+        } else {
+            self.value = units.iter().collect();
+            self.caret = units[..at].iter().map(|c| c.len_utf8()).sum();
+        }
+    }
+
+    /// Adds what was typed or pasted at the caret, as far as this field takes it.
+    fn insert(&mut self, text: &str) {
+        let (mut units, mut at) = self.units();
         for c in text.chars() {
             let c = if self.kind == FieldKind::Code { c.to_ascii_uppercase() } else { c };
-            if self.kind.allows(c) && self.value.len() < self.max_len {
-                self.value.push(c);
+            if self.kind.allows(c) && units.len() < self.max_len {
+                units.insert(at, c);
+                at += 1;
             }
         }
+        self.set_units(&units, at);
+    }
+
+    /// Backspace: the character before the caret. Right after a code's dash,
+    /// the letter before it, and the dash goes with it.
+    fn backspace(&mut self) {
+        let (mut units, at) = self.units();
+        if at > 0 {
+            units.remove(at - 1);
+            self.set_units(&units, at - 1);
+        }
+    }
+
+    /// Delete: the character after the caret.
+    fn delete(&mut self) {
+        let (mut units, at) = self.units();
+        if at < units.len() {
+            units.remove(at);
+            self.set_units(&units, at);
+        }
+    }
+
+    /// Moves the caret `by` characters, stopping at either end.
+    fn step(&mut self, by: isize) {
+        let (units, at) = self.units();
+        self.set_units(&units, at.saturating_add_signed(by));
+    }
+
+    fn home(&mut self) {
+        let (units, _) = self.units();
+        self.set_units(&units, 0);
+    }
+
+    fn end(&mut self) {
+        let (units, _) = self.units();
+        self.set_units(&units, units.len());
+    }
+
+    /// The text either side of the caret, to draw it between them.
+    fn split(&self) -> (&str, &str) {
+        self.value.split_at_checked(self.caret).unwrap_or((&self.value, ""))
     }
 }
 
-#[derive(Component)]
-struct FieldText;
+/// The text before or after a field's caret.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum FieldText {
+    BeforeCaret,
+    AfterCaret,
+}
 
 /// Blinks on its own, so the text beside it never changes with the blink.
 #[derive(Component)]
@@ -245,6 +356,51 @@ struct HostHint;
 /// starts so it can be passed round early; START HOSTING uses it.
 #[derive(Component)]
 struct HostCode(String);
+
+/// Under the host's addresses: how a crew far away gets in.
+#[derive(Component)]
+struct TailscaleNote;
+
+/// The text on a COPY button, which reads COPIED for a moment after a click.
+#[derive(Component)]
+struct CopyLabel;
+
+/// This machine's addresses for the crew to join on, looked up afresh every
+/// `ADDRESS_REFRESH` seconds while they're on screen.
+#[derive(Resource, Default)]
+struct HostAddresses {
+    lan: Option<IpAddr>,
+    /// While Tailscale is up.
+    tailscale: Option<IpAddr>,
+    /// Seconds to the next lookup.
+    next: f32,
+}
+
+impl HostAddresses {
+    fn line(&self, port: u16) -> String {
+        join_addresses(self.lan, self.tailscale, port, "  or over Tailscale  ")
+    }
+}
+
+/// How the crew reaches this host, each address with `:port` unless the port
+/// is the default: the LAN address, and while Tailscale is up the tailnet one
+/// after `or`. Just the one when they're the same.
+fn join_addresses(lan: Option<IpAddr>, tailscale: Option<IpAddr>, port: u16, or: &str) -> String {
+    let at = |ip: IpAddr| if port == DEFAULT_PORT { ip.to_string() } else { SocketAddr::new(ip, port).to_string() };
+    match (lan, tailscale) {
+        (Some(lan), Some(tailscale)) if lan != tailscale => format!("{}{or}{}", at(lan), at(tailscale)),
+        (_, Some(tailscale)) => format!("{}  (Tailscale)", at(tailscale)),
+        (Some(lan), None) => at(lan),
+        (None, None) => "<your IP>".into(),
+    }
+}
+
+/// When the last COPY happened, and whether the clipboard took it.
+#[derive(Resource, Default)]
+struct CopyFeedback {
+    timer: f32,
+    failed: bool,
+}
 
 #[derive(Component)]
 struct StatusText;
@@ -391,6 +547,25 @@ fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (Text::new(text), TextFont::from_font_size(size), TextColor(color))
 }
 
+/// A big room code to read out, which copies itself when clicked, and the
+/// small COPY button beside it doing the same.
+fn copyable_code(row: &mut ChildSpawnerCommands, code: impl Bundle) {
+    row.spawn((code, Button, MenuCommand::CopyCode));
+    row.spawn((
+        Button,
+        MenuCommand::CopyCode,
+        Node {
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(3.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            align_self: AlignSelf::Center,
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+        BorderColor::all(GOLD_FAINT),
+        children![(CopyLabel, label("COPY", 13.0, TEXT), TextLayout::no_wrap())],
+    ));
+}
+
 /// A box to type into, `width` wide; clicking it gives it the typing.
 fn text_field(
     kind: FieldKind,
@@ -401,14 +576,37 @@ fn text_field(
     focused: bool,
     submit: MenuCommand,
 ) -> impl Bundle {
+    let field = TextField::new(kind, value, max_len, submit, focused);
+    let (before, after) = field.split();
+    let part = |part: FieldText, text: &str| {
+        (part, Text::new(text), TextFont::from_font_size(20.0), TextColor(TEXT), TextLayout::no_wrap())
+    };
+    let children = children![
+        part(FieldText::BeforeCaret, before),
+        (
+            Caret,
+            Node {
+                width: Val::Px(2.0),
+                height: Val::Px(22.0),
+                margin: UiRect::horizontal(Val::Px(1.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(GOLD),
+        ),
+        part(FieldText::AfterCaret, after),
+        // Out of the flow: hidden, it would still crowd what's typed.
+        (
+            Placeholder,
+            Text::new(placeholder),
+            TextFont::from_font_size(20.0),
+            TextColor(DIM),
+            TextLayout::no_wrap(),
+            Node { position_type: PositionType::Absolute, left: Val::Px(15.0), ..default() },
+        ),
+    ];
     (
-        TextField {
-            value: value.to_string(),
-            max_len,
-            kind,
-            submit,
-            focused,
-        },
+        field,
         Interaction::default(),
         Node {
             width: Val::Px(width),
@@ -420,28 +618,7 @@ fn text_field(
         },
         BackgroundColor(Color::srgb(0.02, 0.02, 0.05)),
         BorderColor::all(GOLD),
-        children![
-            (FieldText, Text::new(value), TextFont::from_font_size(20.0), TextColor(TEXT), TextLayout::no_wrap()),
-            (
-                Caret,
-                Node {
-                    width: Val::Px(2.0),
-                    height: Val::Px(22.0),
-                    margin: UiRect::horizontal(Val::Px(1.0)),
-                    ..default()
-                },
-                BackgroundColor(GOLD),
-            ),
-            // Out of the flow: hidden, it would still crowd what's typed.
-            (
-                Placeholder,
-                Text::new(placeholder),
-                TextFont::from_font_size(20.0),
-                TextColor(DIM),
-                TextLayout::no_wrap(),
-                Node { position_type: PositionType::Absolute, left: Val::Px(15.0), ..default() },
-            ),
-        ],
+        children,
     )
 }
 
@@ -584,13 +761,9 @@ fn host_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
             .spawn(Node { column_gap: Val::Px(12.0), align_items: AlignItems::Baseline, ..default() })
             .with_children(|row| {
                 row.spawn(label("and room code", 16.0, TEXT));
-                row.spawn((label(show_code(&code), 30.0, GOLD), HostCode(code)));
+                copyable_code(row, (label(show_code(&code), 30.0, GOLD), HostCode(code)));
             });
-        parent.spawn(label(
-            "Over the internet? Use Tailscale and share its IP.",
-            13.0,
-            DIM,
-        ));
+        parent.spawn((TailscaleNote, label("", 13.0, DIM)));
         parent.spawn(button("START HOSTING", MenuCommand::StartHost));
         parent.spawn(button("BACK", MenuCommand::Back));
         parent.spawn(status_line());
@@ -625,7 +798,7 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
                         FieldKind::Code,
                         &memory.code,
                         "XXXX-XXXX",
-                        CODE_LEN + 1,
+                        CODE_LEN,
                         200.0,
                         code_first,
                         MenuCommand::Connect,
@@ -633,7 +806,7 @@ fn join_screen(mut commands: Commands, assets: Res<AssetServer>, memory: Res<Men
                 });
                 name_field(row, &loadout, MenuCommand::Connect);
             });
-        parent.spawn(label("TAB switches between the boxes", 13.0, DIM));
+        parent.spawn(label("TAB switches between the boxes, and Ctrl/Cmd+V pastes", 13.0, DIM));
         parent.spawn(button("CONNECT", MenuCommand::Connect));
         parent.spawn(button("BACK", MenuCommand::Back));
         parent.spawn(status_line());
@@ -1045,6 +1218,7 @@ fn run_menu_command(
     roster: Option<Single<&Roster>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut loadout: ResMut<LocalLoadout>,
+    (clipboard, mut copied, status): (Option<ResMut<Clipboard>>, ResMut<CopyFeedback>, Option<Single<&MissionStatus>>),
 ) {
     let joining = matches!(*mode, NetMode::Join { .. });
     let field = |kind: FieldKind| fields.iter().find(|f| f.kind == kind).map(|f| f.value.clone()).unwrap_or_default();
@@ -1115,6 +1289,8 @@ fn run_menu_command(
                 }
             }
         }
+        // Only from a real lobby: never while the crew is still out on a run.
+        MenuCommand::StartRun if status.is_some_and(|s| s.phase() != GameState::Lobby) => {}
         MenuCommand::StartRun => match roster.as_deref().and_then(|r| waiting_on(r)) {
             Some(name) => notice.0 = Some(format!("Waiting for {name} to pick a class")),
             None => {
@@ -1123,6 +1299,22 @@ fn run_menu_command(
             }
         },
         MenuCommand::Leave => commands.trigger(EndSession(None)),
+        MenuCommand::JoinRun => commands.trigger(JoinRun),
+        MenuCommand::CopyCode => {
+            // The host screen's code before hosting starts, else the session's.
+            let code = match (host_code.iter().next(), &*mode) {
+                (Some(code), _) => code.0.clone(),
+                (None, NetMode::Host { code, .. } | NetMode::Join { code, .. }) => code.clone(),
+                (None, NetMode::Solo) => return,
+            };
+            let done = clipboard.ok_or_else(|| "no clipboard".to_string()).and_then(|mut clipboard| {
+                clipboard.set_text(show_code(&code)).map_err(|e| e.to_string())
+            });
+            if let Err(error) = &done {
+                warn!("Couldn't copy the room code: {error}");
+            }
+            *copied = CopyFeedback { timer: COPIED_TIME, failed: done.is_err() };
+        }
         MenuCommand::Back => {
             if joining {
                 // Cancels the pending connection; stays on this screen.
@@ -1286,16 +1478,21 @@ fn edit_fields(
     mut commands: Commands,
     mut keys: MessageReader<KeyboardInput>,
     held: Res<ButtonInput<KeyCode>>,
-    mut fields: Query<(&mut TextField, &Interaction)>,
+    mut clipboard: Option<ResMut<Clipboard>>,
+    mut fields: Query<(&mut TextField, Ref<Interaction>)>,
 ) {
-    // A click gives that field the typing.
-    if let Some(clicked) = fields.iter().find(|(_, i)| **i == Interaction::Pressed).map(|(f, _)| f.kind) {
+    // A click gives that field the typing, with the caret at the end.
+    let clicked = fields.iter().find(|(_, i)| i.is_changed() && **i == Interaction::Pressed).map(|(f, _)| f.kind);
+    if let Some(clicked) = clicked {
         for (mut field, _) in &mut fields {
-            if field.focused != (field.kind == clicked) {
-                field.focused = field.kind == clicked;
+            field.focused = field.kind == clicked;
+            if field.focused {
+                field.end();
             }
         }
     }
+    // Cmd on a Mac, Ctrl elsewhere; either works everywhere.
+    let command = held.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
     for key in keys.read() {
         if !key.state.is_pressed() {
             continue;
@@ -1317,12 +1514,25 @@ fn edit_fields(
         }
         let Some((mut field, _)) = fields.iter_mut().find(|(f, _)| f.focused) else { continue };
         match &key.logical_key {
-            Key::Character(text) => field.type_in(text),
-            // A key of its own, not a character.
-            Key::Space => field.type_in(" "),
-            Key::Backspace => {
-                field.value.pop();
+            // Shortcuts, never letters: Cmd+V would otherwise type a "v".
+            Key::Character(text) if command => {
+                if text.eq_ignore_ascii_case("v")
+                    && let Some(Ok(pasted)) = clipboard.as_mut().and_then(|c| c.fetch_text().poll_result())
+                {
+                    field.insert(&pasted);
+                }
             }
+            Key::Character(text) => field.insert(text),
+            // A key of its own, not a character.
+            Key::Space if !command => field.insert(" "),
+            Key::Backspace => field.backspace(),
+            Key::Delete => field.delete(),
+            Key::ArrowLeft if command => field.home(),
+            Key::ArrowRight if command => field.end(),
+            Key::ArrowLeft => field.step(-1),
+            Key::ArrowRight => field.step(1),
+            Key::Home => field.home(),
+            Key::End => field.end(),
             Key::Enter => commands.trigger(field.submit),
             _ => {}
         }
@@ -1332,7 +1542,7 @@ fn edit_fields(
 fn draw_fields(
     time: Res<Time>,
     mut fields: Query<(&TextField, &Children, &mut BorderColor)>,
-    mut texts: Query<&mut Text, With<FieldText>>,
+    mut texts: Query<(&FieldText, &mut Text)>,
     mut carets: Query<&mut Visibility, (With<Caret>, Without<Placeholder>)>,
     mut placeholders: Query<&mut Visibility, With<Placeholder>>,
 ) {
@@ -1340,11 +1550,13 @@ fn draw_fields(
     for (field, children, mut border) in &mut fields {
         // The field taking the typing is the one outlined in full gold.
         border.set_if_neq(BorderColor::all(if field.focused { GOLD } else { GOLD_FAINT }));
+        let (before, after) = field.split();
         for child in children.iter() {
-            if let Ok(mut text) = texts.get_mut(child)
-                && text.0 != field.value
-            {
-                text.0.clone_from(&field.value);
+            if let Ok((part, mut text)) = texts.get_mut(child) {
+                let content = if *part == FieldText::BeforeCaret { before } else { after };
+                if text.0 != content {
+                    text.0 = content.into();
+                }
             }
             if let Ok(mut visibility) = carets.get_mut(child) {
                 let shown = caret_on && field.focused;
@@ -1358,17 +1570,73 @@ fn draw_fields(
     }
 }
 
-fn update_host_hint(fields: Query<&TextField>, mut hint: Query<&mut Text, With<HostHint>>, mut ip: Local<Option<String>>) {
+/// Looks up this machine's addresses every `ADDRESS_REFRESH` seconds while
+/// they're on screen: on the host screen and while hosting.
+fn refresh_addresses(
+    time: Res<Time>,
+    mode: Res<NetMode>,
+    screen: Option<Res<State<MenuScreen>>>,
+    mut addresses: ResMut<HostAddresses>,
+) {
+    let shown = matches!(*mode, NetMode::Host { .. }) || screen.is_some_and(|s| *s.get() == MenuScreen::Host);
+    if !shown {
+        // Fresh as soon as they show again.
+        addresses.next = 0.0;
+        return;
+    }
+    addresses.next -= time.delta_secs();
+    if addresses.next <= 0.0 {
+        let (lan, tailscale) = (local_ip(), tailscale_ip());
+        // Only touched on a change, so the screens showing them could tell.
+        if addresses.lan != lan || addresses.tailscale != tailscale {
+            addresses.lan = lan;
+            addresses.tailscale = tailscale;
+        }
+        addresses.bypass_change_detection().next = ADDRESS_REFRESH;
+    }
+}
+
+fn update_host_hint(
+    fields: Query<&TextField>,
+    addresses: Res<HostAddresses>,
+    mut hint: Query<&mut Text, (With<HostHint>, Without<TailscaleNote>)>,
+    mut note: Query<&mut Text, With<TailscaleNote>>,
+) {
     let Ok(mut hint) = hint.single_mut() else { return };
-    let ip = ip.get_or_insert_with(|| local_ip().map_or("<your IP>".into(), |ip| ip.to_string()));
     let port = fields.iter().find(|f| f.kind == FieldKind::Port).map_or("", |f| f.value.as_str());
     let content = match port.parse::<u16>() {
-        Ok(port) if port == DEFAULT_PORT => format!("Your crew joins with:  {ip}"),
-        Ok(port) => format!("Your crew joins with:  {ip}:{port}"),
-        Err(_) => "Pick a port between 1 and 65535".into(),
+        Ok(port) if port > 0 => format!("Your crew joins with:  {}", addresses.line(port)),
+        _ => "Pick a port between 1 and 65535".into(),
     };
     if hint.0 != content {
         hint.0 = content;
+    }
+    let Ok(mut note) = note.single_mut() else { return };
+    let content = if addresses.tailscale.is_some() {
+        "Friends on your tailnet use the Tailscale address, from anywhere."
+    } else {
+        "Over the internet? Turn on Tailscale and its address shows here too."
+    };
+    if note.0 != content {
+        note.0 = content.into();
+    }
+}
+
+/// COPY reads COPIED for a moment after a click, or says the clipboard
+/// wouldn't take it.
+fn update_copy_buttons(time: Res<Time>, mut copied: ResMut<CopyFeedback>, mut labels: Query<&mut Text, With<CopyLabel>>) {
+    if copied.timer > 0.0 {
+        copied.timer = (copied.timer - time.delta_secs()).max(0.0);
+    }
+    let content = match (copied.timer > 0.0, copied.failed) {
+        (false, _) => "COPY",
+        (true, false) => "COPIED",
+        (true, true) => "NO CLIPBOARD",
+    };
+    for mut text in &mut labels {
+        if text.0 != content {
+            text.0 = content.into();
+        }
     }
 }
 
@@ -1585,7 +1853,8 @@ fn animate_backdrop(
 
 fn spawn_session_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
     commands.entity(hud::slot(&slots, HudSlot::Session)).with_children(|slot| {
-        slot.spawn((SessionText, label("", 14.0, DIM), Node {
+        // Right-aligned line by line: a host on Tailscale gets a second line.
+        slot.spawn((SessionText, label("", 14.0, DIM), TextLayout::justify(Justify::Right), Node {
             align_self: AlignSelf::FlexEnd,
             ..default()
         }));
@@ -1611,6 +1880,7 @@ fn spawn_session_hud(mut commands: Commands, slots: Query<(Entity, &HudSlot)>) {
 fn update_session_hud(
     mode: Res<NetMode>,
     prompt: Res<LeavePrompt>,
+    device: Res<LastDevice>,
     players: Query<(), With<Player>>,
     loot: Query<(), With<LootKind>>,
     vault: Option<Single<&Vault>>,
@@ -1618,14 +1888,17 @@ fn update_session_hud(
     mut loot_left: Single<&mut Text, (With<LootLeftText>, Without<LeaveText>)>,
     mut leave: Single<&mut Text, With<LeaveText>>,
     mut leave_panel: Single<&mut Node, With<LeavePanel>>,
-    mut ip: Local<Option<String>>,
+    addresses: Res<HostAddresses>,
 ) {
     let crew = players.iter().count();
     let content = match &*mode {
         NetMode::Solo => String::new(),
         NetMode::Host { port, code } => {
-            let ip = ip.get_or_insert_with(|| local_ip().map_or("?".into(), |ip| ip.to_string()));
-            format!("HOSTING  {ip}:{port}  CODE {}    CREW {crew}", show_code(code))
+            // The code and crew go after the first address: both addresses on
+            // one line would reach the deck panel in the middle of the screen.
+            let rest = format!("  CODE {}    CREW {crew}", show_code(code));
+            let at = join_addresses(addresses.lan, addresses.tailscale, *port, &format!("{rest}\nTailscale "));
+            if at.contains('\n') { format!("HOSTING  {at}") } else { format!("HOSTING  {at}{rest}") }
         }
         NetMode::Join { addr, code } => format!("CREW {crew}    host {addr}  CODE {}", show_code(code)),
     };
@@ -1640,37 +1913,53 @@ fn update_session_hud(
         loot_left.0 = remaining;
     }
 
-    let warning = match (&*mode, prompt.timer > 0.0) {
-        (_, false) => "",
-        (NetMode::Host { .. }, true) => "Press ESC again to leave  (ends the session for your crew)",
-        (_, true) => "Press ESC again to leave to the main menu",
-    };
-    if leave.0 != warning {
-        leave.0 = warning.into();
-    }
+    let warning = if prompt.timer > 0.0 { leave_warning(&mode, GameState::Playing, *device) } else { String::new() };
     let display = if warning.is_empty() { Display::None } else { Display::Flex };
+    if leave.0 != warning {
+        leave.0 = warning;
+    }
     if leave_panel.display != display {
         leave_panel.display = display;
     }
 }
 
+/// What a second ESC (or Select) would do, from `state`.
+fn leave_warning(mode: &NetMode, state: GameState, device: LastDevice) -> String {
+    let key = device.glyph("ESC");
+    match (mode, state) {
+        (NetMode::Host { .. }, GameState::Lobby) => format!("Press {key} again to close the room for everyone"),
+        (_, GameState::Lobby) => format!("Press {key} again to leave the crew"),
+        (NetMode::Host { .. }, _) => format!("Press {key} again to end the run and take the crew back to the lobby"),
+        (NetMode::Join { .. }, _) => format!("Press {key} again to drop out to the crew lobby"),
+        (NetMode::Solo, _) => format!("Press {key} again to leave to the main menu"),
+    }
+}
+
+/// ESC (or a gamepad's Select) drops out of a run to the crew lobby, needing a
+/// second press mid-run so it can't end a raid by accident, and one from the
+/// results screen. In the lobby, a second press leaves the crew: needing it
+/// there too keeps a quick extra press after dropping out from leaving it.
 fn leave_on_escape(
     mut commands: Commands,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     state: Res<State<GameState>>,
     mut prompt: ResMut<LeavePrompt>,
 ) {
-    prompt.timer = (prompt.timer - time.delta_secs()).max(0.0);
-    if !keys.just_pressed(KeyCode::Escape) {
+    // A press armed on one screen doesn't carry over to the next.
+    prompt.timer = if state.is_changed() { 0.0 } else { (prompt.timer - time.delta_secs()).max(0.0) };
+    // A gamepad's Select (Back, View, Share) does what ESC does.
+    if !keys.just_pressed(KeyCode::Escape) && !pads.iter().any(|p| p.just_pressed(GamepadButton::Select)) {
         return;
     }
-    // Mid-run, ESC needs confirming so it can't end a raid by accident.
-    if matches!(state.get(), GameState::Over | GameState::Lobby) || prompt.timer > 0.0 {
-        prompt.timer = 0.0;
-        commands.trigger(EndSession(None));
-    } else {
-        prompt.timer = LEAVE_WINDOW;
+    let confirmed = prompt.timer > 0.0;
+    prompt.timer = 0.0;
+    match state.get() {
+        GameState::Over => commands.trigger(DropOut),
+        GameState::Playing if confirmed => commands.trigger(DropOut),
+        GameState::Lobby if confirmed => commands.trigger(EndSession(None)),
+        _ => prompt.timer = LEAVE_WINDOW,
     }
 }
 
@@ -1693,6 +1982,14 @@ struct CrewChip(usize);
 /// What the crew is waiting on before the run can start.
 #[derive(Component)]
 struct LobbyHint;
+
+/// A lobby button that only shows some of the time: START while the crew is
+/// all in the lobby, JOIN RUN while a joiner here could drop into a run.
+#[derive(Component, PartialEq, Eq)]
+enum LobbyButton {
+    Start,
+    JoinRun,
+}
 
 /// What to call the first pirate in the roster still choosing a class, if any.
 fn waiting_on(roster: &Roster) -> Option<String> {
@@ -1720,7 +2017,7 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
                 .spawn(Node { column_gap: Val::Px(12.0), align_items: AlignItems::Baseline, ..default() })
                 .with_children(|row| {
                     row.spawn((LobbyInfo, label("", 15.0, DIM)));
-                    row.spawn((LobbyCode, label("", 24.0, GOLD)));
+                    copyable_code(row, (LobbyCode, label("", 24.0, GOLD)));
                 });
             parent
                 .spawn(Node {
@@ -1747,10 +2044,13 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
             parent
                 .spawn(Node { column_gap: Val::Px(16.0), align_items: AlignItems::Center, ..default() })
                 .with_children(|buttons| {
+                    // Shown by `update_lobby`, as the host's phase changes under the screen.
                     if hosting {
-                        buttons.spawn(button("START", MenuCommand::StartRun));
+                        buttons.spawn((button("START", MenuCommand::StartRun), LobbyButton::Start));
+                    } else {
+                        buttons.spawn((button("JOIN RUN", MenuCommand::JoinRun), LobbyButton::JoinRun));
                     }
-                    buttons.spawn(button("LEAVE", MenuCommand::Leave));
+                    buttons.spawn(button(if hosting { "CLOSE ROOM" } else { "LEAVE CREW" }, MenuCommand::Leave));
                 });
             parent.spawn((LobbyHint, label("", 15.0, DIM)));
             parent.spawn(status_line());
@@ -1758,25 +2058,41 @@ fn lobby_screen(mut commands: Commands, assets: Res<AssetServer>, mode: Res<NetM
         });
 }
 
+/// Fills in the lobby, which works whatever the host is doing: a joiner who
+/// dropped out of a run, or arrived during one, waits here until they join in
+/// or the crew comes back.
 fn update_lobby(
     mode: Res<NetMode>,
     local: Res<LocalId>,
+    device: Res<LastDevice>,
+    prompt: Res<LeavePrompt>,
+    addresses: Res<HostAddresses>,
     roster: Option<Single<&Roster>>,
+    status: Option<Single<&MissionStatus>>,
+    players: Query<&Player>,
     mut info: Single<&mut Text, (With<LobbyInfo>, Without<LobbyHint>, Without<LobbyCode>)>,
     mut code: Single<&mut Text, (With<LobbyCode>, Without<LobbyHint>)>,
     mut hint: Single<&mut Text, (With<LobbyHint>, Without<LobbyInfo>)>,
+    mut buttons: Query<(&LobbyButton, &mut Node), Without<CrewChip>>,
     mut chips: Query<(&CrewChip, &mut Node, &mut BorderColor, &Children)>,
     mut chip_texts: Query<(&mut Text, &mut TextColor), (Without<LobbyInfo>, Without<LobbyHint>, Without<LobbyCode>)>,
-    mut ip: Local<Option<String>>,
 ) {
+    let phase = status.map_or(GameState::Lobby, |s| s.phase());
+    let host_name = roster.as_deref().and_then(|r| r.label(r.slot(HOST_ID)?));
     let (content, room) = match &*mode {
         NetMode::Host { port, code } => {
-            let ip = ip.get_or_insert_with(|| local_ip().map_or("?".into(), |ip| ip.to_string()));
-            let at = if *port == DEFAULT_PORT { ip.clone() } else { format!("{ip}:{port}") };
-            (format!("Friends join at  {at}  with room code"), show_code(code))
+            (format!("Friends join at  {}  with room code", addresses.line(*port)), show_code(code))
         }
         // So a joiner can pass it on too.
-        NetMode::Join { addr, code } => (format!("Aboard {addr}'s crew  -  room code"), show_code(code)),
+        NetMode::Join { addr, code } => {
+            let host = host_name.unwrap_or_else(|| addr.to_string());
+            let under_way = match phase {
+                GameState::Playing => "  -  run under way",
+                GameState::Over => "  -  run over",
+                _ => "",
+            };
+            (format!("Aboard {host}'s crew{under_way}  -  room code"), show_code(code))
+        }
         NetMode::Solo => (String::new(), String::new()),
     };
     if info.0 != content {
@@ -1786,7 +2102,20 @@ fn update_lobby(
         code.0 = room;
     }
 
+    let joiner = matches!(*mode, NetMode::Join { .. });
+    for (button, mut node) in &mut buttons {
+        let shown = match button {
+            LobbyButton::Start => phase == GameState::Lobby,
+            LobbyButton::JoinRun => joiner && phase == GameState::Playing,
+        };
+        let display = if shown { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+
     let Some(roster) = roster else { return };
+    let running = phase != GameState::Lobby;
     for (chip, mut node, mut border, children) in &mut chips {
         let entry = roster.0.get(chip.0);
         let display = if entry.is_some() { Display::Flex } else { Display::None };
@@ -1795,10 +2124,18 @@ fn update_lobby(
         }
         let (Some(entry), Some(name)) = (entry, roster.label(chip.0)) else { continue };
         let you = if entry.owner == local.0 { "  (you)" } else { "" };
-        let (content, color) = match entry.class {
+        // A pirate of their own is what puts a crewmate in the run.
+        let in_run = players.iter().any(|p| p.owner == entry.owner);
+        let (mut content, mut color) = match entry.class {
             Some(class) => (format!("{name}  {}{you}", class.name()), class.color()),
             None => (format!("{name}  choosing...{you}"), DIM),
         };
+        if running {
+            content += if in_run { "  -  in the run" } else { "  -  in the lobby" };
+            if !in_run {
+                color = DIM;
+            }
+        }
         border.set_if_neq(BorderColor { top: color, ..BorderColor::all(hud::EDGE) });
         if let Some(Ok((mut text, mut tint))) = children.first().map(|c| chip_texts.get_mut(*c)) {
             if text.0 != content {
@@ -1810,7 +2147,10 @@ fn update_lobby(
 
     let mine = roster.class_of(local.0);
     let content = match (waiting_on(&roster), &*mode) {
+        _ if prompt.timer > 0.0 => leave_warning(&mode, GameState::Lobby, *device),
         _ if mine.is_none() => "Your class is taken: pick a free one".to_string(),
+        _ if phase == GameState::Playing => "A run is under way: pick a free class and JOIN RUN to drop in".to_string(),
+        _ if phase == GameState::Over => "The crew is on the results screen: you'll be in the next run".to_string(),
         (Some(name), _) => format!("Waiting for {name} to pick a class"),
         (None, NetMode::Host { .. }) => "Everyone's ready. Start when you are".to_string(),
         (None, _) => "Waiting for the host to start".to_string(),
@@ -1838,7 +2178,17 @@ mod tests {
     use crate::crew::Crewmate;
 
     fn field(kind: FieldKind, max_len: usize) -> TextField {
-        TextField { value: String::new(), max_len, kind, submit: MenuCommand::Back, focused: true }
+        TextField::new(kind, "", max_len, MenuCommand::Back, true)
+    }
+
+    fn code_field() -> TextField {
+        field(FieldKind::Code, CODE_LEN)
+    }
+
+    /// The field's text with `|` at the caret.
+    fn shown(field: &TextField) -> String {
+        let (before, after) = field.split();
+        format!("{before}|{after}")
     }
 
     fn crewmate(owner: u64, class: Option<PirateClass>, name: &str) -> Crewmate {
@@ -1858,9 +2208,9 @@ mod tests {
     #[test]
     fn typing_stops_at_the_field_limit() {
         let mut name = field(FieldKind::Name, NAME_LEN);
-        name.type_in("Dread");
-        name.type_in(" ");
-        name.type_in("Pirate Roberts");
+        name.insert("Dread");
+        name.insert(" ");
+        name.insert("Pirate Roberts");
         assert_eq!(name.value, "Dread Pirate");
         assert_eq!(name.value.len(), NAME_LEN);
     }
@@ -1868,14 +2218,160 @@ mod tests {
     #[test]
     fn only_a_name_takes_spaces_and_only_a_code_is_capitalised() {
         let mut address = field(FieldKind::Address, 40);
-        address.type_in("10.0.0.1 ");
+        address.insert("10.0.0.1 ");
         assert_eq!(address.value, "10.0.0.1");
-        let mut code = field(FieldKind::Code, CODE_LEN + 1);
-        code.type_in("ab-c");
-        assert_eq!(code.value, "AB-C");
+        let mut code = code_field();
+        code.insert("ab-c d");
+        assert_eq!(code.value, "ABCD-", "the dash comes by itself; typed ones and spaces don't count");
         let mut name = field(FieldKind::Name, NAME_LEN);
-        name.type_in("ab");
+        name.insert("ab");
         assert_eq!(name.value, "ab");
+    }
+
+    #[test]
+    fn the_caret_moves_and_edits_where_it_is() {
+        let mut name = field(FieldKind::Name, NAME_LEN);
+        name.insert("Mira");
+        assert_eq!(shown(&name), "Mira|");
+        name.step(-2);
+        assert_eq!(shown(&name), "Mi|ra");
+        name.insert("XY");
+        assert_eq!(shown(&name), "MiXY|ra");
+        name.backspace();
+        assert_eq!(shown(&name), "MiX|ra");
+        name.delete();
+        assert_eq!(shown(&name), "MiX|a");
+        name.home();
+        assert_eq!(shown(&name), "|MiXa");
+        name.step(-1);
+        name.backspace();
+        assert_eq!(shown(&name), "|MiXa", "nothing before the start");
+        name.end();
+        name.step(1);
+        name.delete();
+        assert_eq!(shown(&name), "MiXa|", "nothing after the end");
+    }
+
+    #[test]
+    fn inserting_mid_field_still_stops_at_the_limit() {
+        let mut port = field(FieldKind::Port, 5);
+        port.insert("5000");
+        port.home();
+        port.insert("123");
+        assert_eq!(shown(&port), "1|5000");
+    }
+
+    #[test]
+    fn a_caret_off_a_character_boundary_does_not_panic() {
+        let mut name = field(FieldKind::Name, NAME_LEN);
+        name.value = "\u{e9}a".into();
+        name.caret = 1;
+        assert_eq!(name.split(), ("\u{e9}a", ""));
+        name.backspace();
+        assert_eq!(name.value, "\u{e9}");
+        name.caret = 99;
+        name.step(-1);
+        assert_eq!(shown(&name), "|\u{e9}");
+    }
+
+    #[test]
+    fn pasting_keeps_only_what_the_field_takes() {
+        let mut address = field(FieldKind::Address, 40);
+        address.insert(" 192.168.1.23:5000\n");
+        assert_eq!(address.value, "192.168.1.23:5000");
+        let mut port = field(FieldKind::Port, 5);
+        port.insert("port 7777!");
+        assert_eq!(port.value, "7777");
+        let mut name = field(FieldKind::Name, NAME_LEN);
+        name.insert("Mira\tthe \u{e9}Bold\n");
+        assert_eq!(name.value, "Mirathe Bold");
+    }
+
+    #[test]
+    fn a_code_gets_its_dash_however_it_comes() {
+        let mut code = code_field();
+        for (typed, value) in [("k", "K"), ("7", "K7"), ("q", "K7Q"), ("f", "K7QF-"), ("-", "K7QF-"), ("2", "K7QF-2")] {
+            code.insert(typed);
+            assert_eq!(code.value, value, "after typing {typed:?}");
+        }
+        for pasted in ["k7qf29xa", "K7QF-29XA", "k7qf 29xa", " K7QF-29XA\n", "k7qf29xa99"] {
+            let mut code = code_field();
+            code.insert(pasted);
+            assert_eq!(shown(&code), "K7QF-29XA|", "pasting {pasted:?}");
+            assert!(parse_code(&code.value).is_ok());
+        }
+    }
+
+    #[test]
+    fn backspace_takes_the_dash_with_the_letter_before_it() {
+        let mut code = code_field();
+        code.insert("K7QF");
+        assert_eq!(shown(&code), "K7QF-|");
+        code.backspace();
+        assert_eq!(shown(&code), "K7Q|");
+        code.insert("F2");
+        code.backspace();
+        code.backspace();
+        assert_eq!(shown(&code), "K7Q|", "never stuck on the dash");
+    }
+
+    #[test]
+    fn the_caret_skips_a_codes_dash() {
+        let mut code = code_field();
+        code.insert("K7QF29XA");
+        code.step(-4);
+        assert_eq!(shown(&code), "K7QF-|29XA", "after the dash, by the letter after it");
+        code.step(-1);
+        assert_eq!(shown(&code), "K7Q|F-29XA");
+        code.step(1);
+        assert_eq!(shown(&code), "K7QF-|29XA");
+        code.backspace();
+        assert_eq!(shown(&code), "K7Q|2-9XA", "the letters close up round the dash");
+        code.insert("f");
+        assert_eq!(shown(&code), "K7QF-|29XA");
+        code.home();
+        code.delete();
+        assert_eq!(shown(&code), "|7QF2-9XA");
+        code.insert("zz");
+        assert_eq!(shown(&code), "Z|7QF-29XA", "a full code takes no more");
+    }
+
+    #[test]
+    fn a_remembered_code_comes_back_dashed() {
+        let code = TextField::new(FieldKind::Code, "k7qf29xa", CODE_LEN, MenuCommand::Connect, true);
+        assert_eq!(shown(&code), "K7QF-29XA|");
+    }
+
+    #[test]
+    fn the_crew_joins_on_every_address_shown() {
+        let lan: IpAddr = "192.168.1.23".parse().unwrap();
+        let tailnet: IpAddr = "100.95.119.29".parse().unwrap();
+        let or = "  or over Tailscale  ";
+        assert_eq!(join_addresses(Some(lan), None, DEFAULT_PORT, or), "192.168.1.23");
+        assert_eq!(
+            join_addresses(Some(lan), Some(tailnet), DEFAULT_PORT, or),
+            "192.168.1.23  or over Tailscale  100.95.119.29"
+        );
+        assert_eq!(join_addresses(Some(tailnet), Some(tailnet), DEFAULT_PORT, or), "100.95.119.29  (Tailscale)");
+        assert_eq!(join_addresses(None, Some(tailnet), 7777, or), "100.95.119.29:7777  (Tailscale)");
+        assert_eq!(
+            join_addresses(Some(lan), Some(tailnet), 7777, or),
+            "192.168.1.23:7777  or over Tailscale  100.95.119.29:7777"
+        );
+        assert_eq!(join_addresses(None, None, DEFAULT_PORT, or), "<your IP>");
+    }
+
+    #[test]
+    fn a_second_escape_warns_what_it_will_do() {
+        let host = NetMode::Host { port: DEFAULT_PORT, code: "K7QF29XA".into() };
+        let join = NetMode::Join { addr: "192.168.1.23:5000".parse().unwrap(), code: "K7QF29XA".into() };
+        let warn = |mode: &NetMode, state| leave_warning(mode, state, LastDevice::Keys);
+        assert!(warn(&host, GameState::Playing).contains("take the crew back to the lobby"));
+        assert!(warn(&join, GameState::Playing).contains("drop out to the crew lobby"));
+        assert!(warn(&NetMode::Solo, GameState::Playing).contains("main menu"));
+        assert!(warn(&host, GameState::Lobby).contains("close the room"));
+        assert!(warn(&join, GameState::Lobby).contains("leave the crew"));
+        assert!(leave_warning(&join, GameState::Lobby, LastDevice::Pad).starts_with("Press SELECT"));
     }
 
     #[test]
